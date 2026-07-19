@@ -624,6 +624,17 @@ public sealed class Dx12Camera : IDisposable
         _previewHost?.UpdateTrackingOverlay(overlay);
     }
 
+    public void ResumePreview()
+    {
+        if (_disposed)
+        {
+            return;
+        }
+
+        _lastPreviewRenderFrameUtc = DateTime.MinValue;
+        _previewHost?.ResumeRendering();
+    }
+
     public void UpdateRenderSettings(
         bool denoiseEnabled,
         double denoiseStrength,

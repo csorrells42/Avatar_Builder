@@ -352,7 +352,8 @@ internal interface IMFSourceReader
     [PreserveSig] int GetCurrentMediaType(int streamIndex, out IMFMediaType mediaType);
     [PreserveSig] int SetCurrentMediaType(int streamIndex, IntPtr reserved, IMFMediaType mediaType);
     [PreserveSig] int SetCurrentPosition(in Guid timeFormat, IntPtr position);
-    [PreserveSig] int ReadSample(
+    [PreserveSig]
+    int ReadSample(
         int streamIndex,
         int controlFlags,
         out int actualStreamIndex,

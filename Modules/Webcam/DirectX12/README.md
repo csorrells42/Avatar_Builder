@@ -7,6 +7,7 @@ Responsibilities:
 - Prefer validated NV12 staging uploads for D3D11 cameras; import a shared NT texture only when a valid NV12 payload is unavailable.
 - Reuse pooled NV12 frame buffers and coalesce upload work to the newest frame instead of building a preview queue.
 - Render face/eye/mouth regions plus face, jaw, brow, eye, and inner/outer-lip contours through one bounded instanced DX12 draw call.
+- Composite tracking geometry after the camera draw on every native-texture, shared-bridge, NV12-upload, and BGRA fallback route.
 - Own GPU denoise and color-polish shader paths for preview.
 - Manage texture-native camera stream preview.
 - Report the active GPU preview path, render FPS, dropped frames, format, processing state, recording mode, and fallback reason.
@@ -31,6 +32,7 @@ Timing invariant:
 - If no valid payload exists, `TextureNativeCameraRecorder` may copy into the shared bridge texture.
 - `Direct3D12PreviewHost` must finish that shared-texture presentation and call `WaitForGpu()` before capture may copy another frame into the bridge texture.
 - Analysis receives `DuplicatePreviewData()`, which owns only the pooled CPU bytes.
+- `HwndHost` owns native window airspace. Never place a WPF overlay above the DX12 child window; composite it into the swap-chain render pass.
 
 Drop-in boundary:
 - Use `ICameraPreviewPresenter` when another program needs a camera preview surface without knowing whether the backing renderer is DX12, WPF, or a fallback.

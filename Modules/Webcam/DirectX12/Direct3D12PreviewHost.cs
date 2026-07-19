@@ -271,6 +271,21 @@ public sealed class Direct3D12PreviewHost : WebcamDirectX12ViewportHost, ICamera
         Volatile.Write(ref _trackingOverlay, overlay ?? PreviewTrackingOverlay.Empty);
     }
 
+    public void ResumeRendering()
+    {
+        if (_disposed)
+        {
+            return;
+        }
+
+        lock (_renderThrottleLock)
+        {
+            _lastAcceptedRenderFrameUtc = DateTime.MinValue;
+        }
+
+        _renderFrameReady.Set();
+    }
+
     private void RenderTextureFrameCore(QueuedTextureFrame queuedFrame)
     {
         var frame = queuedFrame.Frame;
@@ -449,7 +464,8 @@ public sealed class Direct3D12PreviewHost : WebcamDirectX12ViewportHost, ICamera
                                 frame.FrameNumber,
                                 frame.ColorSettings,
                                 frame.DenoiseEnabled,
-                                frame.DenoiseStrength);
+                                frame.DenoiseStrength,
+                                Volatile.Read(ref _trackingOverlay));
                         }
 
                         ReportPreviewPath("DX12 BGRA upload preview");
@@ -968,7 +984,8 @@ public sealed class Direct3D12PreviewHost : WebcamDirectX12ViewportHost, ICamera
             long frameNumber,
             VideoFrameColorSettings colorSettings = default,
             bool denoiseEnabled = false,
-            double denoiseStrength = 0d)
+            double denoiseStrength = 0d,
+            PreviewTrackingOverlay? trackingOverlay = null)
         {
             if (_disposed || bgraBytes.Length < stride * height)
             {
@@ -980,12 +997,21 @@ public sealed class Direct3D12PreviewHost : WebcamDirectX12ViewportHost, ICamera
                 Resize(width, height);
             }
 
-            if (TryRenderBgraFrameWithShader(bgraBytes, width, height, stride, colorSettings, denoiseEnabled, denoiseStrength))
+            var overlay = trackingOverlay ?? PreviewTrackingOverlay.Empty;
+            if (TryRenderBgraFrameWithShader(
+                bgraBytes,
+                width,
+                height,
+                stride,
+                colorSettings,
+                denoiseEnabled,
+                denoiseStrength,
+                overlay))
             {
                 return;
             }
 
-            RenderBgraFrameToBackBuffer(bgraBytes, height, stride);
+            RenderBgraFrameToBackBuffer(bgraBytes, height, stride, overlay);
         }
 
         public unsafe bool RenderNv12Frame(
@@ -1376,7 +1402,8 @@ public sealed class Direct3D12PreviewHost : WebcamDirectX12ViewportHost, ICamera
             int stride,
             VideoFrameColorSettings colorSettings,
             bool denoiseEnabled,
-            double denoiseStrength)
+            double denoiseStrength,
+            PreviewTrackingOverlay trackingOverlay)
         {
             if (_shaderPreviewUnavailable || _previewRootSignature is null || _previewPipelineState is null)
             {
@@ -1443,6 +1470,7 @@ public sealed class Direct3D12PreviewHost : WebcamDirectX12ViewportHost, ICamera
                 _commandList.OMSetRenderTargets(rtvHandle, null);
                 _commandList.IASetPrimitiveTopology(PrimitiveTopology.TriangleList);
                 _commandList.DrawInstanced(3, 1, 0, 0);
+                _trackingOverlayRenderer?.Draw(_commandList, frameIndex, _width, _height, trackingOverlay);
 
                 var toPresent = ResourceBarrier.BarrierTransition(
                     renderTarget,
@@ -1459,7 +1487,11 @@ public sealed class Direct3D12PreviewHost : WebcamDirectX12ViewportHost, ICamera
             }
         }
 
-        private unsafe void RenderBgraFrameToBackBuffer(byte[] bgraBytes, int height, int stride)
+        private unsafe void RenderBgraFrameToBackBuffer(
+            byte[] bgraBytes,
+            int height,
+            int stride,
+            PreviewTrackingOverlay trackingOverlay)
         {
             var frameResource = BeginFrame(out var frameIndex);
             var renderTarget = _renderTargets[frameIndex] ?? throw new InvalidOperationException("DX12 render target is not ready.");
@@ -1485,9 +1517,21 @@ public sealed class Direct3D12PreviewHost : WebcamDirectX12ViewportHost, ICamera
 
             frameResource.CommandAllocator.Reset();
             _commandList.Reset(frameResource.CommandAllocator);
-            var toPresent = ResourceBarrier.BarrierTransition(
+            var toRenderTarget = ResourceBarrier.BarrierTransition(
                 renderTarget,
                 ResourceStates.Common,
+                ResourceStates.RenderTarget);
+            _commandList.ResourceBarrier([toRenderTarget]);
+            var rtvHandle = GetRtvHandle(frameIndex);
+            var viewport = new Viewport(0, 0, _width, _height);
+            var scissor = new RawRect(0, 0, _width, _height);
+            _commandList.RSSetViewports(viewport);
+            _commandList.RSSetScissorRects(scissor);
+            _commandList.OMSetRenderTargets(rtvHandle, null);
+            _trackingOverlayRenderer?.Draw(_commandList, frameIndex, _width, _height, trackingOverlay);
+            var toPresent = ResourceBarrier.BarrierTransition(
+                renderTarget,
+                ResourceStates.RenderTarget,
                 ResourceStates.Present);
             _commandList.ResourceBarrier([toPresent]);
             ExecuteAndPresent(frameResource);

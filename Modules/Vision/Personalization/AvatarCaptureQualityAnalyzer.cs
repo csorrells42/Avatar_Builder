@@ -134,10 +134,10 @@ public sealed class AvatarCaptureQualityAnalyzer
 
         var pixelScore = (width, height) switch
         {
-            (>= 3840, >= 2160) => 100d,
-            (>= 2560, >= 1440) => 84d,
-            (>= 1920, >= 1080) => 68d,
-            (>= 1280, >= 720) => 45d,
+            ( >= 3840, >= 2160) => 100d,
+            ( >= 2560, >= 1440) => 84d,
+            ( >= 1920, >= 1080) => 68d,
+            ( >= 1280, >= 720) => 45d,
             _ => 25d
         };
         if (width < 1920 || height < 1080)

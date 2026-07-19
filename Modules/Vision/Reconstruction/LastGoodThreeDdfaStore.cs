@@ -56,24 +56,24 @@ public sealed class LastGoodThreeDdfaStore
         var persisted = observationSet.Observations
             .Where(static observation => observation.Vertices.Count > 0)
             .Select(static observation => new ThreeDdfaReconstructionSnapshot
-        {
-            RequestId = observation.RequestId,
-            CapturedAtUtc = observation.CapturedAtUtc,
-            Source = observation.Source,
-            DenseVertexCount = observation.Vertices.Count,
-            DenseSampleStride = 1,
-            ReconstructionConfidencePercent = observation.ReconstructionConfidencePercent,
-            ARotationAroundXDegrees = observation.ARotationAroundXDegrees,
-            BRotationAroundYDegrees = observation.BRotationAroundYDegrees,
-            CRotationAroundZDegrees = observation.CRotationAroundZDegrees,
-            PoseSource = "3DDFA_V2 ONNX",
-            TrustDecision = observation.TrustDecision,
-            Vertices = observation.Vertices,
-            CameraMatrixCoefficients = observation.CameraMatrixCoefficients,
-            ShapeCoefficients = observation.ShapeCoefficients,
-            ExpressionCoefficients = observation.ExpressionCoefficients,
-            Warnings = observation.Warnings
-        });
+            {
+                RequestId = observation.RequestId,
+                CapturedAtUtc = observation.CapturedAtUtc,
+                Source = observation.Source,
+                DenseVertexCount = observation.Vertices.Count,
+                DenseSampleStride = 1,
+                ReconstructionConfidencePercent = observation.ReconstructionConfidencePercent,
+                ARotationAroundXDegrees = observation.ARotationAroundXDegrees,
+                BRotationAroundYDegrees = observation.BRotationAroundYDegrees,
+                CRotationAroundZDegrees = observation.CRotationAroundZDegrees,
+                PoseSource = "3DDFA_V2 ONNX",
+                TrustDecision = observation.TrustDecision,
+                Vertices = observation.Vertices,
+                CameraMatrixCoefficients = observation.CameraMatrixCoefficients,
+                ShapeCoefficients = observation.ShapeCoefficients,
+                ExpressionCoefficients = observation.ExpressionCoefficients,
+                Warnings = observation.Warnings
+            });
         var combined = currentSamples is { Count: > 0 }
             ? persisted.Concat(currentSamples)
             : persisted;

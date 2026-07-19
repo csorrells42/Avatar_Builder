@@ -12,6 +12,7 @@
         Background="#080d12"
         Foreground="#f5f8fb"
         Loaded="WindowLoaded"
+        Activated="WindowActivated"
         Closing="WindowClosing">
     <Window.Resources>
         <SolidColorBrush x:Key="PanelBrush" Color="#101820" />

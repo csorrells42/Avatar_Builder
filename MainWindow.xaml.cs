@@ -45,6 +45,7 @@ public partial class MainWindow : Window
     private const double Insta360Link2ProHorizontalFovDegrees = 71.4d;
     private const string AvatarArchiveFolderName = "AvatarArchive";
     private static readonly TimeSpan FaceFeatureDetectionTargetInterval = TimeSpan.FromMilliseconds(15);
+    private static readonly TimeSpan RecoverableVisionErrorStatusInterval = TimeSpan.FromSeconds(3);
     private static readonly SolidColorBrush StartActionButtonBackground = CreateFrozenBrush(0x1f, 0x7a, 0x43);
     private static readonly SolidColorBrush StartActionButtonBorder = CreateFrozenBrush(0x52, 0xc4, 0x7b);
     private static readonly SolidColorBrush StopActionButtonBackground = CreateFrozenBrush(0x9d, 0x2f, 0x2f);
@@ -149,6 +150,7 @@ public partial class MainWindow : Window
     private int _previewWarningPending;
     private int _faceFeatureDetectionPending;
     private int _threeDdfaOnnxReconstructionPending;
+    private long _lastRecoverableVisionErrorStatusTicks;
     private long _directX12FrameNumber;
     private int _directX12AnalysisWorkerQueued;
     private int _automaticCameraRecoveryAttempts;
@@ -241,6 +243,26 @@ public partial class MainWindow : Window
         _cameraHealthTimer.Start();
         Dispatcher.InvokeAsync(async () => await RefreshCamerasAsync(), DispatcherPriority.ApplicationIdle);
         Dispatcher.InvokeAsync(ApplyStartupOptionsAfterLoad, DispatcherPriority.ApplicationIdle);
+    }
+
+    private void WindowActivated(object? sender, EventArgs e)
+    {
+        if (!IsLoaded || _isClosing || !_isCameraEnabled)
+        {
+            return;
+        }
+
+        _directX12NativeCamera?.ResumePreview();
+        _lastDirectX12AnalysisFrameAtUtc = DateTime.MinValue;
+
+        var frame = _latestFrame;
+        if (frame is not null)
+        {
+            _lastFaceFeatureDetectionAt = DateTime.MinValue;
+            QueueFaceFeatureDetection(frame, DateTime.UtcNow);
+        }
+
+        UpdateFaceCueGuideOverlay(frame);
     }
 
     private void ApplyStartupOptionsAfterLoad()
@@ -582,6 +604,10 @@ public partial class MainWindow : Window
         _previewService.FrameAvailable -= PreviewFrameAvailable;
         _previewService.CameraFrameAvailable -= PreviewCameraFrameAvailable;
         _previewService.StatusChanged -= PreviewStatusChanged;
+        DisposeDirectX12NativeCamera();
+        DisposeDirectX12PreviewHost();
+        _previewService.Dispose();
+        ResetPreviewFramePump();
         CompositeFaceLandmarkTracker? tracker;
         lock (_faceLandmarkTrackerLock)
         {
@@ -601,8 +627,6 @@ public partial class MainWindow : Window
         avatarClient?.Dispose();
         faceBoxClient?.Dispose();
         _visionBenchmarkRecorder.Dispose();
-        DisposeDirectX12PreviewHost();
-        _previewService.Dispose();
     }
 
     private async void RefreshCamerasClicked(object sender, RoutedEventArgs e)
@@ -1479,6 +1503,7 @@ public partial class MainWindow : Window
             _lastDirectX12AnalysisFrameAtUtc = DateTime.MinValue;
             PreviewImage.Visibility = Visibility.Collapsed;
             PreviewPlaceholder.Visibility = Visibility.Collapsed;
+            UpdateFaceCueGuideOverlay(_latestFrame);
             return true;
         }
         catch (Exception ex)
@@ -1555,7 +1580,13 @@ public partial class MainWindow : Window
         }
 
         replacedFrame?.Dispose();
-        if (Interlocked.Exchange(ref _directX12AnalysisWorkerQueued, 1) == 0)
+        StartDirectX12AnalysisWorkerIfNeeded();
+    }
+
+    private void StartDirectX12AnalysisWorkerIfNeeded()
+    {
+        if (!_isClosing
+            && Interlocked.CompareExchange(ref _directX12AnalysisWorkerQueued, 1, 0) == 0)
         {
             _ = Task.Run(ProcessPendingDirectX12AnalysisFrames);
         }
@@ -1563,40 +1594,51 @@ public partial class MainWindow : Window
 
     private void ProcessPendingDirectX12AnalysisFrames()
     {
-        while (!_isClosing)
+        try
         {
-            TextureNativeFrameLease? frame;
-            lock (_directX12AnalysisFrameLock)
+            while (!_isClosing)
             {
-                frame = _pendingDirectX12AnalysisFrame;
-                _pendingDirectX12AnalysisFrame = null;
-            }
-
-            if (frame is null)
-            {
-                break;
-            }
-
-            try
-            {
-                if (TryCreateBitmapFromDirectX12TextureFrame(frame, out var bitmap))
+                TextureNativeFrameLease? frame;
+                lock (_directX12AnalysisFrameLock)
                 {
-                    PreviewFrameAvailable(this, bitmap);
+                    frame = _pendingDirectX12AnalysisFrame;
+                    _pendingDirectX12AnalysisFrame = null;
+                }
+
+                if (frame is null)
+                {
+                    break;
+                }
+
+                try
+                {
+                    if (TryCreateBitmapFromDirectX12TextureFrame(frame, out var bitmap))
+                    {
+                        PreviewFrameAvailable(this, bitmap);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    ReportRecoverableVisionError($"DX12 analysis skipped one frame and recovered: {ex.Message}");
+                }
+                finally
+                {
+                    frame.Dispose();
                 }
             }
-            finally
-            {
-                frame.Dispose();
-            }
         }
-
-        Interlocked.Exchange(ref _directX12AnalysisWorkerQueued, 0);
-        lock (_directX12AnalysisFrameLock)
+        finally
         {
-            if (_pendingDirectX12AnalysisFrame is not null
-                && Interlocked.Exchange(ref _directX12AnalysisWorkerQueued, 1) == 0)
+            Interlocked.Exchange(ref _directX12AnalysisWorkerQueued, 0);
+            bool hasPendingFrame;
+            lock (_directX12AnalysisFrameLock)
             {
-                _ = Task.Run(ProcessPendingDirectX12AnalysisFrames);
+                hasPendingFrame = _pendingDirectX12AnalysisFrame is not null;
+            }
+
+            if (hasPendingFrame)
+            {
+                StartDirectX12AnalysisWorkerIfNeeded();
             }
         }
     }
@@ -1858,7 +1900,7 @@ public partial class MainWindow : Window
             {
                 _lastPreviewFrameAcceptedAt = DateTime.UtcNow;
                 _latestFrame = frame;
-                if (!_showLiveWireframePreview && !IsNativeDirectX12PreviewActive())
+                if (!_showLiveWireframePreview && !IsDirectX12PreviewSurfaceActive())
                 {
                     SetPreviewState("Camera active", frame);
                 }
@@ -1995,8 +2037,7 @@ public partial class MainWindow : Window
         {
             PreviewImage.Source = null;
             PreviewImage.Visibility = Visibility.Collapsed;
-            DirectX12PreviewLayer.Visibility = directX12Enabled
-                && (_directX12PreviewHost is not null || _directX12NativeCamera is not null)
+            DirectX12PreviewLayer.Visibility = IsDirectX12PreviewSurfaceActive()
                 ? Visibility.Visible
                 : Visibility.Collapsed;
             PreviewPlaceholder.Visibility = DirectX12PreviewLayer.Visibility == Visibility.Visible
@@ -2012,6 +2053,7 @@ public partial class MainWindow : Window
             PreviewImage.Source = null;
             PreviewImage.Visibility = Visibility.Collapsed;
             PreviewPlaceholder.Visibility = Visibility.Collapsed;
+            UpdateFaceCueGuideOverlay(frame as BitmapSource);
             return;
         }
 
@@ -2032,10 +2074,27 @@ public partial class MainWindow : Window
         UpdateFaceCueGuideOverlay(frame as BitmapSource);
     }
 
-    private bool IsNativeDirectX12PreviewActive()
+    private bool IsDirectX12PreviewSurfaceActive()
     {
-        return IsDirectX12PreviewEnabled()
-            && _directX12NativeCamera is not null;
+        if (!IsDirectX12PreviewEnabled())
+        {
+            return false;
+        }
+
+        if (_directX12NativeCamera is not null)
+        {
+            return true;
+        }
+
+        return GetDirectX12PreviewHost() is not null;
+    }
+
+    private Direct3D12PreviewHost? GetDirectX12PreviewHost()
+    {
+        lock (_directX12PreviewLock)
+        {
+            return _directX12PreviewHost;
+        }
     }
 
     private void PreviewHostSizeChanged(object sender, SizeChangedEventArgs e)
@@ -2258,13 +2317,6 @@ public partial class MainWindow : Window
             && response.HasFace
             && response.DenseVertexCount >= 30000
             && response.ReconstructionConfidencePercent >= 70d;
-    }
-
-    private static bool IsLegacyMissingBRotationFinding(string? text)
-    {
-        return !string.IsNullOrWhiteSpace(text)
-            && (text.Contains("C rotation changes but no B rotation changes", StringComparison.OrdinalIgnoreCase)
-                || text.Contains("head A/B rotations are not moving", StringComparison.OrdinalIgnoreCase));
     }
 
     private string FormatThreeDdfaPoseCrossCheck()
@@ -2692,7 +2744,13 @@ public partial class MainWindow : Window
             _pendingFaceBoxSystemGeneration = _faceBoxSystemGeneration;
         }
 
-        if (Interlocked.Exchange(ref _faceFeatureDetectionPending, 1) == 0)
+        StartFaceFeatureDetectionWorkerIfNeeded();
+    }
+
+    private void StartFaceFeatureDetectionWorkerIfNeeded()
+    {
+        if (!_isClosing
+            && Interlocked.CompareExchange(ref _faceFeatureDetectionPending, 1, 0) == 0)
         {
             _ = Task.Run(ProcessPendingFaceFeatureDetectionFramesAsync);
         }
@@ -2700,57 +2758,80 @@ public partial class MainWindow : Window
 
     private async Task ProcessPendingFaceFeatureDetectionFramesAsync()
     {
-        while (!_isClosing)
+        try
         {
-            BitmapSource? bitmap;
-            DateTime capturedAtUtc;
-            FaceBoxSystem faceBoxSystem;
-            int faceBoxSystemGeneration;
-            lock (_faceFeatureDetectionFrameLock)
+            while (!_isClosing)
             {
-                bitmap = _pendingFaceFeatureDetectionFrame;
-                capturedAtUtc = _pendingFaceFeatureDetectionCapturedAtUtc;
-                faceBoxSystem = _pendingFaceBoxSystem;
-                faceBoxSystemGeneration = _pendingFaceBoxSystemGeneration;
-                _pendingFaceFeatureDetectionFrame = null;
-                _pendingFaceFeatureDetectionCapturedAtUtc = DateTime.MinValue;
-            }
-
-            if (bitmap is null)
-            {
-                break;
-            }
-
-            try
-            {
-                if (faceBoxSystemGeneration != _faceBoxSystemGeneration
-                    || faceBoxSystem != _selectedFaceBoxSystem)
+                BitmapSource? bitmap;
+                DateTime capturedAtUtc;
+                FaceBoxSystem faceBoxSystem;
+                int faceBoxSystemGeneration;
+                lock (_faceFeatureDetectionFrameLock)
                 {
-                    continue;
+                    bitmap = _pendingFaceFeatureDetectionFrame;
+                    capturedAtUtc = _pendingFaceFeatureDetectionCapturedAtUtc;
+                    faceBoxSystem = _pendingFaceBoxSystem;
+                    faceBoxSystemGeneration = _pendingFaceBoxSystemGeneration;
+                    _pendingFaceFeatureDetectionFrame = null;
+                    _pendingFaceFeatureDetectionCapturedAtUtc = DateTime.MinValue;
                 }
 
-                var trackingResult = DetectFaceBox(
-                    bitmap,
-                    capturedAtUtc == DateTime.MinValue ? DateTime.UtcNow : capturedAtUtc,
-                    faceBoxSystem,
-                    faceBoxSystemGeneration);
-                await ApplyFaceFeatureDetectionResultAsync(trackingResult);
+                if (bitmap is null)
+                {
+                    break;
+                }
+
+                try
+                {
+                    if (faceBoxSystemGeneration != _faceBoxSystemGeneration
+                        || faceBoxSystem != _selectedFaceBoxSystem)
+                    {
+                        continue;
+                    }
+
+                    var trackingResult = DetectFaceBox(
+                        bitmap,
+                        capturedAtUtc == DateTime.MinValue ? DateTime.UtcNow : capturedAtUtc,
+                        faceBoxSystem,
+                        faceBoxSystemGeneration);
+                    await ApplyFaceFeatureDetectionResultAsync(trackingResult);
+                }
+                catch (Exception ex)
+                {
+                    ReportRecoverableVisionError($"Landmark tracker skipped one frame and recovered: {ex.Message}");
+                }
             }
-            catch (Exception ex)
+        }
+        finally
+        {
+            Interlocked.Exchange(ref _faceFeatureDetectionPending, 0);
+            bool hasPendingFrame;
+            lock (_faceFeatureDetectionFrameLock)
             {
-                await Dispatcher.InvokeAsync(() => SetStatus($"Landmark tracker paused: {ex.Message}"), DispatcherPriority.Background);
+                hasPendingFrame = _pendingFaceFeatureDetectionFrame is not null;
             }
+
+            if (hasPendingFrame)
+            {
+                StartFaceFeatureDetectionWorkerIfNeeded();
+            }
+        }
+    }
+
+    private void ReportRecoverableVisionError(string status)
+    {
+        var nowTicks = DateTime.UtcNow.Ticks;
+        var previousTicks = Interlocked.Read(ref _lastRecoverableVisionErrorStatusTicks);
+        if (nowTicks - previousTicks < RecoverableVisionErrorStatusInterval.Ticks
+            || Interlocked.CompareExchange(
+                ref _lastRecoverableVisionErrorStatusTicks,
+                nowTicks,
+                previousTicks) != previousTicks)
+        {
+            return;
         }
 
-        Interlocked.Exchange(ref _faceFeatureDetectionPending, 0);
-        lock (_faceFeatureDetectionFrameLock)
-        {
-            if (_pendingFaceFeatureDetectionFrame is not null
-                && Interlocked.Exchange(ref _faceFeatureDetectionPending, 1) == 0)
-            {
-                _ = Task.Run(ProcessPendingFaceFeatureDetectionFramesAsync);
-            }
-        }
+        Dispatcher.InvokeAsync(() => SetStatus(status), DispatcherPriority.Background);
     }
 
     private FaceBoxTrackingFrameResult DetectFaceBox(
@@ -3276,12 +3357,6 @@ public partial class MainWindow : Window
     {
         return _currentFaceFeatureDetection.HasFace
             && (now - _lastFaceFeatureLockAt).TotalSeconds <= 4d;
-    }
-
-    private bool HasFreshFaceFeatureLock(DateTime now)
-    {
-        return _currentFaceFeatureDetection.HasFace
-            && (now - _lastFaceFeatureLockAt).TotalSeconds <= 1.5d;
     }
 
     private void ResetLandmarkTracking()
@@ -3917,26 +3992,6 @@ public partial class MainWindow : Window
         return Path.Combine(AppContext.BaseDirectory, "AvatarBuilderSessions");
     }
 
-    private static string FormatBytes(long bytes)
-    {
-        if (bytes < 1024L)
-        {
-            return $"{Math.Max(0L, bytes).ToString(CultureInfo.InvariantCulture)} B";
-        }
-
-        var size = (double)Math.Max(0L, bytes);
-        var units = new[] { "KB", "MB", "GB", "TB" };
-        var unitIndex = -1;
-        do
-        {
-            size /= 1024d;
-            unitIndex++;
-        }
-        while (size >= 1024d && unitIndex < units.Length - 1);
-
-        return $"{size:0.##} {units[unitIndex]}";
-    }
-
     private string PrepareAvatarCaptureFolder(bool showStatus)
     {
         var folder = GetAvatarDataFolder();
@@ -4209,14 +4264,16 @@ public partial class MainWindow : Window
         FaceCueGuideCanvas.Children.Clear();
         if (_showLiveWireframePreview)
         {
-            _directX12NativeCamera?.UpdateTrackingOverlay(PreviewTrackingOverlay.Empty);
+            UpdateDirectX12TrackingOverlay(PreviewTrackingOverlay.Empty);
             FaceCueGuideCanvas.Visibility = Visibility.Collapsed;
             return;
         }
 
-        if (IsNativeDirectX12PreviewActive())
+        if (IsDirectX12PreviewSurfaceActive())
         {
-            _directX12NativeCamera?.UpdateTrackingOverlay(CreateNativePreviewTrackingOverlay());
+            // HwndHost owns native airspace, so every DX12 route composites
+            // tracking inside the swap chain instead of using this WPF canvas.
+            UpdateDirectX12TrackingOverlay(CreateNativePreviewTrackingOverlay());
             FaceCueGuideCanvas.Visibility = Visibility.Collapsed;
             return;
         }
@@ -4278,6 +4335,13 @@ public partial class MainWindow : Window
         {
             AddLandmarkContours(display, _currentFaceLandmarkFrame);
         }
+    }
+
+    private void UpdateDirectX12TrackingOverlay(PreviewTrackingOverlay overlay)
+    {
+        _directX12NativeCamera?.UpdateTrackingOverlay(overlay);
+
+        GetDirectX12PreviewHost()?.UpdateTrackingOverlay(overlay);
     }
 
     private PreviewTrackingOverlay CreateNativePreviewTrackingOverlay()
@@ -4518,25 +4582,6 @@ public partial class MainWindow : Window
     private static Rect ToDisplayRect(Rect display, Rect frameRegion)
     {
         return ToDisplayRect(display, frameRegion.Left, frameRegion.Top, frameRegion.Right, frameRegion.Bottom);
-    }
-
-    private static string FormatStorageSize(long bytes)
-    {
-        if (bytes < 1024L)
-        {
-            return $"{Math.Max(0L, bytes)} B";
-        }
-
-        var size = (double)bytes;
-        string[] units = ["KB", "MB", "GB"];
-        var unitIndex = -1;
-        while (size >= 1024d && unitIndex < units.Length - 1)
-        {
-            size /= 1024d;
-            unitIndex++;
-        }
-
-        return $"{size:0.#} {units[unitIndex]}";
     }
 
     private static string FormatRatioPercent(double? value)

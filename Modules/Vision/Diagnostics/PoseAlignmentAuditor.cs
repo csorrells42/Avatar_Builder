@@ -350,7 +350,7 @@ public sealed class PoseAlignmentAuditor
     private static string BuildHtml(PoseAlignmentSummary summary, IReadOnlyList<PoseAlignmentSample> recent)
     {
         var axisRows = string.Concat(new[] { summary.A, summary.B, summary.C }.Select(axis =>
-            $"<tr><td>{H(axis.Name)}</td><td>{axis.SampleCount}</td><td>{axis.MediaPipeRangeDegrees:0.#} / {axis.ThreeDdfaRangeDegrees:0.#}</td><td>{axis.Scale:0.###} x + {axis.OffsetDegrees:0.###}</td><td>{axis.Correlation:0.###}</td><td>{axis.MeanAbsoluteErrorDegrees:0.##} / {axis.P95AbsoluteErrorDegrees:0.##}</td><td class=\"{(axis.Ready ? "good" : "warn") }\">{H(axis.Status)}</td></tr>"));
+            $"<tr><td>{H(axis.Name)}</td><td>{axis.SampleCount}</td><td>{axis.MediaPipeRangeDegrees:0.#} / {axis.ThreeDdfaRangeDegrees:0.#}</td><td>{axis.Scale:0.###} x + {axis.OffsetDegrees:0.###}</td><td>{axis.Correlation:0.###}</td><td>{axis.MeanAbsoluteErrorDegrees:0.##} / {axis.P95AbsoluteErrorDegrees:0.##}</td><td class=\"{(axis.Ready ? "good" : "warn")}\">{H(axis.Status)}</td></tr>"));
         var sampleRows = string.Concat(recent.OrderByDescending(static sample => sample.CapturedAtUtc).Select(sample =>
         {
             var calibratedA = summary.A.Scale * sample.MediaPipeA + summary.A.OffsetDegrees;
