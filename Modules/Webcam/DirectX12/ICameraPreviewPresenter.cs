@@ -1,6 +1,6 @@
-using EpisodeMonitor.Modules.Webcam.Common;
+using AvatarBuilder.Modules.Webcam.Common;
 
-namespace EpisodeMonitor.Modules.Webcam.DirectX12;
+namespace AvatarBuilder.Modules.Webcam.DirectX12;
 
 public interface ICameraPreviewPresenter : IDisposable
 {

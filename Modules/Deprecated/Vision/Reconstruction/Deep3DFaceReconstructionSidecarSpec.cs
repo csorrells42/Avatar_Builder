@@ -1,4 +1,4 @@
-namespace EpisodeMonitor.Modules.Vision.Reconstruction;
+namespace AvatarBuilder.Modules.Vision.Reconstruction;
 
 public static class Deep3DFaceReconstructionSidecarSpec
 {
@@ -24,7 +24,7 @@ public static class Deep3DFaceReconstructionSidecarSpec
             MeasurementJournalFolder = measurementJournalFolder,
             OutputFolder = outputFolder,
             SourceFrames = sourceFrames?.ToList() ?? [],
-            Notes = "Deep3D-style reconstruction should run out of process. Episode Monitor owns subject gating and evidence export; the sidecar owns Linux/PyTorch reconstruction."
+            Notes = "Deep3D-style reconstruction should run out of process. Avatar Builder owns subject gating and evidence export; the sidecar owns Linux/PyTorch reconstruction."
         };
     }
 }

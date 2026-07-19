@@ -1,8 +1,8 @@
 # Vision OpenCv
 
-Namespace: `EpisodeMonitor.Modules.Vision.OpenCv`
+Namespace: `AvatarBuilder.Modules.Vision.OpenCv`
 
-This folder owns OpenCV-backed implementations behind the backend-neutral vision contracts. OpenCvSharp is the .NET wrapper reference for this layer, but OpenCvSharp types should stay contained here where possible so the rest of Episode Monitor can keep using neutral landmark, cue, and measurement DTOs.
+This folder owns OpenCV-backed implementations behind the backend-neutral vision contracts. OpenCvSharp is the .NET wrapper reference for this layer, but OpenCvSharp types should stay contained here where possible so the rest of Avatar Builder can keep using neutral landmark, cue, and measurement DTOs.
 
 Reference material:
 

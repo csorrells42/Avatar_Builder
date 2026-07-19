@@ -1,4 +1,4 @@
-namespace EpisodeMonitor.Modules.Vision.Personalization;
+namespace AvatarBuilder.Modules.Vision.Personalization;
 
 public sealed class PersonalFaceIdentityAnalysis
 {

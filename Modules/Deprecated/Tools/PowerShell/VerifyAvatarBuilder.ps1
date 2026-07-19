@@ -20,7 +20,7 @@ $mediaPipeSidecarRequirementsSourcePath = Join-Path $repoRoot "Modules\Vision\Me
 $targetFramework = "net10.0-windows"
 $runStamp = (Get-Date).ToUniversalTime().ToString("yyyyMMddTHHmmssfffZ")
 if ([string]::IsNullOrWhiteSpace($BuildOutputRoot)) {
-    $resolvedBuildOutputRoot = Join-Path ([IO.Path]::GetTempPath()) "EpisodeMonitorVerify\$runStamp"
+    $resolvedBuildOutputRoot = Join-Path ([IO.Path]::GetTempPath()) "AvatarBuilderVerify\$runStamp"
 }
 elseif ([IO.Path]::IsPathRooted($BuildOutputRoot)) {
     $resolvedBuildOutputRoot = $BuildOutputRoot
@@ -33,14 +33,14 @@ $appBaseOutputPath = Join-Path $resolvedBuildOutputRoot "app\bin\"
 $smokeBaseOutputPath = Join-Path $resolvedBuildOutputRoot "smoke\bin\"
 $evalBaseOutputPath = Join-Path $resolvedBuildOutputRoot "eval\bin\"
 $buildOutputRoot = Join-Path $appBaseOutputPath "Debug\$targetFramework"
-$smokeAssemblyPath = Join-Path $smokeBaseOutputPath "Debug\$targetFramework\EpisodeMonitorVisionSmoke.dll"
-$evalAssemblyPath = Join-Path $evalBaseOutputPath "Debug\$targetFramework\EpisodeMonitorVisionEval.dll"
+$smokeAssemblyPath = Join-Path $smokeBaseOutputPath "Debug\$targetFramework\AvatarBuilderVisionSmoke.dll"
+$evalAssemblyPath = Join-Path $evalBaseOutputPath "Debug\$targetFramework\AvatarBuilderVisionEval.dll"
 
 New-Item -ItemType Directory -Force -Path $resolvedBuildOutputRoot | Out-Null
 Write-Host "Verifier build output root: $resolvedBuildOutputRoot"
 
 function Get-MediaPipePythonPath {
-    foreach ($variable in @("EPISODE_MONITOR_MEDIAPIPE_PYTHON", "EPISODE_MONITOR_PYTHON")) {
+    foreach ($variable in @("AVATAR_BUILDER_MEDIAPIPE_PYTHON", "AVATAR_BUILDER_PYTHON")) {
         $configured = [Environment]::GetEnvironmentVariable($variable)
         if (-not [string]::IsNullOrWhiteSpace($configured) -and (Test-Path -LiteralPath $configured)) {
             return $configured
@@ -162,12 +162,12 @@ function Invoke-Checked {
     }
 }
 
-Invoke-Step "Build Episode Monitor" {
-    Invoke-Checked dotnet build .\EpisodeMonitor.csproj --no-restore /p:UseSharedCompilation=false /p:UseAppHost=false "/p:BaseOutputPath=$appBaseOutputPath"
+Invoke-Step "Build Avatar Builder" {
+    Invoke-Checked dotnet build .\AvatarBuilder.csproj --no-restore /p:UseSharedCompilation=false /p:UseAppHost=false "/p:BaseOutputPath=$appBaseOutputPath"
 }
 
 Invoke-Step "Build synthetic aperture and cue smoke checks" {
-    Invoke-Checked dotnet build .\tools\EpisodeMonitorVisionSmoke\EpisodeMonitorVisionSmoke.csproj --no-restore /p:UseSharedCompilation=false /p:UseAppHost=false "/p:BaseOutputPath=$smokeBaseOutputPath"
+    Invoke-Checked dotnet build .\tools\AvatarBuilderVisionSmoke\AvatarBuilderVisionSmoke.csproj --no-restore /p:UseSharedCompilation=false /p:UseAppHost=false "/p:BaseOutputPath=$smokeBaseOutputPath"
 }
 
 Invoke-Step "Run synthetic aperture and cue smoke checks" {
@@ -175,7 +175,7 @@ Invoke-Step "Run synthetic aperture and cue smoke checks" {
 }
 
 Invoke-Step "Build offline vision evaluator" {
-    Invoke-Checked dotnet build .\tools\EpisodeMonitorVisionEval\EpisodeMonitorVisionEval.csproj --no-restore /p:UseSharedCompilation=false /p:UseAppHost=false "/p:BaseOutputPath=$evalBaseOutputPath"
+    Invoke-Checked dotnet build .\tools\AvatarBuilderVisionEval\AvatarBuilderVisionEval.csproj --no-restore /p:UseSharedCompilation=false /p:UseAppHost=false "/p:BaseOutputPath=$evalBaseOutputPath"
 }
 
 Invoke-Step "Check dense landmark model bundle status" {
@@ -313,7 +313,7 @@ Invoke-Step "Run synthetic bottom-right eye inset video evaluation" {
     }
 
     $reportText = Get-Content -LiteralPath $reportPath -Raw
-    if ($reportText -notmatch "Episode Monitor Vision Evaluation" -or
+    if ($reportText -notmatch "Avatar Builder Vision Evaluation" -or
         $reportText -notmatch "overlay_frames/frame_") {
         throw "Synthetic vision evaluation HTML report did not include the expected title and overlay frame references."
     }
@@ -940,7 +940,7 @@ if (-not [string]::IsNullOrWhiteSpace($samplePath)) {
         }
 
         $reportText = Get-Content -LiteralPath $reportPath -Raw
-        if ($reportText -notmatch "Episode Monitor Vision Evaluation" -or
+        if ($reportText -notmatch "Avatar Builder Vision Evaluation" -or
             $reportText -notmatch "Selected Review Frames") {
             throw "Sample media vision evaluation HTML report did not include the expected review sections."
         }
@@ -1037,4 +1037,4 @@ else {
 }
 
 Write-Host ""
-Write-Host "Episode Monitor verification completed."
+Write-Host "Avatar Builder verification completed."

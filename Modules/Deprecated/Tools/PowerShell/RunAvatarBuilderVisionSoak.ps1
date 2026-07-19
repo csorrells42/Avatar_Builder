@@ -24,7 +24,7 @@ if ([string]::IsNullOrWhiteSpace($OutputRoot)) {
 }
 
 New-Item -ItemType Directory -Force -Path $OutputRoot | Out-Null
-$verifierPath = Join-Path $PSScriptRoot "VerifyEpisodeMonitor.ps1"
+$verifierPath = Join-Path $PSScriptRoot "VerifyAvatarBuilder.ps1"
 $results = New-Object System.Collections.Generic.List[object]
 
 function Get-SamplePath {
@@ -68,7 +68,7 @@ for ($iteration = 1; $iteration -le $Iterations; $iteration++) {
     New-Item -ItemType Directory -Force -Path $iterationFolder | Out-Null
     $logPath = Join-Path $iterationFolder "verify.log"
     $sampleOutput = Join-Path $iterationFolder "sample-eval"
-    $buildOutput = Join-Path ([IO.Path]::GetTempPath()) ("EpisodeMonitorVerify\soak_{0}\iteration_{1:D3}" -f $runStamp, $iteration)
+    $buildOutput = Join-Path ([IO.Path]::GetTempPath()) ("AvatarBuilderVerify\soak_{0}\iteration_{1:D3}" -f $runStamp, $iteration)
     $arguments = @(
         "-NoProfile",
         "-ExecutionPolicy",

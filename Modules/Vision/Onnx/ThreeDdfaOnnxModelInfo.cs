@@ -1,7 +1,7 @@
 using System.IO;
 using System.Text.Json;
 
-namespace EpisodeMonitor.Modules.Vision.Onnx;
+namespace AvatarBuilder.Modules.Vision.Onnx;
 
 public sealed class ThreeDdfaOnnxModelInfo
 {

@@ -1,13 +1,13 @@
 using System.Diagnostics;
 using System.IO;
 
-namespace EpisodeMonitor.Modules.Vision.MediaPipe;
+namespace AvatarBuilder.Modules.Vision.MediaPipe;
 
 public sealed class MediaPipeSidecarPythonEnvironment
 {
-    private const string PythonOverrideVariable = "EPISODE_MONITOR_MEDIAPIPE_PYTHON";
-    private const string GeneralPythonOverrideVariable = "EPISODE_MONITOR_PYTHON";
-    private const string DisableVariable = "EPISODE_MONITOR_MEDIAPIPE_DISABLED";
+    private const string PythonOverrideVariable = "AVATAR_BUILDER_MEDIAPIPE_PYTHON";
+    private const string GeneralPythonOverrideVariable = "AVATAR_BUILDER_PYTHON";
+    private const string DisableVariable = "AVATAR_BUILDER_MEDIAPIPE_DISABLED";
     private const string RelativeScriptPath = "Modules/Vision/MediaPipe/Sidecar/mediapipe_face_landmarker_sidecar.py";
 
     public string PythonPath { get; private init; } = "";
@@ -24,7 +24,7 @@ public sealed class MediaPipeSidecarPythonEnvironment
     {
         if (IsTruthy(Environment.GetEnvironmentVariable(DisableVariable)))
         {
-            return NotReady("MediaPipe sidecar disabled by EPISODE_MONITOR_MEDIAPIPE_DISABLED.");
+            return NotReady("MediaPipe sidecar disabled by AVATAR_BUILDER_MEDIAPIPE_DISABLED.");
         }
 
         var scriptPath = FindScriptPath();
@@ -41,7 +41,7 @@ public sealed class MediaPipeSidecarPythonEnvironment
         var pythonPath = FindPythonPath();
         if (string.IsNullOrWhiteSpace(pythonPath))
         {
-            return NotReady("Python not configured for MediaPipe sidecar. Set EPISODE_MONITOR_MEDIAPIPE_PYTHON or run tools\\SetupMediaPipeSidecar.ps1.");
+            return NotReady("Python not configured for MediaPipe sidecar. Set AVATAR_BUILDER_MEDIAPIPE_PYTHON or run tools\\SetupMediaPipeSidecar.ps1.");
         }
 
         var importStatus = CheckMediaPipeImport(pythonPath);

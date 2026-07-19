@@ -2,9 +2,9 @@ using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
-using EpisodeMonitor.Modules.Infrastructure;
+using AvatarBuilder.Modules.Infrastructure;
 
-namespace EpisodeMonitor.Modules.Recording;
+namespace AvatarBuilder.Modules.Recording;
 
 public sealed class FfmpegEventRecorderService : IDisposable
 {

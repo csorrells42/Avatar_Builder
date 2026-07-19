@@ -1,6 +1,6 @@
 using System.Windows.Media.Imaging;
 
-namespace EpisodeMonitor.Modules.Vision.Common;
+namespace AvatarBuilder.Modules.Vision.Common;
 
 public interface IFaceLandmarkTracker : IDisposable
 {

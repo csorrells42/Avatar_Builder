@@ -1,14 +1,14 @@
 # Webcam Module
 
-Namespace root: `EpisodeMonitor.Modules.Webcam`
+Namespace root: `AvatarBuilder.Modules.Webcam`
 
 This module owns camera input only. It should answer: which camera, which mode, which frames, and which camera controls. It should not decide whether a frame is an episode cue.
 
-`WebcamModule.cs` is the root facade copied from the Jericho Down module shape and adapted for Episode Monitor. It exposes camera discovery, preview-service factories, DirectShow controls, and DX12 host/camera creation so the app shell can stay out of backend construction details.
+`WebcamModule.cs` is the root facade copied from the Jericho Down module shape and adapted for Avatar Builder. It exposes camera discovery, preview-service factories, DirectShow controls, and DX12 host/camera creation so the app shell can stay out of backend construction details.
 
 ## Common
 
-Namespace: `EpisodeMonitor.Modules.Webcam.Common`
+Namespace: `AvatarBuilder.Modules.Webcam.Common`
 
 Shared camera models and contracts:
 
@@ -26,7 +26,7 @@ Change this folder when shared camera vocabulary or mode-selection policy change
 
 ## DirectShow
 
-Namespace: `EpisodeMonitor.Modules.Webcam.DirectShow`
+Namespace: `AvatarBuilder.Modules.Webcam.DirectShow`
 
 DirectShow device enumeration and camera-control sliders. This is also the fallback identity used when a physical camera has both Media Foundation and DirectShow endpoints.
 
@@ -42,7 +42,7 @@ Change this folder when camera sliders, camera driver controls, or DirectShow fa
 
 ## MediaFoundation
 
-Namespace: `EpisodeMonitor.Modules.Webcam.MediaFoundation`
+Namespace: `AvatarBuilder.Modules.Webcam.MediaFoundation`
 
 Windows Media Foundation camera enumeration, mode probing, source-reader setup, and bitmap preview frame extraction. This is the preferred live capture path for HD/4K modes.
 
@@ -60,7 +60,7 @@ Change this folder when HD/4K capture, source-reader setup, Media Foundation mod
 
 ## Ffmpeg
 
-Namespace: `EpisodeMonitor.Modules.Webcam.Ffmpeg`
+Namespace: `AvatarBuilder.Modules.Webcam.Ffmpeg`
 
 Bundled FFmpeg DirectShow option probing and image-pipe preview fallback.
 
@@ -73,7 +73,7 @@ Change this folder when the FFmpeg fallback fails, DirectShow option parsing is 
 
 ## Pipeline
 
-Namespace: `EpisodeMonitor.Modules.Webcam.Pipeline`
+Namespace: `AvatarBuilder.Modules.Webcam.Pipeline`
 
 Composition layer. `CameraPreviewService` tries Media Foundation first, then FFmpeg fallback. UI code should depend on this layer rather than backend classes when it just wants preview frames.
 
@@ -85,7 +85,7 @@ Change this folder when backend ordering, fallback behavior, or shared preview s
 
 ## DirectX11
 
-Namespace: `EpisodeMonitor.Modules.Webcam.DirectX11`
+Namespace: `AvatarBuilder.Modules.Webcam.DirectX11`
 
 Direct3D 11 bridge code used by the texture-native Media Foundation camera path when a camera stream needs a shared texture handle that the DX12 renderer can consume.
 
@@ -98,7 +98,7 @@ Change this folder when the D3D11 device-manager setup or shared texture bridge 
 
 ## DirectX12
 
-Namespace: `EpisodeMonitor.Modules.Webcam.DirectX12`
+Namespace: `AvatarBuilder.Modules.Webcam.DirectX12`
 
 Jericho Down-derived Direct3D 12 preview host, native texture camera wrapper, and presenter code. This module owns the native child-window viewport, the BGRA/NV12 upload renderer, the texture-native camera stream, and the recorder/probe support around that stream. `MainWindow` either starts `Dx12Camera` for the native path or creates `Direct3D12PreviewHost` for the BGRA/NV12 upload fallback.
 

@@ -1,7 +1,7 @@
 using System.Runtime.InteropServices;
 using System.IO;
 
-namespace EpisodeMonitor.Modules.Webcam.MediaFoundation;
+namespace AvatarBuilder.Modules.Webcam.MediaFoundation;
 
 internal sealed class MediaFoundationVideoRecorder : IDisposable
 {

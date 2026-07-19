@@ -9,7 +9,7 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\..\EpisodeMonitor.csproj" />
+    <ProjectReference Include="..\..\AvatarBuilder.csproj" />
   </ItemGroup>
 
 </Project>

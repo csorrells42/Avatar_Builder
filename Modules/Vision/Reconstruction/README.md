@@ -1,8 +1,8 @@
 # Vision Reconstruction
 
-Namespace: `EpisodeMonitor.Modules.Vision.Reconstruction`
+Namespace: `AvatarBuilder.Modules.Vision.Reconstruction`
 
-This module is the reusable boundary for 3D face reconstruction and avatar-preview work. It does not run MediaPipe, OpenCV, PyTorch, WSL, or a renderer directly. It defines subject-gated job and result contracts so Episode Monitor can export clean evidence to an out-of-process reconstruction worker.
+This module is the reusable boundary for 3D face reconstruction and avatar-preview work. It does not run MediaPipe, OpenCV, PyTorch, WSL, or a renderer directly. It defines subject-gated job and result contracts so Avatar Builder can export clean evidence to an out-of-process reconstruction worker.
 
 Coordinate rule: points and learned surface-profile samples carry X/Y/Z positions. A/B/C orientation is carried by the containing frame, pose bucket, motion observation, or future local surface patch; do not duplicate A/B/C on every isolated point unless that point has an explicit local tangent/normal frame.
 

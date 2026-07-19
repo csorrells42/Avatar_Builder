@@ -27,5 +27,5 @@
   ],
   "status": "official_3ddfa_v2_repo_and_weights_required",
   "inferenceImplementationStatus": "ready",
-  "notes": "Episode Monitor includes a real 3DDFA_V2 ONNX Python sidecar adapter. Run tools/SetupThreeDdfaOnnxSidecar.ps1, place the official mb1_120x120 checkpoint or converted ONNX weight under 3DDFA_V2/weights, and configure Python before the avatar reconstruction lane can run."
+  "notes": "Avatar Builder includes a real 3DDFA_V2 ONNX Python sidecar adapter. Run tools/SetupThreeDdfaOnnxSidecar.ps1, place the official mb1_120x120 checkpoint or converted ONNX weight under 3DDFA_V2/weights, and configure Python before the avatar reconstruction lane can run."
 }

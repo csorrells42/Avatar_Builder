@@ -48,5 +48,5 @@ if (-not (Test-Path -LiteralPath $venvPython)) {
 & $venvPython -c "import mediapipe, cv2; print('MediaPipe sidecar environment ready')"
 
 Write-Host ""
-Write-Host "To force Episode Monitor to use this environment, set:"
-Write-Host "  `$env:EPISODE_MONITOR_MEDIAPIPE_PYTHON = `"$venvPython`""
+Write-Host "To force Avatar Builder to use this environment, set:"
+Write-Host "  `$env:AVATAR_BUILDER_MEDIAPIPE_PYTHON = `"$venvPython`""

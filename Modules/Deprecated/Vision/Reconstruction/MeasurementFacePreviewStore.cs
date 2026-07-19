@@ -3,10 +3,10 @@ using System.IO;
 using System.Net;
 using System.Text;
 using System.Text.Json;
-using EpisodeMonitor.Modules.Infrastructure;
-using EpisodeMonitor.Modules.Vision.Personalization;
+using AvatarBuilder.Modules.Infrastructure;
+using AvatarBuilder.Modules.Vision.Personalization;
 
-namespace EpisodeMonitor.Modules.Vision.Reconstruction;
+namespace AvatarBuilder.Modules.Vision.Reconstruction;
 
 public sealed class MeasurementFacePreviewStore
 {
@@ -361,7 +361,7 @@ ul {
     cheek: '#65c8ff'
   };
   const points = new Map((scene.Points || []).map(point => [point.Id, point]));
-  const storageKey = `EpisodeMonitor.FacePreview3D.${scene.GeometryProvenance || 'default'}`;
+  const storageKey = `AvatarBuilder.FacePreview3D.${scene.GeometryProvenance || 'default'}`;
   const defaultView = { yaw: -0.34, pitch: -0.08, zoom: 1 };
   let rotation = { ...defaultView };
   try {

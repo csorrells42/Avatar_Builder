@@ -1,7 +1,7 @@
 using System.Globalization;
 using System.Windows;
 
-namespace EpisodeMonitor.Modules.Vision.Personalization;
+namespace AvatarBuilder.Modules.Vision.Personalization;
 
 public sealed class AvatarCaptureQualityAnalyzer
 {

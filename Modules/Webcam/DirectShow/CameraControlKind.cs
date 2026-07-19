@@ -1,5 +1,5 @@
-using EpisodeMonitor.Modules.Webcam.Common;
-namespace EpisodeMonitor.Modules.Webcam.DirectShow;
+using AvatarBuilder.Modules.Webcam.Common;
+namespace AvatarBuilder.Modules.Webcam.DirectShow;
 
 public enum CameraControlKind
 {

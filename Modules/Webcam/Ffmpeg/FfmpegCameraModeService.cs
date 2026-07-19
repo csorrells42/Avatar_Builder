@@ -1,11 +1,11 @@
-using EpisodeMonitor.Modules.Webcam.Common;
+using AvatarBuilder.Modules.Webcam.Common;
 using System.Diagnostics;
 using System.Globalization;
 using System.Text.RegularExpressions;
-using EpisodeMonitor.Modules.Infrastructure;
-using EpisodeMonitor.Modules.Webcam.MediaFoundation;
+using AvatarBuilder.Modules.Infrastructure;
+using AvatarBuilder.Modules.Webcam.MediaFoundation;
 
-namespace EpisodeMonitor.Modules.Webcam.Ffmpeg;
+namespace AvatarBuilder.Modules.Webcam.Ffmpeg;
 
 public sealed class FfmpegCameraModeService
 {

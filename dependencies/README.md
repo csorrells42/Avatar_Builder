@@ -1,6 +1,6 @@
 # Dependencies
 
-Runtime dependencies copied beside the Episode Monitor executable.
+Runtime dependencies copied beside the Avatar Builder executable.
 
 ## FFmpeg
 

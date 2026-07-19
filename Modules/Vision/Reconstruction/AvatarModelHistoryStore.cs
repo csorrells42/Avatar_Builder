@@ -3,10 +3,10 @@ using System.IO;
 using System.Net;
 using System.Text;
 using System.Text.Json;
-using EpisodeMonitor.Modules.Infrastructure;
-using EpisodeMonitor.Modules.Vision.Common;
+using AvatarBuilder.Modules.Infrastructure;
+using AvatarBuilder.Modules.Vision.Common;
 
-namespace EpisodeMonitor.Modules.Vision.Reconstruction;
+namespace AvatarBuilder.Modules.Vision.Reconstruction;
 
 public sealed class AvatarModelHistoryStore
 {

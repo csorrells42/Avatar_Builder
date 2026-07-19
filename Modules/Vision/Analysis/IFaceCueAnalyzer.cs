@@ -1,7 +1,7 @@
 using System.Windows.Media.Imaging;
-using EpisodeMonitor.Modules.Vision.Common;
+using AvatarBuilder.Modules.Vision.Common;
 
-namespace EpisodeMonitor.Modules.Vision.Analysis;
+namespace AvatarBuilder.Modules.Vision.Analysis;
 
 public interface IFaceCueAnalyzer
 {

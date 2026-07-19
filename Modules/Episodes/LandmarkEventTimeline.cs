@@ -2,10 +2,10 @@ using System.Globalization;
 using System.IO;
 using System.Text;
 using System.Text.Json;
-using EpisodeMonitor.Modules.Vision.Analysis;
-using EpisodeMonitor.Modules.Vision.Personalization;
+using AvatarBuilder.Modules.Vision.Analysis;
+using AvatarBuilder.Modules.Vision.Personalization;
 
-namespace EpisodeMonitor.Modules.Episodes;
+namespace AvatarBuilder.Modules.Episodes;
 
 public sealed class LandmarkEventTimeline
 {

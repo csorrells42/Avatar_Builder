@@ -1,5 +1,5 @@
-using EpisodeMonitor.Modules.Vision.Common;
-namespace EpisodeMonitor.Modules.Vision.Analysis;
+using AvatarBuilder.Modules.Vision.Common;
+namespace AvatarBuilder.Modules.Vision.Analysis;
 
 public sealed class FaceLandmarkCueAnalysis
 {

@@ -1,5 +1,5 @@
-using EpisodeMonitor.Modules.Webcam.Common;
-namespace EpisodeMonitor.Modules.Webcam.MediaFoundation;
+using AvatarBuilder.Modules.Webcam.Common;
+namespace AvatarBuilder.Modules.Webcam.MediaFoundation;
 
 public static class MediaFoundationCameraEnumerator
 {

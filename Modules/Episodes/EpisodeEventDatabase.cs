@@ -1,7 +1,7 @@
 using System.IO;
 using Microsoft.Data.Sqlite;
 
-namespace EpisodeMonitor.Modules.Episodes;
+namespace AvatarBuilder.Modules.Episodes;
 
 public sealed class EpisodeEventDatabase
 {
@@ -18,7 +18,7 @@ public sealed class EpisodeEventDatabase
         return Path.Combine(outputFolder, EventDataFolderName, DatabaseFileName);
     }
 
-    public void SaveEvent(string outputFolder, EpisodeMonitorEvent item)
+    public void SaveEvent(string outputFolder, AvatarBuilderEvent item)
     {
         if (string.IsNullOrWhiteSpace(item.EventFolder))
         {
@@ -86,7 +86,7 @@ public sealed class EpisodeEventDatabase
         command.ExecuteNonQuery();
     }
 
-    public IReadOnlyList<EpisodeMonitorEvent> LoadEventsForDate(string outputFolder, DateTime date)
+    public IReadOnlyList<AvatarBuilderEvent> LoadEventsForDate(string outputFolder, DateTime date)
     {
         var path = GetDatabasePath(outputFolder);
         if (!File.Exists(path))
@@ -107,7 +107,7 @@ public sealed class EpisodeEventDatabase
             """;
         command.Parameters.AddWithValue("$start", start.ToString("O"));
         command.Parameters.AddWithValue("$end", end.ToString("O"));
-        var events = new List<EpisodeMonitorEvent>();
+        var events = new List<AvatarBuilderEvent>();
         using var reader = command.ExecuteReader();
         while (reader.Read())
         {
@@ -117,7 +117,7 @@ public sealed class EpisodeEventDatabase
         return events;
     }
 
-    public IReadOnlyList<EpisodeMonitorEvent> LoadEventsSince(string outputFolder, DateTime since)
+    public IReadOnlyList<AvatarBuilderEvent> LoadEventsSince(string outputFolder, DateTime since)
     {
         var path = GetDatabasePath(outputFolder);
         if (!File.Exists(path))
@@ -135,7 +135,7 @@ public sealed class EpisodeEventDatabase
             ORDER BY started_at DESC, created_at DESC;
             """;
         command.Parameters.AddWithValue("$since", since.ToString("O"));
-        var events = new List<EpisodeMonitorEvent>();
+        var events = new List<AvatarBuilderEvent>();
         using var reader = command.ExecuteReader();
         while (reader.Read())
         {
@@ -145,7 +145,7 @@ public sealed class EpisodeEventDatabase
         return events;
     }
 
-    public EpisodeMonitorEvent? DeleteEvent(string outputFolder, string eventId)
+    public AvatarBuilderEvent? DeleteEvent(string outputFolder, string eventId)
     {
         var path = GetDatabasePath(outputFolder);
         if (string.IsNullOrWhiteSpace(eventId) || !File.Exists(path))
@@ -168,7 +168,7 @@ public sealed class EpisodeEventDatabase
         return existing;
     }
 
-    public IReadOnlyList<EpisodeMonitorEvent> DeleteEventsOlderThan(string outputFolder, DateTime cutoff)
+    public IReadOnlyList<AvatarBuilderEvent> DeleteEventsOlderThan(string outputFolder, DateTime cutoff)
     {
         var path = GetDatabasePath(outputFolder);
         if (!File.Exists(path))
@@ -186,7 +186,7 @@ public sealed class EpisodeEventDatabase
             ORDER BY started_at DESC, created_at DESC;
             """;
         select.Parameters.AddWithValue("$cutoff", cutoff.ToString("O"));
-        var existing = new List<EpisodeMonitorEvent>();
+        var existing = new List<AvatarBuilderEvent>();
         using (var reader = select.ExecuteReader())
         {
             while (reader.Read())
@@ -347,7 +347,7 @@ public sealed class EpisodeEventDatabase
         return columns;
     }
 
-    private static EpisodeMonitorEvent? LoadEvent(SqliteConnection connection, string eventId)
+    private static AvatarBuilderEvent? LoadEvent(SqliteConnection connection, string eventId)
     {
         using var command = connection.CreateCommand();
         command.CommandText = """
@@ -360,7 +360,7 @@ public sealed class EpisodeEventDatabase
         return reader.Read() ? ReadEvent(reader) : null;
     }
 
-    private static EpisodeMonitorEvent ReadEvent(SqliteDataReader reader)
+    private static AvatarBuilderEvent ReadEvent(SqliteDataReader reader)
     {
         var startedAt = DateTime.TryParse(reader.GetString(1), null, System.Globalization.DateTimeStyles.RoundtripKind, out var parsedStarted)
             ? parsedStarted
@@ -369,7 +369,7 @@ public sealed class EpisodeEventDatabase
         var endedAt = DateTime.TryParse(endedAtText, null, System.Globalization.DateTimeStyles.RoundtripKind, out var parsedEnded)
             ? parsedEnded
             : (DateTime?)null;
-        return new EpisodeMonitorEvent
+        return new AvatarBuilderEvent
         {
             EventId = reader.GetString(0),
             StartedAt = startedAt,

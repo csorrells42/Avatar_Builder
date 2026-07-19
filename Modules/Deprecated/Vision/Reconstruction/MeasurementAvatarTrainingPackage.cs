@@ -1,6 +1,6 @@
-using EpisodeMonitor.Modules.Vision.Personalization;
+using AvatarBuilder.Modules.Vision.Personalization;
 
-namespace EpisodeMonitor.Modules.Vision.Reconstruction;
+namespace AvatarBuilder.Modules.Vision.Reconstruction;
 
 public sealed class MeasurementAvatarTrainingPackage
 {

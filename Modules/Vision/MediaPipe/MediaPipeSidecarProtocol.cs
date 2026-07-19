@@ -1,6 +1,6 @@
 using System.Text.Json.Serialization;
 
-namespace EpisodeMonitor.Modules.Vision.MediaPipe;
+namespace AvatarBuilder.Modules.Vision.MediaPipe;
 
 internal sealed class MediaPipeSidecarRequest
 {

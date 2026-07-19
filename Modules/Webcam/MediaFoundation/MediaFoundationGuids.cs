@@ -1,4 +1,4 @@
-namespace EpisodeMonitor.Modules.Webcam.MediaFoundation;
+namespace AvatarBuilder.Modules.Webcam.MediaFoundation;
 
 internal static class MediaFoundationGuids
 {

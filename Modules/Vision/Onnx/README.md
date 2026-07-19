@@ -1,6 +1,6 @@
 # Vision ONNX
 
-Namespace: `EpisodeMonitor.Modules.Vision.Onnx`
+Namespace: `AvatarBuilder.Modules.Vision.Onnx`
 
 This module owns ONNX-backed model bundle discovery and sidecar adapters. It should not own avatar decisions, narcolepsy triggers, WPF controls, or long-term personal-model learning.
 
@@ -18,7 +18,7 @@ Setup:
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\SetupThreeDdfaOnnxSidecar.ps1 -Python "C:\Path\To\python.exe"
 ```
 
-Place the official `mb1_120x120.onnx` or `mb1_120x120.pth` weight under `dependencies\vision\3ddfa-onnx\3DDFA_V2\weights`. The sidecar uses Episode Monitor's existing MediaPipe/OpenCV face box first, so the optional 3DDFA FaceBoxes fallback can be missing without blocking frames that already have a live face lock.
+Place the official `mb1_120x120.onnx` or `mb1_120x120.pth` weight under `dependencies\vision\3ddfa-onnx\3DDFA_V2\weights`. The sidecar uses Avatar Builder's existing MediaPipe/OpenCV face box first, so the optional 3DDFA FaceBoxes fallback can be missing without blocking frames that already have a live face lock.
 
 Rules:
 

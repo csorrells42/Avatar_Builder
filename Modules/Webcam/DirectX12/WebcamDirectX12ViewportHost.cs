@@ -1,8 +1,8 @@
-﻿using System.Runtime.InteropServices;
+using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Interop;
 
-namespace EpisodeMonitor.Modules.Webcam.DirectX12;
+namespace AvatarBuilder.Modules.Webcam.DirectX12;
 
 public abstract class WebcamDirectX12ViewportHost : HwndHost
 {

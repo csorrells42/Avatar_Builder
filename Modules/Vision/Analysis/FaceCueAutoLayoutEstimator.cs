@@ -1,9 +1,9 @@
-using EpisodeMonitor.Modules.Vision.Common;
+using AvatarBuilder.Modules.Vision.Common;
 using System.Windows;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
 
-namespace EpisodeMonitor.Modules.Vision.Analysis;
+namespace AvatarBuilder.Modules.Vision.Analysis;
 
 public static class FaceCueAutoLayoutEstimator
 {

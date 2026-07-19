@@ -1,6 +1,6 @@
 # Vision Module
 
-Namespace root: `EpisodeMonitor.Modules.Vision`
+Namespace root: `AvatarBuilder.Modules.Vision`
 
 This module owns visible-face evidence only. It should answer: where is the face, where are the eyes/lips, how open are they, how trustworthy is the measurement, and whether the trend is changing.
 
@@ -8,7 +8,7 @@ Recognition responsibilities should stay split into reusable capability layers. 
 
 ## Common
 
-Namespace: `EpisodeMonitor.Modules.Vision.Common`
+Namespace: `AvatarBuilder.Modules.Vision.Common`
 
 Backend-neutral contracts and frame/result models:
 
@@ -26,7 +26,7 @@ Change this folder when backend-neutral data shapes or tracker interfaces need t
 
 ## Analysis
 
-Namespace: `EpisodeMonitor.Modules.Vision.Analysis`
+Namespace: `AvatarBuilder.Modules.Vision.Analysis`
 
 Backend-neutral measurement and scoring logic.
 
@@ -55,7 +55,7 @@ Change this folder when trigger math, calibration behavior, quality gates, recon
 
 ## OpenCv
 
-Namespace: `EpisodeMonitor.Modules.Vision.OpenCv`
+Namespace: `AvatarBuilder.Modules.Vision.OpenCv`
 
 OpenCV-backed implementations.
 
@@ -79,7 +79,7 @@ Change this folder when OpenCV detection/tracking behavior, model loading, glass
 
 ## MediaPipe
 
-Namespace: `EpisodeMonitor.Modules.Vision.MediaPipe`
+Namespace: `AvatarBuilder.Modules.Vision.MediaPipe`
 
 Target home for MediaPipe Face Landmarker integration. The proof-of-concept Python/MediaPipe sidecar lives behind the same tracker interface as OpenCV so the UI and episode pipeline do not care whether landmarks come from Python, OpenCV, or a later native runtime.
 
@@ -100,7 +100,7 @@ Change this folder when adding or debugging MediaPipe Face Landmarker integratio
 
 ## ONNX
 
-Namespace: `EpisodeMonitor.Modules.Vision.Onnx`
+Namespace: `AvatarBuilder.Modules.Vision.Onnx`
 
 ONNX-backed model adapters and sidecar runtime checks. This folder is not a general dumping ground for model experiments; each adapter should name the concrete model family and the concrete job it performs.
 
@@ -110,13 +110,13 @@ Files:
 - `ThreeDdfaOnnxSidecarEnvironment.cs`: finds Python, the sidecar script, the bundled or configured 3DDFA_V2 repo, the 3DDFA config, and import readiness.
 - `ThreeDdfaOnnxSidecarProtocol.cs`: JSON request/response DTOs for dense vertices, sparse landmarks, A/B/C pose, face box, ROI, camera/shape/expression coefficients, and warnings.
 - `ThreeDdfaOnnxReconstructionClient.cs`: process runner for the 3DDFA sidecar. It sends latest avatar frames as JPEG, reads one JSON-line response, times out safely, and restarts the worker after failures.
-- `Sidecar/three_ddfa_onnx_sidecar.py`: Python bridge that calls the official 3DDFA_V2 `TDDFA_ONNX` solver. It prefers the face box supplied by Episode Monitor's live tracker and treats 3DDFA FaceBoxes as an optional fallback.
+- `Sidecar/three_ddfa_onnx_sidecar.py`: Python bridge that calls the official 3DDFA_V2 `TDDFA_ONNX` solver. It prefers the face box supplied by Avatar Builder's live tracker and treats 3DDFA FaceBoxes as an optional fallback.
 
 The 3DDFA lane is for avatar reconstruction: whole-face/head pose, dense geometry, coefficients, and pose-trust comparison. It must run beside MediaPipe/OpenCV and surface disagreement before any downstream avatar code trusts it. It must not replace the MediaPipe live tracker for narcolepsy events or block camera preview.
 
 ## Pipeline
 
-Namespace: `EpisodeMonitor.Modules.Vision.Pipeline`
+Namespace: `AvatarBuilder.Modules.Vision.Pipeline`
 
 Composition layer. `CompositeFaceLandmarkTracker` owns backend order and fusion rules, then emits the shared landmark frame/metrics path used by overlays, triggers, summaries, and offline evaluation.
 
@@ -128,7 +128,7 @@ Change this folder when backend priority, fallback rules, or multi-backend fusio
 
 ## Personalization
 
-Namespace: `EpisodeMonitor.Modules.Vision.Personalization`
+Namespace: `AvatarBuilder.Modules.Vision.Personalization`
 
 Avatar-user registry, subject-gate support, and capture-quality scoring. The live WPF app uses this folder for selected-user identity, subject confirmation, per-user output folders, and 3DDFA avatar capture-quality gates.
 
@@ -141,7 +141,7 @@ Change this folder when the app needs better selected-user handling, subject-gat
 
 ## Reconstruction
 
-Namespace: `EpisodeMonitor.Modules.Vision.Reconstruction`
+Namespace: `AvatarBuilder.Modules.Vision.Reconstruction`
 
 Reusable 3D face reconstruction and avatar-preview contracts. This folder owns JSON work-item/result shapes for local reconstruction workers, active Avatar System reports, the lightweight MediaPipe Last 5 feature-lock audit, and the heavier 3DDFA Last 5 dense reconstruction audit. The active dense avatar lane is the 3DDFA_V2 ONNX contract; older measurement-preview/package/plan and Deep3D/PyTorch reference material is archived under `Modules\Deprecated`.
 

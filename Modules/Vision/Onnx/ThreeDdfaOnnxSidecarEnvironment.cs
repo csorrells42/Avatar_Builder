@@ -1,15 +1,15 @@
 using System.Diagnostics;
 using System.IO;
 
-namespace EpisodeMonitor.Modules.Vision.Onnx;
+namespace AvatarBuilder.Modules.Vision.Onnx;
 
 public sealed class ThreeDdfaOnnxSidecarEnvironment
 {
-    private const string PythonOverrideVariable = "EPISODE_MONITOR_3DDFA_PYTHON";
-    private const string GeneralPythonOverrideVariable = "EPISODE_MONITOR_PYTHON";
-    private const string RepoOverrideVariable = "EPISODE_MONITOR_3DDFA_REPO";
-    private const string ConfigOverrideVariable = "EPISODE_MONITOR_3DDFA_CONFIG";
-    private const string DisableVariable = "EPISODE_MONITOR_3DDFA_DISABLED";
+    private const string PythonOverrideVariable = "AVATAR_BUILDER_3DDFA_PYTHON";
+    private const string GeneralPythonOverrideVariable = "AVATAR_BUILDER_PYTHON";
+    private const string RepoOverrideVariable = "AVATAR_BUILDER_3DDFA_REPO";
+    private const string ConfigOverrideVariable = "AVATAR_BUILDER_3DDFA_CONFIG";
+    private const string DisableVariable = "AVATAR_BUILDER_3DDFA_DISABLED";
     private const string RelativeScriptPath = "Modules/Vision/Onnx/Sidecar/three_ddfa_onnx_sidecar.py";
     private const string RelativeBundledRepoPath = "dependencies/vision/3ddfa-onnx/3DDFA_V2";
     private const string DefaultConfigRelativePath = "configs/mb1_120x120.yml";
@@ -30,7 +30,7 @@ public sealed class ThreeDdfaOnnxSidecarEnvironment
     {
         if (IsTruthy(Environment.GetEnvironmentVariable(DisableVariable)))
         {
-            return NotReady("3DDFA/ONNX sidecar disabled by EPISODE_MONITOR_3DDFA_DISABLED.");
+            return NotReady("3DDFA/ONNX sidecar disabled by AVATAR_BUILDER_3DDFA_DISABLED.");
         }
 
         var scriptPath = FindScriptPath();
@@ -42,19 +42,19 @@ public sealed class ThreeDdfaOnnxSidecarEnvironment
         var repositoryPath = FindRepositoryPath(modelInfo);
         if (string.IsNullOrWhiteSpace(repositoryPath))
         {
-            return NotReady("3DDFA_V2 repository missing. Run tools\\SetupThreeDdfaOnnxSidecar.ps1 or set EPISODE_MONITOR_3DDFA_REPO.");
+            return NotReady("3DDFA_V2 repository missing. Run tools\\SetupThreeDdfaOnnxSidecar.ps1 or set AVATAR_BUILDER_3DDFA_REPO.");
         }
 
         var configPath = FindConfigPath(repositoryPath);
         if (string.IsNullOrWhiteSpace(configPath))
         {
-            return NotReady("3DDFA config missing. Expected configs\\mb1_120x120.yml or EPISODE_MONITOR_3DDFA_CONFIG.");
+            return NotReady("3DDFA config missing. Expected configs\\mb1_120x120.yml or AVATAR_BUILDER_3DDFA_CONFIG.");
         }
 
         var pythonPath = FindPythonPath();
         if (string.IsNullOrWhiteSpace(pythonPath))
         {
-            return NotReady("Python not configured for 3DDFA/ONNX sidecar. Set EPISODE_MONITOR_3DDFA_PYTHON or EPISODE_MONITOR_PYTHON.");
+            return NotReady("Python not configured for 3DDFA/ONNX sidecar. Set AVATAR_BUILDER_3DDFA_PYTHON or AVATAR_BUILDER_PYTHON.");
         }
 
         var importStatus = CheckImports(pythonPath, repositoryPath);

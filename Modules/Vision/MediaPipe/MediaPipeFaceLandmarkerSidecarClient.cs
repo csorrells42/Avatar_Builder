@@ -3,7 +3,7 @@ using System.IO;
 using System.Text.Json;
 using System.Windows.Media.Imaging;
 
-namespace EpisodeMonitor.Modules.Vision.MediaPipe;
+namespace AvatarBuilder.Modules.Vision.MediaPipe;
 
 internal sealed class MediaPipeFaceLandmarkerSidecarClient : IDisposable
 {
@@ -214,7 +214,7 @@ internal sealed class MediaPipeFaceLandmarkerSidecarClient : IDisposable
 
     private static int ReadTimeoutMilliseconds()
     {
-        var configured = Environment.GetEnvironmentVariable("EPISODE_MONITOR_MEDIAPIPE_TIMEOUT_MS");
+        var configured = Environment.GetEnvironmentVariable("AVATAR_BUILDER_MEDIAPIPE_TIMEOUT_MS");
         return int.TryParse(configured, out var milliseconds)
             ? Math.Clamp(milliseconds, 250, 10000)
             : 1800;
@@ -222,7 +222,7 @@ internal sealed class MediaPipeFaceLandmarkerSidecarClient : IDisposable
 
     private static int ReadStartupTimeoutMilliseconds()
     {
-        var configured = Environment.GetEnvironmentVariable("EPISODE_MONITOR_MEDIAPIPE_STARTUP_TIMEOUT_MS");
+        var configured = Environment.GetEnvironmentVariable("AVATAR_BUILDER_MEDIAPIPE_STARTUP_TIMEOUT_MS");
         return int.TryParse(configured, out var milliseconds)
             ? Math.Clamp(milliseconds, 1000, 30000)
             : 10000;

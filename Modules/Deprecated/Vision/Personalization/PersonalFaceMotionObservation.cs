@@ -1,6 +1,6 @@
-using EpisodeMonitor.Modules.Vision.Analysis;
+using AvatarBuilder.Modules.Vision.Analysis;
 
-namespace EpisodeMonitor.Modules.Vision.Personalization;
+namespace AvatarBuilder.Modules.Vision.Personalization;
 
 public sealed class PersonalFaceMotionObservation
 {

@@ -1,7 +1,7 @@
-using EpisodeMonitor.Modules.Webcam.Common;
+using AvatarBuilder.Modules.Webcam.Common;
 using System.Runtime.InteropServices;
 
-namespace EpisodeMonitor.Modules.Webcam.MediaFoundation;
+namespace AvatarBuilder.Modules.Webcam.MediaFoundation;
 
 internal static class MediaFoundationCameraDeviceFactory
 {

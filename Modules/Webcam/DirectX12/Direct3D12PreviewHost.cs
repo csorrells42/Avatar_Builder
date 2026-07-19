@@ -1,6 +1,6 @@
-﻿using System.Runtime.InteropServices;
+using System.Runtime.InteropServices;
 using System.Threading;
-using EpisodeMonitor.Modules.Webcam.Common;
+using AvatarBuilder.Modules.Webcam.Common;
 using SharpGen.Runtime;
 using Vortice;
 using Vortice.D3DCompiler;
@@ -11,7 +11,7 @@ using Vortice.Mathematics;
 using static Vortice.Direct3D12.D3D12;
 using static Vortice.DXGI.DXGI;
 
-namespace EpisodeMonitor.Modules.Webcam.DirectX12;
+namespace AvatarBuilder.Modules.Webcam.DirectX12;
 
 public sealed class Direct3D12PreviewHost : WebcamDirectX12ViewportHost, ICameraPreviewPresenter
 {
@@ -47,7 +47,7 @@ public sealed class Direct3D12PreviewHost : WebcamDirectX12ViewportHost, ICamera
         _renderThread = new Thread(RenderWorkerLoop)
         {
             IsBackground = true,
-            Name = "Episode Monitor DX12 preview"
+            Name = "Avatar Builder DX12 preview"
         };
         _renderThread.Start();
     }
@@ -1784,7 +1784,7 @@ public sealed class Direct3D12PreviewHost : WebcamDirectX12ViewportHost, ICamera
             return Compiler.Compile(
                     shaderSource,
                     entryPoint,
-                    "EpisodeMonitorPreview.hlsl",
+                    "AvatarBuilderPreview.hlsl",
                     profile,
                     ShaderFlags.OptimizationLevel3,
                     EffectFlags.None)

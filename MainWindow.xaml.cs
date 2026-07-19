@@ -11,29 +11,29 @@ using System.Windows.Interop;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using System.Windows.Threading;
-using EpisodeMonitor.Modules.Episodes;
-using EpisodeMonitor.Modules.Infrastructure;
-using EpisodeMonitor.Modules.Recording;
-using EpisodeMonitor.Modules.Vision.Analysis;
-using EpisodeMonitor.Modules.Vision.Common;
-using EpisodeMonitor.Modules.Vision.Onnx;
-using EpisodeMonitor.Modules.Vision.Personalization;
-using EpisodeMonitor.Modules.Vision.Pipeline;
-using EpisodeMonitor.Modules.Vision.Reconstruction;
-using EpisodeMonitor.Modules.Webcam;
-using EpisodeMonitor.Modules.Webcam.Common;
-using EpisodeMonitor.Modules.Webcam.DirectShow;
-using EpisodeMonitor.Modules.Webcam.DirectX12;
-using EpisodeMonitor.Modules.Webcam.Ffmpeg;
-using EpisodeMonitor.Modules.Webcam.MediaFoundation;
-using EpisodeMonitor.Modules.Webcam.Pipeline;
+using AvatarBuilder.Modules.Episodes;
+using AvatarBuilder.Modules.Infrastructure;
+using AvatarBuilder.Modules.Recording;
+using AvatarBuilder.Modules.Vision.Analysis;
+using AvatarBuilder.Modules.Vision.Common;
+using AvatarBuilder.Modules.Vision.Onnx;
+using AvatarBuilder.Modules.Vision.Personalization;
+using AvatarBuilder.Modules.Vision.Pipeline;
+using AvatarBuilder.Modules.Vision.Reconstruction;
+using AvatarBuilder.Modules.Webcam;
+using AvatarBuilder.Modules.Webcam.Common;
+using AvatarBuilder.Modules.Webcam.DirectShow;
+using AvatarBuilder.Modules.Webcam.DirectX12;
+using AvatarBuilder.Modules.Webcam.Ffmpeg;
+using AvatarBuilder.Modules.Webcam.MediaFoundation;
+using AvatarBuilder.Modules.Webcam.Pipeline;
 using Microsoft.Win32;
 using Ellipse = System.Windows.Shapes.Ellipse;
 using Line = System.Windows.Shapes.Line;
 using Polyline = System.Windows.Shapes.Polyline;
 using Rectangle = System.Windows.Shapes.Rectangle;
 
-namespace EpisodeMonitor;
+namespace AvatarBuilder;
 
 public partial class MainWindow : Window
 {
@@ -41,8 +41,8 @@ public partial class MainWindow : Window
     private const int PreEventVideoSeconds = 60;
     private const string DefaultAvatarProfileId = "chris";
     private const string DefaultAvatarProfileDisplayName = "Chris";
-    private const string PreferredExternalOutputFolder = @"D:\Episode Monitor Output";
-    private const string OutputFolderPointerFileName = "EpisodeMonitorOutputFolder.txt";
+    private const string PreferredExternalOutputFolder = @"D:\Avatar Builder Output";
+    private const string OutputFolderPointerFileName = "AvatarBuilderOutputFolder.txt";
     private const string AlertBaselineFolderName = "AlertBaseline";
     private const string AlertBaselineFileName = "alert_baseline.json";
     private const string AlertBaselineStartButtonText = "Calibrate Alert Baseline";
@@ -97,7 +97,7 @@ public partial class MainWindow : Window
     private readonly ThreeDdfaOnnxModelInfo _threeDdfaOnnxModelInfo;
     private readonly ThreeDdfaOnnxSidecarEnvironment _threeDdfaOnnxEnvironment;
     private readonly ThreeDdfaOnnxReconstructionClient _threeDdfaOnnxClient;
-    private readonly EpisodeMonitorStartupOptions _startupOptions;
+    private readonly AvatarBuilderStartupOptions _startupOptions;
     private readonly AvatarProfileStore _avatarProfileStore = new();
     private readonly AvatarCaptureQualityAnalyzer _avatarCaptureQualityAnalyzer = new();
     private readonly LandmarkEventAggregate _landmarkEventAggregate = new();
@@ -106,7 +106,7 @@ public partial class MainWindow : Window
     private readonly LastGoodFeatureMeshStore _lastGoodFeatureMeshStore = new();
     private readonly LastGoodThreeDdfaStore _lastGoodThreeDdfaStore = new();
     private readonly object _faceLandmarkTrackerLock = new();
-    private readonly ObservableCollection<EpisodeMonitorEvent> _events = [];
+    private readonly ObservableCollection<AvatarBuilderEvent> _events = [];
     private readonly object _frameLock = new();
     private readonly object _previewFramePumpLock = new();
     private readonly object _directX12PreviewLock = new();
@@ -253,13 +253,13 @@ public partial class MainWindow : Window
     }
 
     public MainWindow()
-        : this(EpisodeMonitorStartupOptions.Default)
+        : this(AvatarBuilderStartupOptions.Default)
     {
     }
 
-    public MainWindow(EpisodeMonitorStartupOptions startupOptions)
+    public MainWindow(AvatarBuilderStartupOptions startupOptions)
     {
-        _startupOptions = startupOptions ?? EpisodeMonitorStartupOptions.Default;
+        _startupOptions = startupOptions ?? AvatarBuilderStartupOptions.Default;
         _threeDdfaOnnxModelInfo = ThreeDdfaOnnxModelInfo.Load();
         _threeDdfaOnnxEnvironment = ThreeDdfaOnnxSidecarEnvironment.Detect(_threeDdfaOnnxModelInfo);
         _threeDdfaOnnxClient = new ThreeDdfaOnnxReconstructionClient(_threeDdfaOnnxEnvironment);
@@ -709,7 +709,7 @@ public partial class MainWindow : Window
         })
         {
             IsBackground = true,
-            Name = "Episode Monitor Camera Enumerator"
+            Name = "Avatar Builder Camera Enumerator"
         };
 
         thread.SetApartmentState(ApartmentState.STA);
@@ -832,7 +832,7 @@ public partial class MainWindow : Window
         })
         {
             IsBackground = true,
-            Name = "Episode Monitor Camera Controls"
+            Name = "Avatar Builder Camera Controls"
         };
 
         thread.SetApartmentState(ApartmentState.STA);
@@ -1363,7 +1363,7 @@ public partial class MainWindow : Window
                 PreviewPlaceholder,
                 PreviewStateText,
                 hostInsertIndex: 0,
-                name: "Episode Monitor");
+                name: "Avatar Builder");
             _directX12PreviewMaxRenderFramesPerSecond = GetDirectX12PreviewRenderFramesPerSecond(mode, nativeTexturePath: true);
             var options = new Dx12CameraOptions
             {
@@ -3916,7 +3916,7 @@ public partial class MainWindow : Window
     {
         try
         {
-            var targetFolder = folder ?? Path.Combine(_outputFolder, $"EpisodeMonitor_{timestamp:yyyy-MM-dd}");
+            var targetFolder = folder ?? Path.Combine(_outputFolder, $"AvatarBuilder_{timestamp:yyyy-MM-dd}");
             Directory.CreateDirectory(targetFolder);
             var path = Path.Combine(targetFolder, $"episode_{kind}_{timestamp:HH-mm-ss-fff}.jpg");
             var encoder = new JpegBitmapEncoder { QualityLevel = 90 };
@@ -4032,7 +4032,7 @@ public partial class MainWindow : Window
     private void OpenEventLogClicked(object sender, RoutedEventArgs e)
     {
         var cutoff = DateTime.Today.AddDays(-29);
-        var logEvents = new ObservableCollection<EpisodeMonitorEvent>(
+        var logEvents = new ObservableCollection<AvatarBuilderEvent>(
             _eventDatabase.LoadEventsSince(_outputFolder, cutoff)
                 .Where(HasEventEvidenceFolder));
         var grid = CreateEventLogGrid(logEvents);
@@ -4060,7 +4060,7 @@ public partial class MainWindow : Window
         var window = new Window
         {
             Owner = this,
-            Title = "Episode Monitor Event Log",
+            Title = "Avatar Builder Event Log",
             Width = 1100,
             Height = 620,
             MinWidth = 820,
@@ -4073,7 +4073,7 @@ public partial class MainWindow : Window
         window.Show();
     }
 
-    private DataGrid CreateEventLogGrid(ObservableCollection<EpisodeMonitorEvent> events)
+    private DataGrid CreateEventLogGrid(ObservableCollection<AvatarBuilderEvent> events)
     {
         var grid = new DataGrid
         {
@@ -4083,17 +4083,17 @@ public partial class MainWindow : Window
             ItemsSource = events
         };
         grid.PreviewMouseRightButtonDown += EventGridRightClick;
-        grid.Columns.Add(new DataGridTextColumn { Header = "Started", Binding = new System.Windows.Data.Binding(nameof(EpisodeMonitorEvent.StartLabel)), Width = 150 });
-        grid.Columns.Add(new DataGridTextColumn { Header = "Ended", Binding = new System.Windows.Data.Binding(nameof(EpisodeMonitorEvent.EndLabel)), Width = 150 });
-        grid.Columns.Add(new DataGridTextColumn { Header = "Duration", Binding = new System.Windows.Data.Binding(nameof(EpisodeMonitorEvent.Duration)), Width = 95 });
-        grid.Columns.Add(new DataGridTextColumn { Header = "Event", Binding = new System.Windows.Data.Binding(nameof(EpisodeMonitorEvent.Event)), Width = 180 });
-        grid.Columns.Add(new DataGridTextColumn { Header = "Avg Motion", Binding = new System.Windows.Data.Binding(nameof(EpisodeMonitorEvent.AvgMotion)), Width = 110 });
-        grid.Columns.Add(new DataGridTextColumn { Header = "Notes", Binding = new System.Windows.Data.Binding(nameof(EpisodeMonitorEvent.Notes)), Width = 280 });
-        grid.Columns.Add(new DataGridTextColumn { Header = "Files", Binding = new System.Windows.Data.Binding(nameof(EpisodeMonitorEvent.File)), Width = new DataGridLength(1, DataGridLengthUnitType.Star) });
+        grid.Columns.Add(new DataGridTextColumn { Header = "Started", Binding = new System.Windows.Data.Binding(nameof(AvatarBuilderEvent.StartLabel)), Width = 150 });
+        grid.Columns.Add(new DataGridTextColumn { Header = "Ended", Binding = new System.Windows.Data.Binding(nameof(AvatarBuilderEvent.EndLabel)), Width = 150 });
+        grid.Columns.Add(new DataGridTextColumn { Header = "Duration", Binding = new System.Windows.Data.Binding(nameof(AvatarBuilderEvent.Duration)), Width = 95 });
+        grid.Columns.Add(new DataGridTextColumn { Header = "Event", Binding = new System.Windows.Data.Binding(nameof(AvatarBuilderEvent.Event)), Width = 180 });
+        grid.Columns.Add(new DataGridTextColumn { Header = "Avg Motion", Binding = new System.Windows.Data.Binding(nameof(AvatarBuilderEvent.AvgMotion)), Width = 110 });
+        grid.Columns.Add(new DataGridTextColumn { Header = "Notes", Binding = new System.Windows.Data.Binding(nameof(AvatarBuilderEvent.Notes)), Width = 280 });
+        grid.Columns.Add(new DataGridTextColumn { Header = "Files", Binding = new System.Windows.Data.Binding(nameof(AvatarBuilderEvent.File)), Width = new DataGridLength(1, DataGridLengthUnitType.Star) });
         var deleteItem = new MenuItem { Header = "Delete Event" };
         deleteItem.Click += (_, _) =>
         {
-            if (grid.SelectedItem is EpisodeMonitorEvent item && DeleteEventWithConfirmation(item, grid))
+            if (grid.SelectedItem is AvatarBuilderEvent item && DeleteEventWithConfirmation(item, grid))
             {
                 events.Remove(item);
             }
@@ -4105,7 +4105,7 @@ public partial class MainWindow : Window
 
     private void DeleteSelectedEventClicked(object sender, RoutedEventArgs e)
     {
-        if (EventGrid.SelectedItem is EpisodeMonitorEvent item)
+        if (EventGrid.SelectedItem is AvatarBuilderEvent item)
         {
             DeleteEventWithConfirmation(item, EventGrid);
         }
@@ -4145,7 +4145,7 @@ public partial class MainWindow : Window
         return null;
     }
 
-    private bool DeleteEventWithConfirmation(EpisodeMonitorEvent item, FrameworkElement owner)
+    private bool DeleteEventWithConfirmation(AvatarBuilderEvent item, FrameworkElement owner)
     {
         var result = MessageBox.Show(
             Window.GetWindow(owner) ?? this,
@@ -4233,7 +4233,7 @@ public partial class MainWindow : Window
             return;
         }
 
-        var item = new EpisodeMonitorEvent
+        var item = new AvatarBuilderEvent
         {
             StartedAt = startedAt,
             EndedAt = endedAt,
@@ -4340,7 +4340,7 @@ public partial class MainWindow : Window
             return PreferredExternalOutputFolder;
         }
 
-        return Path.Combine(AppContext.BaseDirectory, "EpisodeMonitorSessions");
+        return Path.Combine(AppContext.BaseDirectory, "AvatarBuilderSessions");
     }
 
     private void EnsureOutputFolderConfiguredForLaunch()
@@ -4362,8 +4362,8 @@ public partial class MainWindow : Window
 
         EnsureOutputFolderPointerFileExists();
         var reason = string.IsNullOrWhiteSpace(configured)
-            ? "Episode Monitor needs a storage folder for events, videos, calibration data, and avatar measurements."
-            : $"The configured storage folder was not found:{Environment.NewLine}{configured}{Environment.NewLine}{Environment.NewLine}Choose where Episode Monitor should store its data.";
+            ? "Avatar Builder needs a storage folder for events, videos, calibration data, and avatar measurements."
+            : $"The configured storage folder was not found:{Environment.NewLine}{configured}{Environment.NewLine}{Environment.NewLine}Choose where Avatar Builder should store its data.";
         var selected = PromptForOutputFolder(reason, configured);
         if (string.IsNullOrWhiteSpace(selected))
         {
@@ -4469,13 +4469,13 @@ public partial class MainWindow : Window
         MessageBox.Show(
             this,
             $"{message}{Environment.NewLine}{Environment.NewLine}The selected folder path will be saved in:{Environment.NewLine}{GetOutputFolderPointerPath()}",
-            "Choose Episode Monitor Storage",
+            "Choose Avatar Builder Storage",
             MessageBoxButton.OK,
             MessageBoxImage.Information);
 
         var dialog = new OpenFolderDialog
         {
-            Title = "Choose Episode Monitor storage folder",
+            Title = "Choose Avatar Builder storage folder",
             InitialDirectory = GetOutputFolderPickerInitialDirectory(configuredFolder),
             Multiselect = false
         };
@@ -4512,7 +4512,7 @@ public partial class MainWindow : Window
             return PreferredExternalOutputFolder;
         }
 
-        return Path.Combine(AppContext.BaseDirectory, "EpisodeMonitorSessions");
+        return Path.Combine(AppContext.BaseDirectory, "AvatarBuilderSessions");
     }
 
     private static string FormatBytes(long bytes)
@@ -4535,7 +4535,7 @@ public partial class MainWindow : Window
         return $"{size:0.##} {units[unitIndex]}";
     }
 
-    private void SaveEventListItem(EpisodeMonitorEvent item)
+    private void SaveEventListItem(AvatarBuilderEvent item)
     {
         if (!HasEventEvidenceFolder(item))
         {
@@ -4582,7 +4582,7 @@ public partial class MainWindow : Window
         return "No event database found for today in the new output folder.";
     }
 
-    private void DeleteEventArtifacts(IEnumerable<EpisodeMonitorEvent> events)
+    private void DeleteEventArtifacts(IEnumerable<AvatarBuilderEvent> events)
     {
         var folders = events
             .Select(static item => item.EventFolder)
@@ -4602,7 +4602,7 @@ public partial class MainWindow : Window
         }
     }
 
-    private static bool HasEventEvidenceFolder(EpisodeMonitorEvent item)
+    private static bool HasEventEvidenceFolder(AvatarBuilderEvent item)
     {
         return !string.IsNullOrWhiteSpace(item.EventFolder)
             && Directory.Exists(item.EventFolder);

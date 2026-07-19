@@ -1,7 +1,7 @@
-using EpisodeMonitor.Modules.Vision.Common;
+using AvatarBuilder.Modules.Vision.Common;
 using System.Windows;
 
-namespace EpisodeMonitor.Modules.Vision.Common;
+namespace AvatarBuilder.Modules.Vision.Common;
 
 public sealed class FaceCueGuideLayout
 {

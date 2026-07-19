@@ -1,9 +1,9 @@
 using System.Runtime.InteropServices;
-using EpisodeMonitor.Modules.Webcam.Common;
-using EpisodeMonitor.Modules.Webcam.DirectX11;
-using EpisodeMonitor.Modules.Webcam.MediaFoundation;
+using AvatarBuilder.Modules.Webcam.Common;
+using AvatarBuilder.Modules.Webcam.DirectX11;
+using AvatarBuilder.Modules.Webcam.MediaFoundation;
 
-namespace EpisodeMonitor.Modules.Webcam.DirectX12;
+namespace AvatarBuilder.Modules.Webcam.DirectX12;
 
 public sealed record TextureNativeCameraProbeResult(
     bool D3D12ManagerReady,

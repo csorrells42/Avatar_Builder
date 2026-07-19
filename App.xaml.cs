@@ -2,7 +2,7 @@ using System.IO;
 using System.Windows;
 using System.Windows.Threading;
 
-namespace EpisodeMonitor;
+namespace AvatarBuilder;
 
 public partial class App : Application
 {
@@ -11,7 +11,7 @@ public partial class App : Application
         DispatcherUnhandledException += AppDispatcherUnhandledException;
         AppDomain.CurrentDomain.UnhandledException += CurrentDomainUnhandledException;
         base.OnStartup(e);
-        MainWindow = new MainWindow(EpisodeMonitorStartupOptions.Parse(e.Args));
+        MainWindow = new MainWindow(AvatarBuilderStartupOptions.Parse(e.Args));
         MainWindow.Show();
     }
 
@@ -19,8 +19,8 @@ public partial class App : Application
     {
         WriteStartupLog(e.Exception);
         MessageBox.Show(
-            $"Episode Monitor hit a startup error. Details were saved to:{Environment.NewLine}{GetLogPath()}",
-            "Episode Monitor",
+            $"Avatar Builder hit a startup error. Details were saved to:{Environment.NewLine}{GetLogPath()}",
+            "Avatar Builder",
             MessageBoxButton.OK,
             MessageBoxImage.Error);
         e.Handled = true;
@@ -50,6 +50,6 @@ public partial class App : Application
 
     private static string GetLogPath()
     {
-        return Path.Combine(AppContext.BaseDirectory, "EpisodeMonitor-startup.log");
+        return Path.Combine(AppContext.BaseDirectory, "AvatarBuilder-startup.log");
     }
 }

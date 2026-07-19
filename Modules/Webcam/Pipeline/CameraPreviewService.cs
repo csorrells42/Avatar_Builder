@@ -1,9 +1,9 @@
-using EpisodeMonitor.Modules.Webcam.MediaFoundation;
-using EpisodeMonitor.Modules.Webcam.Ffmpeg;
-using EpisodeMonitor.Modules.Webcam.Common;
+using AvatarBuilder.Modules.Webcam.MediaFoundation;
+using AvatarBuilder.Modules.Webcam.Ffmpeg;
+using AvatarBuilder.Modules.Webcam.Common;
 using System.Windows.Media.Imaging;
 
-namespace EpisodeMonitor.Modules.Webcam.Pipeline;
+namespace AvatarBuilder.Modules.Webcam.Pipeline;
 
 public sealed class CameraPreviewService : ICameraPreviewService
 {

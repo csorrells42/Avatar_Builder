@@ -1,4 +1,4 @@
-namespace EpisodeMonitor.Modules.Vision.Reconstruction;
+namespace AvatarBuilder.Modules.Vision.Reconstruction;
 
 public sealed class FaceReconstructionSubjectGate
 {

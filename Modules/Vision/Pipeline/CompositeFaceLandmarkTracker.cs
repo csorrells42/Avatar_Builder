@@ -1,10 +1,10 @@
-using EpisodeMonitor.Modules.Vision.MediaPipe;
-using EpisodeMonitor.Modules.Vision.OpenCv;
-using EpisodeMonitor.Modules.Vision.Common;
+using AvatarBuilder.Modules.Vision.MediaPipe;
+using AvatarBuilder.Modules.Vision.OpenCv;
+using AvatarBuilder.Modules.Vision.Common;
 using System.Windows.Media.Imaging;
 using System.Windows;
 
-namespace EpisodeMonitor.Modules.Vision.Pipeline;
+namespace AvatarBuilder.Modules.Vision.Pipeline;
 
 public sealed class CompositeFaceLandmarkTracker : IStatefulFaceLandmarkTracker
 {

@@ -1,4 +1,4 @@
-﻿namespace EpisodeMonitor.Modules.Webcam.DirectX12;
+namespace AvatarBuilder.Modules.Webcam.DirectX12;
 
 public sealed record Direct3D12PreviewDiagnostics(
     string PreviewPath,

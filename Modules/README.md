@@ -1,12 +1,12 @@
-# Episode Monitor Modules
+# Avatar Builder Modules
 
-Episode Monitor keeps runtime code in purpose-named modules. Folder path and namespace should match so the codebase is navigable from either the file tree or a symbol search.
+Avatar Builder keeps runtime code in purpose-named modules. Folder path and namespace should match so the codebase is navigable from either the file tree or a symbol search.
 
 ## Reusable Module Rule
 
 Build every new capability as the smallest reusable module that can stand on its own. The WPF app shell may compose modules, draw controls, and handle user workflow, but recognition logic, camera logic, event evidence, recording, personalization, identity gating, 3D/avatar reconstruction, and AI-assistant integration data should live behind narrow module contracts.
 
-This is a project rule so Episode Monitor can later feed the main AI program without copying WPF-specific code. Prefer backend-neutral input/output models, analyzers that accept measurements instead of UI controls, and durable DTOs that can be consumed by another process. If a feature can naturally be separated as face identity, eyelid state, jaw/lip droop, subject personalization, event packaging, or avatar reconstruction, keep that capability self-contained and let `MainWindow.xaml.cs` orchestrate it.
+This is a project rule so Avatar Builder can later feed the main AI program without copying WPF-specific code. Prefer backend-neutral input/output models, analyzers that accept measurements instead of UI controls, and durable DTOs that can be consumed by another process. If a feature can naturally be separated as face identity, eyelid state, jaw/lip droop, subject personalization, event packaging, or avatar reconstruction, keep that capability self-contained and let `MainWindow.xaml.cs` orchestrate it.
 
 ## App Shell
 
@@ -54,7 +54,7 @@ See `Vision/README.md`.
 
 ## Episodes
 
-Folder and namespace: `Modules/Episodes`, `EpisodeMonitor.Modules.Episodes`
+Folder and namespace: `Modules/Episodes`, `AvatarBuilder.Modules.Episodes`
 
 Owns clinician-review event data: episode rows, landmark timeline samples, and aggregate evidence.
 
@@ -68,7 +68,7 @@ See `Episodes/README.md`.
 
 ## Recording
 
-Folder and namespace: `Modules/Recording`, `EpisodeMonitor.Modules.Recording`
+Folder and namespace: `Modules/Recording`, `AvatarBuilder.Modules.Recording`
 
 Owns event video writing and recorder lifecycle. It accepts already-rendered frames and paths instead of reaching into webcam or vision internals.
 
@@ -82,7 +82,7 @@ See `Recording/README.md`.
 
 ## Infrastructure
 
-Folder and namespace: `Modules/Infrastructure`, `EpisodeMonitor.Modules.Infrastructure`
+Folder and namespace: `Modules/Infrastructure`, `AvatarBuilder.Modules.Infrastructure`
 
 Owns shared host-level utilities such as locating bundled FFmpeg. Keep this small; if a helper has domain meaning, move it to that domain module.
 

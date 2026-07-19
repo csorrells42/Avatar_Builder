@@ -1,8 +1,8 @@
-using EpisodeMonitor.Modules.Vision.Common;
+using AvatarBuilder.Modules.Vision.Common;
 using System.IO;
 using System.Text.Json;
 
-namespace EpisodeMonitor.Modules.Vision.MediaPipe;
+namespace AvatarBuilder.Modules.Vision.MediaPipe;
 
 public sealed class DenseFaceLandmarkModelInfo
 {

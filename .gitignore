@@ -4,10 +4,12 @@ obj/
 **/obj/
 .vs/
 .venv/
+.nuget-scratch/
+.appdata/
 *.user
 *.suo
 *.log
-EpisodeMonitorSessions/
+AvatarBuilderSessions/
 output/
 **/output/
 tmp/

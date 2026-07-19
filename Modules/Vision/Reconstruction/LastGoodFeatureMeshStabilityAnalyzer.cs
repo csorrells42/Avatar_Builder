@@ -1,6 +1,6 @@
-using EpisodeMonitor.Modules.Vision.Common;
+using AvatarBuilder.Modules.Vision.Common;
 
-namespace EpisodeMonitor.Modules.Vision.Reconstruction;
+namespace AvatarBuilder.Modules.Vision.Reconstruction;
 
 public static class LastGoodFeatureMeshStabilityAnalyzer
 {

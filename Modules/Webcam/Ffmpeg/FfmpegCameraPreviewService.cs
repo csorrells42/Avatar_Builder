@@ -1,12 +1,12 @@
-using EpisodeMonitor.Modules.Webcam.Common;
+using AvatarBuilder.Modules.Webcam.Common;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
-using EpisodeMonitor.Modules.Infrastructure;
+using AvatarBuilder.Modules.Infrastructure;
 
-namespace EpisodeMonitor.Modules.Webcam.Ffmpeg;
+namespace AvatarBuilder.Modules.Webcam.Ffmpeg;
 
 public sealed class FfmpegCameraPreviewService : ICameraPreviewService
 {
@@ -514,7 +514,7 @@ public sealed class FfmpegCameraPreviewService : ICameraPreviewService
     {
         try
         {
-            var path = Path.Combine(AppContext.BaseDirectory, "EpisodeMonitor-camera.log");
+            var path = Path.Combine(AppContext.BaseDirectory, "AvatarBuilder-camera.log");
             File.AppendAllText(path, $"{DateTime.Now:O} {line}{Environment.NewLine}");
         }
         catch

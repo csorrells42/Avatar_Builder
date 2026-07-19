@@ -1,7 +1,7 @@
 using System.Windows;
-using EpisodeMonitor.Modules.Vision.Common;
+using AvatarBuilder.Modules.Vision.Common;
 
-namespace EpisodeMonitor.Modules.Vision.Personalization;
+namespace AvatarBuilder.Modules.Vision.Personalization;
 
 public sealed class PersonalFaceIdentityMeasurement
 {

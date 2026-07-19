@@ -1,7 +1,7 @@
 using System.Windows;
-using EpisodeMonitor.Modules.Vision.Common;
+using AvatarBuilder.Modules.Vision.Common;
 
-namespace EpisodeMonitor.Modules.Vision.MediaPipe;
+namespace AvatarBuilder.Modules.Vision.MediaPipe;
 
 internal static class MediaPipeFaceLandmarkerMapper
 {

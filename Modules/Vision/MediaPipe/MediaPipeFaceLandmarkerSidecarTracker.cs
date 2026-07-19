@@ -1,9 +1,9 @@
 using System.Windows.Media.Imaging;
 using System.Windows;
 using System.Windows.Media;
-using EpisodeMonitor.Modules.Vision.Common;
+using AvatarBuilder.Modules.Vision.Common;
 
-namespace EpisodeMonitor.Modules.Vision.MediaPipe;
+namespace AvatarBuilder.Modules.Vision.MediaPipe;
 
 public sealed class MediaPipeFaceLandmarkerSidecarTracker : IStatefulFaceLandmarkTracker, IFaceLandmarkCropRefiner
 {

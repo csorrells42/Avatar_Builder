@@ -3,9 +3,9 @@ using System.IO;
 using System.Net;
 using System.Text;
 using System.Text.Json;
-using EpisodeMonitor.Modules.Infrastructure;
+using AvatarBuilder.Modules.Infrastructure;
 
-namespace EpisodeMonitor.Modules.Vision.Reconstruction;
+namespace AvatarBuilder.Modules.Vision.Reconstruction;
 
 public sealed class AvatarSystemDashboardStore
 {

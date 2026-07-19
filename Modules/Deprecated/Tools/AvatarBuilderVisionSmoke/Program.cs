@@ -4,18 +4,18 @@ using System.Text.Json;
 using System.Windows;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
-using EpisodeMonitor;
-using EpisodeMonitor.Modules.Episodes;
-using EpisodeMonitor.Modules.Vision.Analysis;
-using EpisodeMonitor.Modules.Vision.Common;
-using EpisodeMonitor.Modules.Vision.MediaPipe;
-using EpisodeMonitor.Modules.Vision.Onnx;
-using EpisodeMonitor.Modules.Vision.OpenCv;
-using EpisodeMonitor.Modules.Vision.Personalization;
-using EpisodeMonitor.Modules.Vision.Pipeline;
-using EpisodeMonitor.Modules.Vision.Reconstruction;
-using EpisodeMonitor.Modules.Webcam.Common;
-using EpisodeMonitor.Modules.Webcam.DirectX12;
+using AvatarBuilder;
+using AvatarBuilder.Modules.Episodes;
+using AvatarBuilder.Modules.Vision.Analysis;
+using AvatarBuilder.Modules.Vision.Common;
+using AvatarBuilder.Modules.Vision.MediaPipe;
+using AvatarBuilder.Modules.Vision.Onnx;
+using AvatarBuilder.Modules.Vision.OpenCv;
+using AvatarBuilder.Modules.Vision.Personalization;
+using AvatarBuilder.Modules.Vision.Pipeline;
+using AvatarBuilder.Modules.Vision.Reconstruction;
+using AvatarBuilder.Modules.Webcam.Common;
+using AvatarBuilder.Modules.Webcam.DirectX12;
 using OpenCvSharp;
 using CvPoint = OpenCvSharp.Point;
 using CvRect = OpenCvSharp.Rect;
@@ -67,12 +67,12 @@ RunFaceReconstructionContractSmoke();
 RunMeasurementFacePreviewSmoke();
 RunLastGoodFeatureMeshSmoke();
 RunMeasurementAvatarTrainingPackageSmoke();
-RunEpisodeMonitorStartupOptionsSmoke();
+RunAvatarBuilderStartupOptionsSmoke();
 RunMeasurementAvatarEasyModeAdvisorSmoke();
 RunMeasurementAvatarCapturePlanSmoke();
 RunSyntheticLandmarkStressArtifactSmoke();
 RunTexturePreviewRoutingSmoke();
-Console.WriteLine("Episode Monitor vision smoke checks passed.");
+Console.WriteLine("Avatar Builder vision smoke checks passed.");
 
 const int SyntheticVideoWidth = 640;
 const int SyntheticVideoHeight = 360;
@@ -115,7 +115,7 @@ static void RunSavedDataAudit(string folder, bool writeReports)
         readinessPath = new PersonalFaceCorpusReadinessStore().Write(folder, readiness);
     }
 
-    Console.WriteLine($"Episode Monitor data audit: {folder}");
+    Console.WriteLine($"Avatar Builder data audit: {folder}");
     Console.WriteLine($"Subject: {model.SubjectDisplayName} ({model.SubjectId})");
     Console.WriteLine($"Accepted samples: {model.AcceptedSamples}");
     Console.WriteLine($"Retained journal rows: {samples.Count}");
@@ -1129,7 +1129,7 @@ static void RunApertureSmoke()
         !FaceCandidateSelector.IsAcceptableTrackingCandidate(tinyReframeDecoy, previousTrackedFace, 320, 240, missedFrames: 5),
         "face candidate selector accepted an implausibly tiny reframe decoy");
 
-    var physicalIdentity = @"\\?\usb#vid_2e1a&pid_4c01&mi_00#episode-monitor-camera";
+    var physicalIdentity = @"\\?\usb#vid_2e1a&pid_4c01&mi_00#avatar-builder-camera";
     var mediaFoundationCameras = new[]
     {
         new CameraDevice(0, "Insta360 Link 2 Pro", physicalIdentity + @"#{e5323777-f976-4f5b-9b55-b94699c46e44}\global", "Media Foundation")
@@ -2246,7 +2246,7 @@ static void RunApertureSmoke()
         timeline.Samples[0].CaptureQualityCanCollect == false
         && timeline.Samples[0].CaptureQualityIssues.Contains("small face", StringComparison.OrdinalIgnoreCase),
         "landmark timeline did not retain limited capture quality evidence");
-    var timelineFolder = Path.Combine(Path.GetTempPath(), $"EpisodeMonitorVisionSmoke-{Guid.NewGuid():N}");
+    var timelineFolder = Path.Combine(Path.GetTempPath(), $"AvatarBuilderVisionSmoke-{Guid.NewGuid():N}");
     var timelineFiles = timeline.Write(timelineFolder);
     Require(File.Exists(timelineFiles.JsonPath), "landmark timeline JSON file was not written");
     Require(File.Exists(timelineFiles.CsvPath), "landmark timeline CSV file was not written");
@@ -2332,7 +2332,7 @@ static void RunPersonalFaceModelSmoke()
     var lastMetrics = FaceLandmarkMetrics.None;
     var lastStability = FaceLockStabilityAnalysis.Waiting;
     var journal = new PersonalFaceMeasurementJournal(TimeSpan.Zero, 1_000_000L);
-    var journalRoot = Path.Combine(Path.GetTempPath(), $"EpisodeMonitorPersonalJournalSmoke-{Guid.NewGuid():N}");
+    var journalRoot = Path.Combine(Path.GetTempPath(), $"AvatarBuilderPersonalJournalSmoke-{Guid.NewGuid():N}");
     var lastJournalPath = "";
     var collectionAuditObservations = new List<PersonalFaceCollectionAuditObservation>();
 
@@ -2807,7 +2807,7 @@ static void RunPersonalFaceModelSmoke()
     Require(budgetReport.BytesAfter <= budgetReport.BudgetBytes, $"personal measurement journal budget report stayed over budget: {budgetReport.BytesAfter}/{budgetReport.BudgetBytes}");
     Directory.Delete(journalRoot, recursive: true);
 
-    var oversizedJournalRoot = Path.Combine(Path.GetTempPath(), $"EpisodeMonitorOversizedPersonalJournalSmoke-{Guid.NewGuid():N}");
+    var oversizedJournalRoot = Path.Combine(Path.GetTempPath(), $"AvatarBuilderOversizedPersonalJournalSmoke-{Guid.NewGuid():N}");
     var oversizedMeasurementFolder = Path.Combine(oversizedJournalRoot, "measurements");
     Directory.CreateDirectory(oversizedMeasurementFolder);
     var oversizedPath = Path.Combine(oversizedMeasurementFolder, "oversized.jsonl");
@@ -3363,7 +3363,7 @@ static void RunStoredHeadPoseRoutingSmoke()
         pose);
     Require(Math.Abs(observation.HeadYawDegrees - 16d) < 0.001d, $"motion observation stored stale B/Y rotation: {observation.HeadYawDegrees}");
 
-    var journalRoot = Path.Combine(Path.GetTempPath(), $"EpisodeMonitorStoredPoseSmoke-{Guid.NewGuid():N}");
+    var journalRoot = Path.Combine(Path.GetTempPath(), $"AvatarBuilderStoredPoseSmoke-{Guid.NewGuid():N}");
     try
     {
         var journal = new PersonalFaceMeasurementJournal(TimeSpan.Zero, 1_000_000L);
@@ -3433,7 +3433,7 @@ static void RunPersonalFaceMotionModelSmoke()
     Require(model.EyeClosingWithMouthOpeningRate > 0.9d, $"eye/mouth coupling rate was too low: {model.EyeClosingWithMouthOpeningRate}");
     Require(model.EyeClosingWithJawDroopRate > 0.9d, $"eye/jaw coupling rate was too low: {model.EyeClosingWithJawDroopRate}");
 
-    var root = Path.Combine(Path.GetTempPath(), $"EpisodeMonitorMotionModelSmoke-{Guid.NewGuid():N}");
+    var root = Path.Combine(Path.GetTempPath(), $"AvatarBuilderMotionModelSmoke-{Guid.NewGuid():N}");
     var path = new PersonalFaceMotionModelStore().Write(root, model);
     Require(File.Exists(path), "personal face motion model JSON was not written");
     var json = File.ReadAllText(path);
@@ -3466,7 +3466,7 @@ static void RunFaceReconstructionContractSmoke()
         identityConfidencePercent: 96d);
     Require(blockedGate.GateDecision == "paused", "face reconstruction gate accepted an unconfirmed subject");
 
-    var jobRoot = Path.Combine(Path.GetTempPath(), $"EpisodeMonitorReconstructionJobSmoke-{Guid.NewGuid():N}");
+    var jobRoot = Path.Combine(Path.GetTempPath(), $"AvatarBuilderReconstructionJobSmoke-{Guid.NewGuid():N}");
     var store = new FaceReconstructionJobStore();
     var sourceFrames = new[]
     {
@@ -3608,7 +3608,7 @@ static void RunMeasurementFacePreviewSmoke()
     Require(preview.Polylines.Any(static line => line.Role == "jaw-droop"), "measurement face preview did not include jaw-droop geometry");
     ValidateMeasurementFacePreviewGeometry(preview, "measurement face preview");
 
-    var previewRoot = Path.Combine(Path.GetTempPath(), $"EpisodeMonitorMeasurementPreviewSmoke-{Guid.NewGuid():N}");
+    var previewRoot = Path.Combine(Path.GetTempPath(), $"AvatarBuilderMeasurementPreviewSmoke-{Guid.NewGuid():N}");
     var files = new MeasurementFacePreviewStore().Write(previewRoot, preview);
     Require(File.Exists(files.JsonPath), "measurement face preview JSON was not written");
     Require(File.Exists(files.HtmlPath), "measurement face preview HTML was not written");
@@ -3974,7 +3974,7 @@ static void RunLastGoodFeatureMeshSmoke()
         stableZLock.ZFindings.Any(static finding => finding.Contains("closer/farther", StringComparison.OrdinalIgnoreCase)),
         "last good feature stability analyzer did not report stable Z distance attachment");
 
-    var root = Path.Combine(Path.GetTempPath(), $"episode-monitor-last-good-features-{Guid.NewGuid():N}");
+    var root = Path.Combine(Path.GetTempPath(), $"avatar-builder-last-good-features-{Guid.NewGuid():N}");
     Directory.CreateDirectory(root);
     try
     {
@@ -4804,7 +4804,7 @@ static void RunMeasurementAvatarTrainingPackageSmoke()
     Require(seedPackage.TemplatePriorContributionPercent == 100d, $"template-prior-only package contribution was not 100%: {seedPackage.TemplatePriorContributionPercent}");
     Require(seedPackage.MeasurementContributionPercent == 0d, $"template-prior-only package measured contribution was not 0%: {seedPackage.MeasurementContributionPercent}");
 
-    var packageRoot = Path.Combine(Path.GetTempPath(), $"EpisodeMonitorAvatarPackageSmoke-{Guid.NewGuid():N}");
+    var packageRoot = Path.Combine(Path.GetTempPath(), $"AvatarBuilderAvatarPackageSmoke-{Guid.NewGuid():N}");
     var files = new MeasurementAvatarTrainingPackageStore().Write(packageRoot, package);
     Require(File.Exists(files.JsonPath), "measurement avatar package JSON was not written");
     Require(File.Exists(files.HtmlPath), "measurement avatar package HTML was not written");
@@ -4862,19 +4862,19 @@ static void RunMeasurementAvatarTrainingPackageSmoke()
     Directory.Delete(packageRoot, recursive: true);
 }
 
-static void RunEpisodeMonitorStartupOptionsSmoke()
+static void RunAvatarBuilderStartupOptionsSmoke()
 {
-    var easy = EpisodeMonitorStartupOptions.Parse(["--easy-avatar", "--output-folder", @"D:\Episode Monitor Output"]);
+    var easy = AvatarBuilderStartupOptions.Parse(["--easy-avatar", "--output-folder", @"D:\Avatar Builder Output"]);
     Require(easy.EasyAvatarMode, "startup options did not enable easy avatar mode");
     Require(easy.OpenAvatarSystem, "easy avatar mode did not imply opening the Avatar System");
     Require(easy.StartAvatarLearning, "easy avatar mode did not imply avatar learning request");
-    Require(easy.OutputFolder == @"D:\Episode Monitor Output", $"startup options did not parse separated output folder: {easy.OutputFolder}");
+    Require(easy.OutputFolder == @"D:\Avatar Builder Output", $"startup options did not parse separated output folder: {easy.OutputFolder}");
 
-    var makeAvatar = EpisodeMonitorStartupOptions.Parse(["/make-avatar", "/output=E:\\Avatar Data"]);
+    var makeAvatar = AvatarBuilderStartupOptions.Parse(["/make-avatar", "/output=E:\\Avatar Data"]);
     Require(makeAvatar.EasyAvatarMode && makeAvatar.OpenAvatarSystem && makeAvatar.StartAvatarLearning, "make-avatar alias did not match easy avatar behavior");
     Require(makeAvatar.OutputFolder == @"E:\Avatar Data", $"startup options did not parse inline output folder: {makeAvatar.OutputFolder}");
 
-    var explicitFalse = EpisodeMonitorStartupOptions.Parse(["--easy-avatar=false", "--open-avatar-system"]);
+    var explicitFalse = AvatarBuilderStartupOptions.Parse(["--easy-avatar=false", "--open-avatar-system"]);
     Require(!explicitFalse.EasyAvatarMode, "explicit false easy avatar option was not honored");
     Require(explicitFalse.OpenAvatarSystem, "open avatar system option was not honored after explicit false easy avatar");
     Require(!explicitFalse.StartAvatarLearning, "explicit false easy avatar unexpectedly requested learning");
@@ -5009,7 +5009,7 @@ static void RunMeasurementAvatarCapturePlanSmoke()
     Require(!blockedPlan.CanCollectMeasurements, "measurement avatar capture plan allowed collection with an unconfirmed subject gate");
     Require(blockedPlan.Items.Count == 1 && blockedPlan.Items[0].Id == "confirm-subject", "blocked capture plan did not focus only on subject confirmation");
 
-    var planRoot = Path.Combine(Path.GetTempPath(), $"EpisodeMonitorAvatarCapturePlanSmoke-{Guid.NewGuid():N}");
+    var planRoot = Path.Combine(Path.GetTempPath(), $"AvatarBuilderAvatarCapturePlanSmoke-{Guid.NewGuid():N}");
     var files = new MeasurementAvatarCapturePlanStore().Write(planRoot, plan);
     Require(File.Exists(files.JsonPath), "measurement avatar capture plan JSON was not written");
     Require(File.Exists(files.HtmlPath), "measurement avatar capture plan HTML was not written");
@@ -6065,7 +6065,7 @@ static void WriteSyntheticLandmarkStress(string outputPath)
 
 static void RunSyntheticLandmarkStressArtifactSmoke()
 {
-    var outputPath = Path.Combine(Path.GetTempPath(), $"EpisodeMonitorSyntheticStress-{Guid.NewGuid():N}", "stress_summary.json");
+    var outputPath = Path.Combine(Path.GetTempPath(), $"AvatarBuilderSyntheticStress-{Guid.NewGuid():N}", "stress_summary.json");
     WriteSyntheticLandmarkStress(outputPath);
     Require(File.Exists(outputPath), "synthetic landmark stress smoke did not write summary JSON");
 

@@ -45,9 +45,9 @@ if ([string]::IsNullOrWhiteSpace($OutputRoot)) {
 }
 
 New-Item -ItemType Directory -Force -Path $OutputRoot | Out-Null
-$buildRoot = Join-Path ([IO.Path]::GetTempPath()) "EpisodeMonitorRealClipBatch\$runStamp"
+$buildRoot = Join-Path ([IO.Path]::GetTempPath()) "AvatarBuilderRealClipBatch\$runStamp"
 $buildOutputRoot = Join-Path $buildRoot "bin\"
-$evaluatorDll = Join-Path $buildOutputRoot "Debug\net10.0-windows\EpisodeMonitorVisionEval.dll"
+$evaluatorDll = Join-Path $buildOutputRoot "Debug\net10.0-windows\AvatarBuilderVisionEval.dll"
 
 function Invoke-Checked {
     param(
@@ -782,11 +782,11 @@ function Write-HtmlReport {
 
     $html = New-Object System.Text.StringBuilder
     [void]$html.AppendLine("<!doctype html>")
-    [void]$html.AppendLine("<html><head><meta charset=""utf-8""><title>Episode Monitor Real Clip Batch</title>")
+    [void]$html.AppendLine("<html><head><meta charset=""utf-8""><title>Avatar Builder Real Clip Batch</title>")
     [void]$html.AppendLine("<style>")
     [void]$html.AppendLine("body{font-family:Segoe UI,Arial,sans-serif;background:#0b1117;color:#e7eef7;margin:24px;}a{color:#8ac7ff}.clip{border:1px solid #294055;padding:16px;margin:18px 0;background:#101a23}.warn{color:#ffd18a}.ok{color:#8ee0a1}table{border-collapse:collapse;width:100%;margin:10px 0}th,td{border-bottom:1px solid #263948;padding:6px 8px;text-align:left;vertical-align:top}img{max-width:360px;border:1px solid #294055;margin:6px 10px 12px 0}.frames{display:flex;flex-wrap:wrap}.frame{max-width:380px}.small{color:#aebed0;font-size:12px}")
     [void]$html.AppendLine("</style></head><body>")
-    [void]$html.AppendLine("<h1>Episode Monitor Real Clip Batch</h1>")
+    [void]$html.AppendLine("<h1>Avatar Builder Real Clip Batch</h1>")
     [void]$html.AppendLine("<p class=""small"">Started $(HtmlEncode $BatchSummary.StartedAt). This report is for data-gathering and clinician review only; it is not diagnostic.</p>")
     $eyeInsetEnabled = -not [string]::IsNullOrWhiteSpace([string]$BatchSummary.EyeInset) -and -not ([string]$BatchSummary.EyeInset).Equals("none", [StringComparison]::OrdinalIgnoreCase)
     $eyeInsetSummary = if ($eyeInsetEnabled) { ", eye-inset detected clips $($BatchSummary.EyeInsetDetectedClipCount)/$($BatchSummary.ClipCount), eye-inset measurement $(Format-Percent $BatchSummary.MinimumEyeInsetMeasurementRate), eye-inset diagnostics $(Format-Percent $BatchSummary.MinimumEyeInsetImageQualityRate), max eye-inset opening $(Format-Number $BatchSummary.MaximumEyeInsetOpening ""0.###""), eye-inset agreement trust $(Format-Number $BatchSummary.AverageEyeInsetFullFrameAgreementTrustPercent ""0.0"")%" } else { "" }
@@ -902,10 +902,10 @@ function Write-HtmlReport {
 
 if (-not $SkipBuild) {
     Write-Host "Building offline vision evaluator..."
-    Invoke-Checked dotnet build .\tools\EpisodeMonitorVisionEval\EpisodeMonitorVisionEval.csproj --no-restore /p:UseSharedCompilation=false /p:UseAppHost=false "/p:BaseOutputPath=$buildOutputRoot"
+    Invoke-Checked dotnet build .\tools\AvatarBuilderVisionEval\AvatarBuilderVisionEval.csproj --no-restore /p:UseSharedCompilation=false /p:UseAppHost=false "/p:BaseOutputPath=$buildOutputRoot"
 }
 else {
-    $evaluatorDll = Join-Path $repoRoot "tools\EpisodeMonitorVisionEval\bin\Debug\net10.0-windows\EpisodeMonitorVisionEval.dll"
+    $evaluatorDll = Join-Path $repoRoot "tools\AvatarBuilderVisionEval\bin\Debug\net10.0-windows\AvatarBuilderVisionEval.dll"
 }
 
 if (-not (Test-Path -LiteralPath $evaluatorDll)) {

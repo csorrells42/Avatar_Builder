@@ -1,4 +1,4 @@
-namespace EpisodeMonitor.Modules.Vision.Analysis;
+namespace AvatarBuilder.Modules.Vision.Analysis;
 
 public sealed class FaceLandmarkCueBaselineSnapshot
 {

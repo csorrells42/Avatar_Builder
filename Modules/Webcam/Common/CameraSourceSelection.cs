@@ -1,8 +1,8 @@
-using EpisodeMonitor.Modules.Webcam.DirectShow;
-using EpisodeMonitor.Modules.Webcam.DirectX12;
-using EpisodeMonitor.Modules.Webcam.MediaFoundation;
+using AvatarBuilder.Modules.Webcam.DirectShow;
+using AvatarBuilder.Modules.Webcam.DirectX12;
+using AvatarBuilder.Modules.Webcam.MediaFoundation;
 
-namespace EpisodeMonitor.Modules.Webcam.Common;
+namespace AvatarBuilder.Modules.Webcam.Common;
 
 public static class CameraSourceSelection
 {

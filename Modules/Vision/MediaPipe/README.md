@@ -1,8 +1,8 @@
 # Vision MediaPipe
 
-Namespace: `EpisodeMonitor.Modules.Vision.MediaPipe`
+Namespace: `AvatarBuilder.Modules.Vision.MediaPipe`
 
-This folder owns the MediaPipe Face Landmarker integration behind the shared landmark tracker contracts. Episode Monitor uses MediaPipe as a local sidecar/backend, not as UI logic.
+This folder owns the MediaPipe Face Landmarker integration behind the shared landmark tracker contracts. Avatar Builder uses MediaPipe as a local sidecar/backend, not as UI logic.
 
 Reference material:
 

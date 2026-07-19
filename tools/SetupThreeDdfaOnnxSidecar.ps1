@@ -31,8 +31,8 @@ if (-not $SkipPythonPackages) {
     & $Python -m pip install numpy opencv-python pyyaml onnx onnxruntime onnxscript torch torchvision scipy scikit-image cython
 }
 
-$env:EPISODE_MONITOR_3DDFA_REPO = $targetRepo
-$env:EPISODE_MONITOR_3DDFA_PYTHON = $Python
+$env:AVATAR_BUILDER_3DDFA_REPO = $targetRepo
+$env:AVATAR_BUILDER_3DDFA_PYTHON = $Python
 $weightCandidates = @(
     (Join-Path $targetRepo "weights\mb1_120x120.onnx"),
     (Join-Path $targetRepo "weights\mb1_120x120.pth")
@@ -47,9 +47,9 @@ foreach ($candidate in $weightCandidates) {
 
 Write-Host "3DDFA_V2 repo: $targetRepo"
 Write-Host "Python: $Python"
-Write-Host "Set these before launching Episode Monitor if you are not using the repo-local .venv:"
-Write-Host "  `$env:EPISODE_MONITOR_3DDFA_REPO = `"$targetRepo`""
-Write-Host "  `$env:EPISODE_MONITOR_3DDFA_PYTHON = `"$Python`""
+Write-Host "Set these before launching Avatar Builder if you are not using the repo-local .venv:"
+Write-Host "  `$env:AVATAR_BUILDER_3DDFA_REPO = `"$targetRepo`""
+Write-Host "  `$env:AVATAR_BUILDER_3DDFA_PYTHON = `"$Python`""
 Write-Host ""
 if ($hasWeights) {
     Write-Host "3DDFA mb1_120x120 weights found."
@@ -60,5 +60,5 @@ if ($hasWeights) {
     Write-Host "  $targetRepo\weights\mb1_120x120.pth"
 }
 Write-Host ""
-Write-Host "The Episode Monitor sidecar uses the app's MediaPipe/OpenCV face box first."
+Write-Host "The Avatar Builder sidecar uses the app's MediaPipe/OpenCV face box first."
 Write-Host "3DDFA FaceBoxes weights/helpers are optional fallback detection for frames without a supplied face box."

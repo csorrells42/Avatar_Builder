@@ -1,8 +1,8 @@
-using EpisodeMonitor.Modules.Vision.Analysis;
-using EpisodeMonitor.Modules.Vision.Common;
+using AvatarBuilder.Modules.Vision.Analysis;
+using AvatarBuilder.Modules.Vision.Common;
 using System.Windows.Media.Imaging;
 
-namespace EpisodeMonitor.Modules.Vision.OpenCv;
+namespace AvatarBuilder.Modules.Vision.OpenCv;
 
 public sealed class OpenCvApertureLandmarkTracker : IStatefulFaceLandmarkTracker
 {

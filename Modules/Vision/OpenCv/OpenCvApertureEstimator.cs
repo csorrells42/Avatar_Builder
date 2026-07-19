@@ -1,10 +1,10 @@
-using EpisodeMonitor.Modules.Vision.Analysis;
-using EpisodeMonitor.Modules.Vision.Common;
+using AvatarBuilder.Modules.Vision.Analysis;
+using AvatarBuilder.Modules.Vision.Common;
 using OpenCvSharp;
 using CvRect = OpenCvSharp.Rect;
 using WpfPoint = System.Windows.Point;
 
-namespace EpisodeMonitor.Modules.Vision.OpenCv;
+namespace AvatarBuilder.Modules.Vision.OpenCv;
 
 public static class OpenCvApertureEstimator
 {

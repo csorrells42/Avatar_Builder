@@ -1,6 +1,6 @@
-using EpisodeMonitor.Modules.Vision.OpenCv;
+using AvatarBuilder.Modules.Vision.OpenCv;
 
-namespace EpisodeMonitor.Modules.Vision.Analysis;
+namespace AvatarBuilder.Modules.Vision.Analysis;
 
 public sealed class EyeInsetCueAnalyzer
 {

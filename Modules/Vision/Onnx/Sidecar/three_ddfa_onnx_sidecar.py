@@ -14,7 +14,7 @@ def patch_torch_onnx_export_for_3ddfa():
     except Exception:
         return
 
-    if getattr(torch.onnx.export, "_episode_monitor_legacy_default", False):
+    if getattr(torch.onnx.export, "_avatar_builder_legacy_default", False):
         return
 
     original_export = torch.onnx.export
@@ -23,7 +23,7 @@ def patch_torch_onnx_export_for_3ddfa():
         kwargs.setdefault("dynamo", False)
         return original_export(*args, **kwargs)
 
-    export_with_legacy_default._episode_monitor_legacy_default = True
+    export_with_legacy_default._avatar_builder_legacy_default = True
     torch.onnx.export = export_with_legacy_default
 
 
@@ -44,7 +44,7 @@ def load_runtime(repo_path, config_path):
         face_boxes_class = FaceBoxes_ONNX
     except Exception as exc:
         startup_warnings.append(
-            "3DDFA FaceBoxes fallback unavailable; Episode Monitor will use the MediaPipe/OpenCV face box when supplied. "
+            "3DDFA FaceBoxes fallback unavailable; Avatar Builder will use the MediaPipe/OpenCV face box when supplied. "
             f"FaceBoxes import error: {exc}"
         )
 
@@ -313,7 +313,7 @@ def write_response(response):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Episode Monitor 3DDFA_V2 ONNX sidecar")
+    parser = argparse.ArgumentParser(description="Avatar Builder 3DDFA_V2 ONNX sidecar")
     parser.add_argument("--repo", required=True, help="Path to cloned 3DDFA_V2 repository")
     parser.add_argument("--config", required=True, help="Path to 3DDFA config yml")
     args = parser.parse_args()

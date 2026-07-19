@@ -91,7 +91,7 @@ def write_response(response):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Episode Monitor MediaPipe Face Landmarker sidecar")
+    parser = argparse.ArgumentParser(description="Avatar Builder MediaPipe Face Landmarker sidecar")
     parser.add_argument("--model", required=True, help="Path to face_landmarker.task")
     args = parser.parse_args()
 

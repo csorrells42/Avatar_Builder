@@ -1,6 +1,6 @@
 using System.Windows;
 
-namespace EpisodeMonitor.Modules.Vision.Common;
+namespace AvatarBuilder.Modules.Vision.Common;
 
 public sealed class FaceFeatureDetection
 {

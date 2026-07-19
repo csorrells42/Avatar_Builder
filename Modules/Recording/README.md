@@ -1,6 +1,6 @@
 # Recording Module
 
-Namespace: `EpisodeMonitor.Modules.Recording`
+Namespace: `AvatarBuilder.Modules.Recording`
 
 This module owns writing event video clips. It should accept already-rendered JPEG frames and output paths from the app shell, then manage encoder lifecycle.
 

@@ -4,7 +4,7 @@ using System.Text.Json;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
 
-namespace EpisodeMonitor.Modules.Vision.Onnx;
+namespace AvatarBuilder.Modules.Vision.Onnx;
 
 public sealed class ThreeDdfaOnnxReconstructionClient : IDisposable
 {
@@ -226,7 +226,7 @@ public sealed class ThreeDdfaOnnxReconstructionClient : IDisposable
 
     private static int ReadTimeoutMilliseconds()
     {
-        var configured = Environment.GetEnvironmentVariable("EPISODE_MONITOR_3DDFA_TIMEOUT_MS");
+        var configured = Environment.GetEnvironmentVariable("AVATAR_BUILDER_3DDFA_TIMEOUT_MS");
         return int.TryParse(configured, out var milliseconds)
             ? Math.Clamp(milliseconds, 500, 30000)
             : 4500;
@@ -234,7 +234,7 @@ public sealed class ThreeDdfaOnnxReconstructionClient : IDisposable
 
     private static int ReadStartupTimeoutMilliseconds()
     {
-        var configured = Environment.GetEnvironmentVariable("EPISODE_MONITOR_3DDFA_STARTUP_TIMEOUT_MS");
+        var configured = Environment.GetEnvironmentVariable("AVATAR_BUILDER_3DDFA_STARTUP_TIMEOUT_MS");
         return int.TryParse(configured, out var milliseconds)
             ? Math.Clamp(milliseconds, 1000, 60000)
             : 25000;

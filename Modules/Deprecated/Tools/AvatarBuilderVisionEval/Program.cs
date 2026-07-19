@@ -6,13 +6,13 @@ using System.Text;
 using System.Text.Json;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
-using EpisodeMonitor.Modules.Episodes;
-using EpisodeMonitor.Modules.Vision.Analysis;
-using EpisodeMonitor.Modules.Vision.Common;
-using EpisodeMonitor.Modules.Vision.OpenCv;
-using EpisodeMonitor.Modules.Vision.Personalization;
-using EpisodeMonitor.Modules.Vision.Pipeline;
-using EpisodeMonitor.Modules.Vision.Reconstruction;
+using AvatarBuilder.Modules.Episodes;
+using AvatarBuilder.Modules.Vision.Analysis;
+using AvatarBuilder.Modules.Vision.Common;
+using AvatarBuilder.Modules.Vision.OpenCv;
+using AvatarBuilder.Modules.Vision.Personalization;
+using AvatarBuilder.Modules.Vision.Pipeline;
+using AvatarBuilder.Modules.Vision.Reconstruction;
 using OpenCvSharp;
 using WpfPoint = System.Windows.Point;
 using WpfRect = System.Windows.Rect;
@@ -26,7 +26,7 @@ internal static class Program
     {
         if (args.Length == 0)
         {
-            Console.Error.WriteLine("Usage: EpisodeMonitorVisionEval <image-or-video-path> [output-folder] [sample-fps] [--eye-inset bottom-right|left,top,width,height] [--write-overlays]");
+            Console.Error.WriteLine("Usage: AvatarBuilderVisionEval <image-or-video-path> [output-folder] [sample-fps] [--eye-inset bottom-right|left,top,width,height] [--write-overlays]");
             return 2;
         }
 
@@ -1603,13 +1603,13 @@ internal static class Program
         html.AppendLine("<head>");
         html.AppendLine("<meta charset=\"utf-8\">");
         html.AppendLine("<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">");
-        html.AppendLine("<title>Episode Monitor Vision Evaluation</title>");
+        html.AppendLine("<title>Avatar Builder Vision Evaluation</title>");
         html.AppendLine("<style>");
         html.AppendLine(":root{color-scheme:dark;--bg:#071014;--panel:#0d1a22;--panel2:#112532;--line:#29465a;--text:#e7f4ff;--muted:#a8bfd1;--accent:#5fb8ff;--warn:#ffcc66;--good:#79d69c;--bad:#ff8a8a}");
         html.AppendLine("*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.45 Segoe UI,Arial,sans-serif}main{max-width:1380px;margin:0 auto;padding:24px}h1,h2{margin:0 0 12px}h1{font-size:26px}h2{font-size:18px;margin-top:24px}.subtle{color:var(--muted)}.notice{border:1px solid var(--line);background:#081820;padding:12px;margin:14px 0}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:10px}.card{border:1px solid var(--line);background:var(--panel);padding:12px}.card b{display:block;font-size:20px;margin-top:4px}.links a,.frame a{color:var(--accent)}table{width:100%;border-collapse:collapse;background:var(--panel)}th,td{border:1px solid var(--line);padding:8px;vertical-align:top}th{background:var(--panel2);text-align:left}.frames{display:grid;grid-template-columns:repeat(auto-fit,minmax(310px,1fr));gap:12px}.frame{border:1px solid var(--line);background:var(--panel);padding:10px}.frame img{width:100%;height:auto;border:1px solid #385970;background:#000}.pill{display:inline-block;border:1px solid var(--line);padding:2px 6px;margin:2px 4px 2px 0}.good{color:var(--good)}.warn{color:var(--warn)}.bad{color:var(--bad)}code{color:#cbe9ff}</style>");
         html.AppendLine("</head>");
         html.AppendLine("<body><main>");
-        html.AppendLine("<h1>Episode Monitor Vision Evaluation</h1>");
+        html.AppendLine("<h1>Avatar Builder Vision Evaluation</h1>");
         html.AppendLine("<p class=\"subtle\">Local offline review artifact for face, eyelid, mouth, jaw, and optional zoomed eye-inset tracking. This is for data gathering and clinician review only; it does not diagnose a medical condition.</p>");
         html.AppendLine("<div class=\"notice\">");
         html.AppendLine($"<div><strong>Input:</strong> <code>{H(inputPath)}</code></div>");

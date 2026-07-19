@@ -1,6 +1,6 @@
 using System.Windows.Media.Imaging;
 
-namespace EpisodeMonitor.Modules.Webcam.Common;
+namespace AvatarBuilder.Modules.Webcam.Common;
 
 public interface ICameraPreviewService : IDisposable
 {

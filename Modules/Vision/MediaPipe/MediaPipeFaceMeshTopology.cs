@@ -1,4 +1,4 @@
-namespace EpisodeMonitor.Modules.Vision.MediaPipe;
+namespace AvatarBuilder.Modules.Vision.MediaPipe;
 
 public static class MediaPipeFaceMeshTopology
 {

@@ -1,8 +1,8 @@
-using EpisodeMonitor.Modules.Webcam.Common;
+using AvatarBuilder.Modules.Webcam.Common;
 using System.Runtime.InteropServices;
 using System.Runtime.InteropServices.ComTypes;
 
-namespace EpisodeMonitor.Modules.Webcam.DirectShow;
+namespace AvatarBuilder.Modules.Webcam.DirectShow;
 
 public static class DirectShowCameraEnumerator
 {

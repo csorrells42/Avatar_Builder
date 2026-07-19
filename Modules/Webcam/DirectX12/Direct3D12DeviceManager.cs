@@ -1,7 +1,7 @@
 using System.Runtime.InteropServices;
-using EpisodeMonitor.Modules.Webcam.MediaFoundation;
+using AvatarBuilder.Modules.Webcam.MediaFoundation;
 
-namespace EpisodeMonitor.Modules.Webcam.DirectX12;
+namespace AvatarBuilder.Modules.Webcam.DirectX12;
 
 internal interface ITextureNativeDeviceManager : IDisposable
 {

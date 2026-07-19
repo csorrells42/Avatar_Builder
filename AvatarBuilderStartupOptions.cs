@@ -1,6 +1,6 @@
-namespace EpisodeMonitor;
+namespace AvatarBuilder;
 
-public sealed class EpisodeMonitorStartupOptions
+public sealed class AvatarBuilderStartupOptions
 {
     public bool EasyAvatarMode { get; init; }
 
@@ -10,9 +10,9 @@ public sealed class EpisodeMonitorStartupOptions
 
     public string OutputFolder { get; init; } = "";
 
-    public static EpisodeMonitorStartupOptions Default { get; } = new();
+    public static AvatarBuilderStartupOptions Default { get; } = new();
 
-    public static EpisodeMonitorStartupOptions Parse(IEnumerable<string>? args)
+    public static AvatarBuilderStartupOptions Parse(IEnumerable<string>? args)
     {
         if (args is null)
         {
@@ -65,7 +65,7 @@ public sealed class EpisodeMonitorStartupOptions
             }
         }
 
-        return new EpisodeMonitorStartupOptions
+        return new AvatarBuilderStartupOptions
         {
             EasyAvatarMode = easyAvatarMode,
             OpenAvatarSystem = openAvatarSystem || easyAvatarMode,

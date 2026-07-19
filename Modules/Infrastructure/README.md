@@ -1,6 +1,6 @@
 # Infrastructure Module
 
-Namespace: `EpisodeMonitor.Modules.Infrastructure`
+Namespace: `AvatarBuilder.Modules.Infrastructure`
 
 This module owns tiny host/runtime helpers shared by multiple modules. Keep it small; domain-specific helpers should live with their domain.
 

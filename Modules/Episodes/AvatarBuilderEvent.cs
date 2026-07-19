@@ -1,6 +1,6 @@
-namespace EpisodeMonitor.Modules.Episodes;
+namespace AvatarBuilder.Modules.Episodes;
 
-public sealed class EpisodeMonitorEvent
+public sealed class AvatarBuilderEvent
 {
     public string EventId { get; init; } = Guid.NewGuid().ToString("N");
 

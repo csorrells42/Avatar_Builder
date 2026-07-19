@@ -3,9 +3,9 @@ using System.Globalization;
 using System.Net;
 using System.Text;
 using System.Text.Json;
-using EpisodeMonitor.Modules.Infrastructure;
+using AvatarBuilder.Modules.Infrastructure;
 
-namespace EpisodeMonitor.Modules.Vision.Personalization;
+namespace AvatarBuilder.Modules.Vision.Personalization;
 
 public sealed class PersonalFaceCorpusReadinessStore
 {

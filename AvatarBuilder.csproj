@@ -1,4 +1,4 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
@@ -7,10 +7,10 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <UseWPF>true</UseWPF>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
-    <AssemblyName>EpisodeMonitor</AssemblyName>
-    <Product>Episode Monitor</Product>
-    <AssemblyTitle>Episode Monitor</AssemblyTitle>
-    <Description>Standalone camera-based low-motion episode monitor for clinician review.</Description>
+    <AssemblyName>AvatarBuilder</AssemblyName>
+    <Product>Avatar Builder</Product>
+    <AssemblyTitle>Avatar Builder</AssemblyTitle>
+    <Description>Standalone camera-based 3D avatar capture and reconstruction application.</Description>
   </PropertyGroup>
 
   <ItemGroup>

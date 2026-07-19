@@ -1,4 +1,4 @@
-namespace EpisodeMonitor.Modules.Webcam.Common;
+namespace AvatarBuilder.Modules.Webcam.Common;
 
 public sealed class CameraVideoMode
 {

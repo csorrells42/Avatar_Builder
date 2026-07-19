@@ -9,6 +9,6 @@ dependencies/vision/opencv/facemark/lbfmodel.yaml
 dependencies/vision/opencv/facemark/lbfmodel_manifest.json
 ```
 
-When `lbfmodel.yaml` is present, Episode Monitor can run OpenCV's model-backed 68-point facemark backend before falling back to the aperture-only OpenCV tracker. The 68 landmarks are mapped into the shared face contour, eye contours, outer lip contour, inner lip contour, and jaw contour used by overlays, cue scoring, event videos, and event summaries.
+When `lbfmodel.yaml` is present, Avatar Builder can run OpenCV's model-backed 68-point facemark backend before falling back to the aperture-only OpenCV tracker. The 68 landmarks are mapped into the shared face contour, eye contours, outer lip contour, inner lip contour, and jaw contour used by overlays, cue scoring, event videos, and event summaries.
 
 Keep model/runtime files under `dependencies` so they are copied beside the executable and the app remains portable.

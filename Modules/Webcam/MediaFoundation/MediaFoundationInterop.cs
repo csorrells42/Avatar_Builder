@@ -1,7 +1,7 @@
 using System.Runtime.InteropServices;
 using System.Text;
 
-namespace EpisodeMonitor.Modules.Webcam.MediaFoundation;
+namespace AvatarBuilder.Modules.Webcam.MediaFoundation;
 
 internal static class MediaFoundationInterop
 {

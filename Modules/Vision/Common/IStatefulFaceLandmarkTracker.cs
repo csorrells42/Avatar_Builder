@@ -1,4 +1,4 @@
-namespace EpisodeMonitor.Modules.Vision.Common;
+namespace AvatarBuilder.Modules.Vision.Common;
 
 public interface IStatefulFaceLandmarkTracker : IFaceLandmarkTracker
 {

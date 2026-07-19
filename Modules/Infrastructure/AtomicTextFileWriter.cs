@@ -1,7 +1,7 @@
 using System.IO;
 using System.Text;
 
-namespace EpisodeMonitor.Modules.Infrastructure;
+namespace AvatarBuilder.Modules.Infrastructure;
 
 public static class AtomicTextFileWriter
 {

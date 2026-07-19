@@ -1,6 +1,6 @@
 using System.IO;
 
-namespace EpisodeMonitor.Modules.Infrastructure;
+namespace AvatarBuilder.Modules.Infrastructure;
 
 public static class FfmpegLocator
 {

@@ -1,7 +1,7 @@
-using EpisodeMonitor.Modules.Vision.Common;
+using AvatarBuilder.Modules.Vision.Common;
 using System.Windows.Media.Imaging;
 
-namespace EpisodeMonitor.Modules.Vision.MediaPipe;
+namespace AvatarBuilder.Modules.Vision.MediaPipe;
 
 public sealed class DenseFaceMeshLandmarkTracker : IFaceLandmarkTracker
 {

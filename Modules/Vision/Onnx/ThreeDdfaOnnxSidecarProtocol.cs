@@ -1,6 +1,6 @@
 using System.Text.Json.Serialization;
 
-namespace EpisodeMonitor.Modules.Vision.Onnx;
+namespace AvatarBuilder.Modules.Vision.Onnx;
 
 internal sealed class ThreeDdfaOnnxSidecarRequest
 {

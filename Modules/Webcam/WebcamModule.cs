@@ -1,12 +1,12 @@
 using System.Windows.Controls;
-using EpisodeMonitor.Modules.Webcam.Common;
-using EpisodeMonitor.Modules.Webcam.DirectShow;
-using EpisodeMonitor.Modules.Webcam.DirectX12;
-using EpisodeMonitor.Modules.Webcam.Ffmpeg;
-using EpisodeMonitor.Modules.Webcam.MediaFoundation;
-using EpisodeMonitor.Modules.Webcam.Pipeline;
+using AvatarBuilder.Modules.Webcam.Common;
+using AvatarBuilder.Modules.Webcam.DirectShow;
+using AvatarBuilder.Modules.Webcam.DirectX12;
+using AvatarBuilder.Modules.Webcam.Ffmpeg;
+using AvatarBuilder.Modules.Webcam.MediaFoundation;
+using AvatarBuilder.Modules.Webcam.Pipeline;
 
-namespace EpisodeMonitor.Modules.Webcam;
+namespace AvatarBuilder.Modules.Webcam;
 
 public static class WebcamModule
 {

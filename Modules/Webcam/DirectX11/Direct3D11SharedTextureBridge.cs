@@ -1,8 +1,8 @@
 using System.Runtime.InteropServices;
-using EpisodeMonitor.Modules.Webcam.MediaFoundation;
+using AvatarBuilder.Modules.Webcam.MediaFoundation;
 using Vortice.DXGI;
 
-namespace EpisodeMonitor.Modules.Webcam.DirectX11;
+namespace AvatarBuilder.Modules.Webcam.DirectX11;
 
 internal sealed class Direct3D11SharedTextureBridge : IDisposable
 {

@@ -3,10 +3,10 @@ using System.IO;
 using System.Net;
 using System.Text;
 using System.Text.Json;
-using EpisodeMonitor.Modules.Infrastructure;
-using EpisodeMonitor.Modules.Vision.Personalization;
+using AvatarBuilder.Modules.Infrastructure;
+using AvatarBuilder.Modules.Vision.Personalization;
 
-namespace EpisodeMonitor.Modules.Vision.Reconstruction;
+namespace AvatarBuilder.Modules.Vision.Reconstruction;
 
 public sealed class MeasurementAvatarTrainingPackageStore
 {

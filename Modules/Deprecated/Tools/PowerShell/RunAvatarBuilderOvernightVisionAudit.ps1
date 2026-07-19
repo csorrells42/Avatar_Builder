@@ -29,8 +29,8 @@ if ([string]::IsNullOrWhiteSpace($OutputRoot)) {
 }
 
 New-Item -ItemType Directory -Force -Path $OutputRoot | Out-Null
-$soakScript = Join-Path $PSScriptRoot "RunEpisodeMonitorVisionSoak.ps1"
-$batchScript = Join-Path $PSScriptRoot "RunEpisodeMonitorRealClipBatch.ps1"
+$soakScript = Join-Path $PSScriptRoot "RunAvatarBuilderVisionSoak.ps1"
+$batchScript = Join-Path $PSScriptRoot "RunAvatarBuilderRealClipBatch.ps1"
 
 function Resolve-SampleMediaPaths {
     param([string[]]$Paths)
@@ -192,9 +192,9 @@ function Write-HtmlReport {
     $status = if ($Summary.Passed) { "Passed" } else { "Needs review" }
     $statusClass = if ($Summary.Passed) { "good" } else { "bad" }
     $html = New-Object System.Text.StringBuilder
-    [void]$html.AppendLine("<!doctype html><html><head><meta charset=""utf-8""><title>Episode Monitor Overnight Vision Audit</title>")
+    [void]$html.AppendLine("<!doctype html><html><head><meta charset=""utf-8""><title>Avatar Builder Overnight Vision Audit</title>")
     [void]$html.AppendLine("<style>body{font-family:Segoe UI,Arial,sans-serif;background:#091016;color:#e8f3ff;margin:24px}a{color:#8cc8ff}.panel{border:1px solid #2c4054;padding:16px;margin:16px 0;background:#0f1a23}table{border-collapse:collapse;width:100%;margin-top:10px}th,td{border-bottom:1px solid #263747;padding:8px;text-align:left}th{color:#bfe1ff}.good{color:#7ee6a1}.bad{color:#ff9b9b}.muted{color:#9fb2c1}</style></head><body>")
-    [void]$html.AppendLine("<h1>Episode Monitor Overnight Vision Audit</h1>")
+    [void]$html.AppendLine("<h1>Avatar Builder Overnight Vision Audit</h1>")
     [void]$html.AppendLine("<p class=""$statusClass""><strong>$status</strong></p>")
     [void]$html.AppendLine("<div class=""panel""><h2>Summary</h2><table><tbody>")
     [void]$html.AppendLine("<tr><th>Started</th><td>$(HtmlEncode $Summary.StartedAt)</td></tr>")
