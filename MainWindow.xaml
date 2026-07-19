@@ -21,6 +21,96 @@
             <Setter Property="Foreground" Value="#f5f8fb" />
         </Style>
 
+        <Style TargetType="Menu">
+            <Setter Property="Background" Value="#101820" />
+            <Setter Property="Foreground" Value="#f5f8fb" />
+        </Style>
+
+        <Style TargetType="MenuItem">
+            <Setter Property="Background" Value="Transparent" />
+            <Setter Property="Foreground" Value="#f5f8fb" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="MenuItem">
+                        <Grid SnapsToDevicePixels="True">
+                            <Border x:Name="MenuItemBorder"
+                                    Background="{TemplateBinding Background}"
+                                    BorderBrush="Transparent"
+                                    BorderThickness="1"
+                                    Padding="10,6">
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition x:Name="CheckColumn" Width="18" />
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock x:Name="CheckIndicator"
+                                               Grid.Column="0"
+                                               Text="&#xE73E;"
+                                               FontFamily="Segoe MDL2 Assets"
+                                               Foreground="#8ee6b5"
+                                               Visibility="Collapsed"
+                                               VerticalAlignment="Center" />
+                                    <ContentPresenter Grid.Column="1"
+                                                      ContentSource="Header"
+                                                      RecognizesAccessKey="True"
+                                                      HorizontalAlignment="Left"
+                                                      VerticalAlignment="Center" />
+                                    <TextBlock x:Name="SubmenuIndicator"
+                                               Grid.Column="2"
+                                               Text="&#xE76C;"
+                                               FontFamily="Segoe MDL2 Assets"
+                                               Foreground="#b9d7ef"
+                                               Visibility="Collapsed"
+                                               Margin="14,0,0,0"
+                                               VerticalAlignment="Center" />
+                                </Grid>
+                            </Border>
+                            <Popup x:Name="PART_Popup"
+                                   AllowsTransparency="True"
+                                   Focusable="False"
+                                   IsOpen="{Binding IsSubmenuOpen, RelativeSource={RelativeSource TemplatedParent}}"
+                                   Placement="Right"
+                                   PopupAnimation="Fade">
+                                <Border Background="#101820"
+                                        BorderBrush="#37506a"
+                                        BorderThickness="1"
+                                        MinWidth="170"
+                                        Padding="2">
+                                    <StackPanel IsItemsHost="True" KeyboardNavigation.DirectionalNavigation="Cycle" />
+                                </Border>
+                            </Popup>
+                        </Grid>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsHighlighted" Value="True">
+                                <Setter TargetName="MenuItemBorder" Property="Background" Value="#243f58" />
+                                <Setter TargetName="MenuItemBorder" Property="BorderBrush" Value="#4c7598" />
+                            </Trigger>
+                            <Trigger Property="IsSubmenuOpen" Value="True">
+                                <Setter TargetName="MenuItemBorder" Property="Background" Value="#183149" />
+                                <Setter TargetName="MenuItemBorder" Property="BorderBrush" Value="#4c7598" />
+                            </Trigger>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter Property="Opacity" Value="0.55" />
+                            </Trigger>
+                            <Trigger Property="IsCheckable" Value="False">
+                                <Setter TargetName="CheckColumn" Property="Width" Value="0" />
+                            </Trigger>
+                            <Trigger Property="IsChecked" Value="True">
+                                <Setter TargetName="CheckIndicator" Property="Visibility" Value="Visible" />
+                            </Trigger>
+                            <Trigger Property="Role" Value="TopLevelHeader">
+                                <Setter TargetName="PART_Popup" Property="Placement" Value="Bottom" />
+                            </Trigger>
+                            <Trigger Property="Role" Value="SubmenuHeader">
+                                <Setter TargetName="SubmenuIndicator" Property="Visibility" Value="Visible" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
         <Style TargetType="Button">
             <Setter Property="Background" Value="#142130" />
             <Setter Property="Foreground" Value="#f5f8fb" />
@@ -147,11 +237,50 @@
     <Grid Margin="14">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
             <RowDefinition Height="*" />
             <RowDefinition Height="Auto" />
         </Grid.RowDefinitions>
 
-        <Border Grid.Row="0" Background="{StaticResource PanelBrush}" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" Padding="12">
+        <Menu Grid.Row="0" Margin="0,0,0,8">
+            <MenuItem Header="_File">
+                <MenuItem x:Name="LoginLogoutMenuItem" Header="_Login..." Click="LoginLogoutClicked" />
+                <MenuItem Header="_Choose Data Folder..." Click="OpenDataFolderClicked" />
+                <MenuItem Header="E_xit" Click="CloseClicked" />
+            </MenuItem>
+            <MenuItem Header="_View">
+                <MenuItem x:Name="DirectX12PreviewMenuItem"
+                          Header="_DX12 Preview Viewport"
+                          IsCheckable="True"
+                          IsChecked="True"
+                          Click="DirectX12PreviewMenuItemClicked" />
+                <MenuItem x:Name="LiveWireframeMenuItem"
+                          Header="Show Live _Wireframe"
+                          IsCheckable="True"
+                          ToolTip="Hides the webcam image and shows the current camera-relative MediaPipe face mesh while analysis keeps running."
+                          Click="LiveWireframeMenuItemClicked" />
+                <MenuItem Header="_Tracking Fidelity">
+                    <MenuItem x:Name="TrackingFidelity4KMenuItem"
+                              Header="_4K - 3840 camera / 1920 analysis / 15 fps"
+                              IsCheckable="True"
+                              IsChecked="True"
+                              Tag="2"
+                              Click="TrackingFidelityMenuItemClicked" />
+                    <MenuItem x:Name="TrackingFidelityHdMenuItem"
+                              Header="_HD - 1920 analysis / 18 fps"
+                              IsCheckable="True"
+                              Tag="1"
+                              Click="TrackingFidelityMenuItemClicked" />
+                    <MenuItem x:Name="TrackingFidelitySafeMenuItem"
+                              Header="_Safe Preview - 960 analysis / 15 fps"
+                              IsCheckable="True"
+                              Tag="0"
+                              Click="TrackingFidelityMenuItemClicked" />
+                </MenuItem>
+            </MenuItem>
+        </Menu>
+
+        <Border Grid.Row="1" Background="{StaticResource PanelBrush}" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" Padding="12">
             <Grid>
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="Auto" />
@@ -175,7 +304,7 @@
             </Grid>
         </Border>
 
-        <Grid Grid.Row="1" Margin="0,14,0,14">
+        <Grid Grid.Row="2" Margin="0,14,0,14">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="*" />
                 <ColumnDefinition Width="390" />
@@ -208,19 +337,7 @@
                                 <TextBlock Text="Avatar Building" FontSize="20" FontWeight="Bold" />
                                 <TextBlock Text="Captures 3DDFA face reconstruction data while keeping live eye, jaw, and brow tracking available for review." Foreground="#b9d7ef" TextWrapping="Wrap" Margin="0,8,0,8" />
 
-                                <TextBlock Text="Avatar user" FontWeight="SemiBold" Margin="0,4,0,0" />
-                                <ComboBox x:Name="AvatarProfileComboBox" DisplayMemberPath="DisplayName" SelectionChanged="AvatarProfileSelectionChanged" />
-                                <Grid Margin="0,8,0,0">
-                                    <Grid.ColumnDefinitions>
-                                        <ColumnDefinition Width="*" />
-                                        <ColumnDefinition Width="Auto" />
-                                    </Grid.ColumnDefinitions>
-                                    <TextBox x:Name="AvatarProfileNameTextBox" MinHeight="32" MinWidth="160" ToolTip="Type a consenting person's name to create or switch to their avatar profile." />
-                                    <Button Grid.Column="1" Content="Add User" Margin="8,0,0,0" Padding="10,6" MinHeight="32" Click="AddAvatarProfileClicked" />
-                                </Grid>
-                                <TextBlock x:Name="AvatarProfileStatusText" Foreground="#b9d7ef" TextWrapping="Wrap" Margin="0,6,0,8" />
-
-                                <CheckBox x:Name="AvatarSubjectCheckBox" Content="This is the selected user - allow avatar capture" ToolTip="Turn this on only when the selected avatar user is in front of the camera." Checked="AvatarSubjectChanged" Unchecked="AvatarSubjectChanged" />
+                                <TextBlock x:Name="AvatarLoginStatusText" Text="No avatar user logged in. Use File > Login to begin a capture session." Foreground="#ffcf7a" TextWrapping="Wrap" Margin="0,4,0,0" />
 
                                 <Border Background="#081018" BorderBrush="#243545" BorderThickness="1" Padding="10" Margin="0,10,0,0">
                                     <StackPanel>
@@ -232,15 +349,15 @@
                                             </Grid.ColumnDefinitions>
                                             <Border x:Name="AvatarLearningIndicator" Width="11" Height="11" CornerRadius="6" Background="#59616b" Margin="0,0,8,0" VerticalAlignment="Center" />
                                             <TextBlock x:Name="AvatarLearningStateText" Grid.Column="1" Text="Avatar capture stopped" FontWeight="SemiBold" VerticalAlignment="Center" TextWrapping="Wrap" />
-                                            <Button x:Name="AvatarLearningToggleButton" Grid.Column="2" Style="{StaticResource StartStopButtonStyle}" Content="Start Avatar Capture" ToolTip="Starts or stops 3DDFA avatar capture." Padding="10,6" Margin="8,0,0,0" Click="AvatarLearningToggleClicked" />
+                                            <Button x:Name="AvatarLearningToggleButton" Grid.Column="2" Style="{StaticResource StartStopButtonStyle}" Content="Start Avatar Capture" ToolTip="Log in an avatar user before starting 3DDFA avatar capture." Padding="10,6" Margin="8,0,0,0" IsEnabled="False" Click="AvatarLearningToggleClicked" />
                                         </Grid>
-                                        <TextBlock x:Name="AvatarLearningStatusText" Text="Not capturing: select the correct user, confirm they are at the camera, then start avatar capture." Foreground="#b9d7ef" TextWrapping="Wrap" Margin="0,8,0,0" />
+                                        <TextBlock x:Name="AvatarLearningStatusText" Text="Not capturing: log in the person in front of the camera, then start avatar capture." Foreground="#b9d7ef" TextWrapping="Wrap" Margin="0,8,0,0" />
                                         <TextBlock x:Name="AvatarTrackingSanityText" Text="Tracking sanity: waiting for enough accepted measurements." Foreground="#b9d7ef" TextWrapping="Wrap" Margin="0,6,0,0" />
                                         <TextBlock x:Name="AvatarReconstructionLaneText" Text="Avatar reconstruction: 3DDFA/ONNX waiting." Foreground="#b9d7ef" TextWrapping="Wrap" Margin="0,6,0,0" />
                                         <Border Background="#0b141c" BorderBrush="#243545" BorderThickness="1" Padding="10" Margin="0,10,0,0">
                                             <StackPanel>
                                                 <TextBlock x:Name="AvatarCaptureGuidanceTitleText" Text="Capture Guidance" FontWeight="SemiBold" TextWrapping="Wrap" />
-                                                <TextBlock x:Name="AvatarCaptureGuidanceDetailText" Text="Select the correct user, start the camera, then use Start Avatar Capture when you want 3DDFA samples collected." Foreground="#b9d7ef" TextWrapping="Wrap" Margin="0,6,0,0" />
+                                                <TextBlock x:Name="AvatarCaptureGuidanceDetailText" Text="Log in the person in front of the camera, start the camera, then use Start Avatar Capture when you want 3DDFA samples collected." Foreground="#b9d7ef" TextWrapping="Wrap" Margin="0,6,0,0" />
                                             </StackPanel>
                                         </Border>
                                         <UniformGrid Columns="2" Margin="0,10,0,0">
@@ -251,23 +368,6 @@
                                         </UniformGrid>
                                     </StackPanel>
                                 </Border>
-
-                                <Separator Margin="0,18,0,14" Background="#243545" />
-
-                                <TextBlock Text="Camera and Model Quality" FontSize="16" FontWeight="Bold" />
-
-                                <Grid Margin="0,14,0,0">
-                                    <Grid.ColumnDefinitions>
-                                        <ColumnDefinition Width="*" />
-                                        <ColumnDefinition Width="Auto" />
-                                    </Grid.ColumnDefinitions>
-                                    <TextBlock Text="Tracking fidelity" FontWeight="SemiBold" />
-                                    <TextBlock x:Name="TrackingFidelityValueText" Grid.Column="1" Text="HD" Foreground="#b9d7ef" />
-                                </Grid>
-                                <ComboBox x:Name="TrackingFidelityComboBox" SelectionChanged="TrackingFidelitySelectionChanged" />
-                                <TextBlock x:Name="TrackingFidelityStatusText" Text="Tracking frames: 1920px max at 10 fps." Foreground="#b9d7ef" TextWrapping="Wrap" Margin="0,6,0,0" />
-                                <CheckBox x:Name="DirectX12PreviewCheckBox" Content="DX12 preview viewport" IsChecked="True" Checked="DirectX12PreviewChanged" Unchecked="DirectX12PreviewChanged" />
-                                <ToggleButton x:Name="LiveWireframePreviewToggle" Content="Show Live Wireframe" ToolTip="Hides the webcam image and shows the current camera-relative MediaPipe face mesh while analysis keeps running." HorizontalAlignment="Left" Margin="0,8,0,0" Checked="LiveWireframePreviewChanged" Unchecked="LiveWireframePreviewChanged" />
 
                                 <Separator Margin="0,18,0,14" Background="#243545" />
 
@@ -310,12 +410,6 @@
 
                                 <Separator Margin="0,18,0,14" Background="#243545" />
 
-                                <TextBlock Text="Avatar Data" FontSize="16" FontWeight="Bold" />
-                                <TextBlock x:Name="OutputFolderText" TextWrapping="Wrap" Foreground="#b9d7ef" Margin="0,8,0,0" />
-                                <Button Content="Choose Data Folder" HorizontalAlignment="Left" Margin="0,8,0,0" Click="BrowseOutputClicked" />
-
-                                <Separator Margin="0,18,0,14" Background="#243545" />
-
                                 <Expander Header="Camera Controls" IsExpanded="False">
                                     <StackPanel Margin="0,8,0,0">
                                         <Grid>
@@ -338,6 +432,6 @@
 
         </Grid>
 
-        <TextBlock x:Name="FooterText" Grid.Row="2" Text="Ready." Foreground="#b9d7ef" />
+        <TextBlock x:Name="FooterText" Grid.Row="3" Text="Ready." Foreground="#b9d7ef" />
     </Grid>
 </Window>

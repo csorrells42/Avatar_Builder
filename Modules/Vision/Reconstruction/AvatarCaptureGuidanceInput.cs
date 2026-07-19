@@ -4,7 +4,7 @@ namespace AvatarBuilder.Modules.Vision.Reconstruction;
 
 public sealed class AvatarCaptureGuidanceInput
 {
-    public bool SubjectConfirmed { get; set; }
+    public bool UserLoggedIn { get; set; }
 
     public bool AvatarLearningRequested { get; set; }
 

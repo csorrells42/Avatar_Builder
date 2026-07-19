@@ -23,7 +23,7 @@ public static class AvatarModelBuilder
                 Status = "waiting for accepted 3DDFA observations",
                 Findings =
                 [
-                    "Start Avatar Capture with the selected user confirmed. The model begins once 3DDFA full-resolution samples attach to accepted face-lock frames."
+                    "Log in the person at the camera and start Avatar Capture. The model begins once 3DDFA full-resolution samples attach to accepted face-lock frames."
                 ]
             };
         }

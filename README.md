@@ -1,6 +1,6 @@
 # Avatar Builder
 
-Standalone WPF application for subject-gated webcam capture, dense 3D face reconstruction, and long-term avatar model building.
+Standalone WPF application for login-gated webcam capture, dense 3D face reconstruction, and long-term avatar model building.
 
 Avatar Builder was split from Episode Monitor after the shared camera and vision work had matured. The medical event watch, event database, evidence recorder, alert calibration, and symptom workflow are not part of this application. Shared face landmark measurements remain because they are useful for visible tracking, capture quality, and avatar inspection.
 
@@ -10,7 +10,7 @@ Avatar Builder deliberately runs three asynchronous lanes:
 
 1. The webcam lane displays the newest camera frame as quickly as the selected capture mode and renderer allow.
 2. The MediaPipe/OpenCV lane consumes the newest available frame for fast face lock, eye, brow, nose, lip, mouth, and jaw measurements. It may skip stale frames when analysis is busy.
-3. The 3DDFA_V2 ONNX lane consumes subject-confirmed capture frames for dense vertices, A/B/C head pose, shape coefficients, expression coefficients, and persistent avatar observations.
+3. The 3DDFA_V2 ONNX lane consumes frames only during an explicit logged-in capture session for dense vertices, A/B/C head pose, shape coefficients, expression coefficients, and persistent avatar observations.
 
 The analysis lanes never own the camera frame rate. Slow inference drops stale analysis work instead of building a queue that freezes preview or the WPF UI.
 
@@ -20,7 +20,7 @@ The selected avatar user is stored in `AvatarSystem\avatar_profiles.json`. Each 
 
 Capture requires both controls:
 
-- Select the correct avatar profile and check **This is [selected user]**.
+- Use **File > Login** to select or create the profile for the person in front of the camera.
 - Click **Start Avatar Capture**.
 
 The app then applies camera, face-lock, quality, and storage gates before accepting 3DDFA observations. **Stop Avatar Capture** stops new observations but leaves camera preview and fast facial tracking available.
@@ -36,9 +36,11 @@ User-facing pose follows XYZABC:
 
 3DDFA_V2 is the authority for avatar pose and dense geometry. MediaPipe is the fast feature-tracking and measurement lane.
 
+The **View** menu owns preview presentation and tracking workload. **DX12 Preview Viewport** and **Show Live Wireframe** are independent checkmark settings. Hover over **Tracking Fidelity** to open the mutually exclusive 4K, HD, and Safe Preview choices.
+
 ## Stored data
 
-`AvatarBuilderOutputFolder.txt` beside the executable contains the selected data-folder path. If the file is missing, empty, or points to a missing folder, startup asks for a new location and saves it. The intended workstation location is `D:\Avatar Builder Output`.
+`AvatarBuilderOutputFolder.txt` beside the executable contains the selected data-folder path. **File > Choose Data Folder** opens the path and drive-capacity dialog. If the pointer file is missing, empty, or points to a missing folder, startup asks for a new location and saves it. The intended workstation location is `D:\Avatar Builder Output`.
 
 All user-generated avatar data belongs under that selected folder. The app stores bounded, measurement-oriented data rather than continuous webcam video:
 
@@ -69,7 +71,7 @@ Runtime code lives under `Modules`:
 - `Modules\Vision\MediaPipe`: MediaPipe Face Landmarker sidecar and mapping.
 - `Modules\Vision\Onnx`: 3DDFA_V2 ONNX sidecar client and runtime discovery.
 - `Modules\Vision\Pipeline`: backend composition and fusion.
-- `Modules\Vision\Personalization`: avatar profiles, subject gate, and capture quality.
+- `Modules\Vision\Personalization`: avatar profiles, user login session, and capture quality.
 - `Modules\Vision\Reconstruction`: observation stores, model building, audit history, dashboards, and review pages.
 - `Modules\Infrastructure`: small shared runtime helpers.
 See `Modules\README.md` and each module README before changing a backend.
@@ -90,7 +92,7 @@ For guided capture from the repository:
 make-avatar.cmd
 ```
 
-This requests easy avatar mode and the configured output folder. It does not confirm identity, turn on the camera, or bypass quality gates.
+This requests easy avatar mode and the configured output folder. It does not log in a user, turn on the camera, or bypass quality gates.
 
 ## Sidecar setup
 

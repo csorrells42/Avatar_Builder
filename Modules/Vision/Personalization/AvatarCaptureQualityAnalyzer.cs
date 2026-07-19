@@ -60,12 +60,12 @@ public sealed class AvatarCaptureQualityAnalyzer
             + glassesScore * 0.06d
             + storageScore * 0.06d);
 
-        var subjectGateOpen = input.SubjectConfirmed;
+        var userSessionOpen = input.UserLoggedIn;
         var modelAccepting = input.AvatarCaptureRequested && input.CaptureGateAccepted;
-        if (!subjectGateOpen)
+        if (!userSessionOpen)
         {
-            issues.Add("subject confirmation is off");
-            suggestions.Add("Only enable collection when the enrolled subject is in front of the webcam.");
+            issues.Add("no avatar user is logged in");
+            suggestions.Add("Use File > Login to identify the person in front of the webcam before collecting avatar data.");
         }
         else if (!input.AvatarCaptureRequested)
         {
@@ -81,7 +81,7 @@ public sealed class AvatarCaptureQualityAnalyzer
             }
         }
 
-        var canCollect = subjectGateOpen
+        var canCollect = userSessionOpen
             && modelAccepting
             && score >= MinimumCollectScorePercent
             && cameraModeScore >= MinimumCollectCameraModeScorePercent

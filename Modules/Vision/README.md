@@ -64,7 +64,8 @@ The 3DDFA_V2 dense reconstruction lane. The C# client communicates with the loca
 ## Personalization
 
 - `AvatarProfile.cs`, `AvatarProfileStore.cs`: per-user identity registry and storage folders.
-- `AvatarCaptureQuality*.cs`: subject, camera, face-lock, measurement, artifact, and storage quality gate for accepted 3DDFA samples.
+- `AvatarUserSession.cs`: owns the currently logged-in profile and a generation token used to reject reconstruction results that finish after logout or a user change.
+- `AvatarCaptureQuality*.cs`: user login, camera, face-lock, measurement, artifact, and storage quality gate for accepted 3DDFA samples.
 
 This folder does not own the camera, UI controls, or reconstruction worker.
 
@@ -72,4 +73,4 @@ This folder does not own the camera, UI controls, or reconstruction worker.
 
 Owns 3DDFA work/result contracts, bounded observation persistence, pose-normalized model building, model history/regression audits, capture guidance, the Avatar System dashboard, and the 3DDFA Last 5 review page. MediaPipe remains a live tracking and measurement lane without a stored Last 5 cache.
 
-The base model and expression range remain separate. Never accept observations without the selected-user subject gate.
+The base model and expression range remain separate. Never accept observations without an active login for the selected user.

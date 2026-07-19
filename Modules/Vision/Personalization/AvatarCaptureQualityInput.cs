@@ -21,7 +21,7 @@ public sealed class AvatarCaptureQualityInput
 
     public FaceLockStabilityAnalysis Stability { get; init; } = FaceLockStabilityAnalysis.Waiting;
 
-    public bool SubjectConfirmed { get; init; }
+    public bool UserLoggedIn { get; init; }
 
     public bool AvatarCaptureRequested { get; init; }
 

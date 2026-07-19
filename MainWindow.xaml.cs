@@ -1,13 +1,10 @@
-using System.Collections.ObjectModel;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
-using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
 using System.Windows;
 using System.Windows.Controls;
-using System.Windows.Interop;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using System.Windows.Threading;
@@ -83,6 +80,7 @@ public partial class MainWindow : Window
     private readonly ThreeDdfaOnnxReconstructionClient _threeDdfaOnnxClient;
     private readonly AvatarBuilderStartupOptions _startupOptions;
     private readonly AvatarProfileStore _avatarProfileStore = new();
+    private readonly AvatarUserSession _avatarUserSession = new();
     private readonly AvatarCaptureQualityAnalyzer _avatarCaptureQualityAnalyzer = new();
     private readonly LastGoodThreeDdfaStore _lastGoodThreeDdfaStore = new();
     private readonly object _faceLandmarkTrackerLock = new();
@@ -92,7 +90,6 @@ public partial class MainWindow : Window
     private readonly object _faceFeatureDetectionFrameLock = new();
     private readonly object _personalFaceReportWriterLock = new();
     private readonly List<ThreeDdfaReconstructionSnapshot> _lastGoodThreeDdfaSamples = [];
-    private readonly ObservableCollection<AvatarProfile> _avatarProfiles = [];
     private IReadOnlyList<CameraDevice> _cameras = [];
     private CancellationTokenSource? _modeLoadCancellation;
     private string _outputFolder;
@@ -133,17 +130,11 @@ public partial class MainWindow : Window
     private string _lastTrackingOverlayTrigger = "";
     private string _lastTrackingOverlayAccentColor = "";
     private string _avatarCaptureGateReason = "waiting for face landmarks";
-    private string _trackingFidelityConfigurationStatus = "";
     private SolidColorBrush? _lastTrackingOverlayAccentBrush;
     private double _directX12PreviewMaxRenderFramesPerSecond;
-    private double _cameraDisplayFramesPerSecond;
-    private double _featureOverlayFramesPerSecond;
-    private double _directX12RenderFramesPerSecond;
     private TimeSpan _directX12AnalysisFrameInterval = TimeSpan.FromSeconds(1d / 5d);
     private int _directX12AnalysisMaxOutputWidth = 3840;
     private int _previewFramesReplacedSinceWarning;
-    private int _cameraDisplayFramesInHealthWindow;
-    private int _featureOverlayFramesInHealthWindow;
     private int _uiFramePending;
     private int _previewWarningPending;
     private int _faceFeatureDetectionPending;
@@ -153,6 +144,7 @@ public partial class MainWindow : Window
     private bool _avatarLearningRequested;
     private bool _avatarCaptureGateAccepted;
     private bool _showLiveWireframePreview;
+    private bool _isDirectX12PreviewEnabled = true;
     private bool _isCameraEnabled;
     private bool _isUpdatingCameraToggle;
     private bool _isChoosingCameraModeForFidelity;
@@ -160,23 +152,21 @@ public partial class MainWindow : Window
     private bool _isLoadingCameraControls;
     private bool _isUpdatingCameraControlUi;
     private bool _isSnappingSlider;
-    private bool _isUpdatingAvatarProfileUi;
     private bool _isClosing;
     private bool _startupOptionsApplied;
+    private int _selectedTrackingFidelityIndex = 2;
     private FaceCueGuideLayout? _activeFaceCueLayout;
     private DateTime _lastFaceAutoFollowAt = DateTime.MinValue;
     private DateTime _lastFaceFeatureDetectionAt = DateTime.MinValue;
     private DateTime _pendingFaceFeatureDetectionCapturedAtUtc = DateTime.MinValue;
     private DateTime _lastFaceFeatureLockAt = DateTime.MinValue;
-    private DateTime _cameraHealthWindowStartedAtUtc = DateTime.MinValue;
-    private DateTime _featureOverlayHealthWindowStartedAtUtc = DateTime.MinValue;
     private DateTime _lastThreeDdfaOnnxRequestAtUtc = DateTime.MinValue;
 
     private static readonly IReadOnlyList<TrackingFidelityOption> TrackingFidelityOptions =
     [
-        new("Safe preview - 960px / 15 fps", 960, 15d),
-        new("HD camera - 1920px / 18 fps", 1920, 18d),
-        new("4K camera - 1920px analysis / 15 fps", 3840, 15d)
+        new(960, 15d),
+        new(1920, 18d),
+        new(3840, 15d)
     ];
 
     private static SolidColorBrush CreateFrozenBrush(byte red, byte green, byte blue)
@@ -214,14 +204,11 @@ public partial class MainWindow : Window
 
     private void WindowLoaded(object sender, RoutedEventArgs e)
     {
-        EnableDarkWindowFrame();
+        DarkWindowFrame.Apply(this);
         EnsureOutputFolderConfiguredForLaunch();
         InitializeAvatarProfiles(promptForStartupUser: true);
-        TrackingFidelityComboBox.ItemsSource = TrackingFidelityOptions;
-        TrackingFidelityComboBox.DisplayMemberPath = nameof(TrackingFidelityOption.Label);
-        TrackingFidelityComboBox.SelectedIndex = 2;
+        UpdateTrackingFidelityMenuChecks();
         ApplyTrackingFidelity();
-        UpdateOutputFolderText();
         UpdateSettingLabels();
         PrepareAvatarCaptureFolder(showStatus: false);
         UpdateAvatarLearningStatusUi();
@@ -237,7 +224,7 @@ public partial class MainWindow : Window
         }
 
         _startupOptionsApplied = true;
-        if (_startupOptions.StartAvatarLearning)
+        if (_startupOptions.StartAvatarLearning && IsAvatarUserLoggedIn)
         {
             _avatarLearningRequested = true;
         }
@@ -259,20 +246,14 @@ public partial class MainWindow : Window
 
     private void InitializeAvatarProfiles(bool promptForStartupUser)
     {
+        _avatarLearningRequested = false;
+        _avatarUserSession.LogOut();
         _avatarProfileRegistry = _avatarProfileStore.Load(_outputFolder);
-        AvatarProfileComboBox.ItemsSource ??= _avatarProfiles;
 
+        AvatarProfile? loginProfile = null;
         if (promptForStartupUser)
         {
-            var startupSelection = PromptForStartupAvatarProfile(_avatarProfileRegistry);
-            if (!string.IsNullOrWhiteSpace(startupSelection.NewDisplayName))
-            {
-                _avatarProfileStore.AddOrUpdateProfile(_outputFolder, _avatarProfileRegistry, startupSelection.NewDisplayName);
-            }
-            else if (!string.IsNullOrWhiteSpace(startupSelection.ProfileId))
-            {
-                _avatarProfileStore.SelectProfile(_outputFolder, _avatarProfileRegistry, startupSelection.ProfileId);
-            }
+            loginProfile = ResolveAvatarLoginSelection(PromptForAvatarLogin(_avatarProfileRegistry));
         }
 
         if (_avatarProfileRegistry.Profiles.Count == 0)
@@ -280,23 +261,32 @@ public partial class MainWindow : Window
             _avatarProfileStore.AddOrUpdateProfile(_outputFolder, _avatarProfileRegistry, DefaultAvatarProfileDisplayName);
         }
 
-        RefreshAvatarProfileList();
-        var selected = FindSelectedAvatarProfile() ?? _avatarProfiles.FirstOrDefault();
+        var selected = loginProfile is null
+            ? FindSelectedAvatarProfile()
+            : loginProfile;
         if (selected is null)
         {
             return;
         }
 
-        ApplyCurrentAvatarProfile(selected, loadModel: false, stopLearning: false);
-        ResetAvatarCaptureGate("waiting for face landmarks");
+        ApplyCurrentAvatarProfile(selected, loadModel: false);
+        if (loginProfile is not null)
+        {
+            LogInAvatarProfile(selected, loadModel: false, announce: false);
+        }
+        else
+        {
+            ResetAvatarCaptureGate("no avatar user logged in; capture stopped");
+            UpdateAvatarSessionUi();
+        }
     }
 
-    private AvatarStartupSelection PromptForStartupAvatarProfile(AvatarProfileRegistry registry)
+    private AvatarLoginSelection PromptForAvatarLogin(AvatarProfileRegistry registry)
     {
         var profiles = registry.Profiles.ToList();
         var window = new Window
         {
-            Title = "Choose Avatar User",
+            Title = "Avatar User Login",
             Owner = this,
             Width = 430,
             SizeToContent = SizeToContent.Height,
@@ -309,7 +299,7 @@ public partial class MainWindow : Window
         var panel = new StackPanel { Margin = new Thickness(18) };
         panel.Children.Add(new TextBlock
         {
-            Text = "Who is in front of the camera for avatar capture?",
+            Text = "Who is in front of the camera?",
             FontSize = 18,
             FontWeight = FontWeights.SemiBold,
             TextWrapping = TextWrapping.Wrap,
@@ -317,7 +307,7 @@ public partial class MainWindow : Window
         });
         panel.Children.Add(new TextBlock
         {
-            Text = "Pick a remembered user, or type a new consenting user's name. Avatar data stays isolated by user profile.",
+            Text = "Log in a remembered user, or type a new consenting user's name. Avatar capture remains stopped until login succeeds, and data stays isolated by profile.",
             Foreground = new SolidColorBrush(Color.FromRgb(185, 215, 239)),
             TextWrapping = TextWrapping.Wrap,
             Margin = new Thickness(0, 0, 0, 14)
@@ -360,121 +350,94 @@ public partial class MainWindow : Window
         };
         var continueButton = new Button
         {
-            Content = "Continue",
+            Content = "Login",
             MinWidth = 110,
             Margin = new Thickness(8, 0, 0, 0),
             Style = TryFindResource(typeof(Button)) as Style
         };
         var cancelButton = new Button
         {
-            Content = "Use Selected",
+            Content = "Cancel",
             MinWidth = 110,
-            Style = TryFindResource(typeof(Button)) as Style,
-            IsEnabled = profiles.Count > 0
+            Style = TryFindResource(typeof(Button)) as Style
         };
         buttons.Children.Add(cancelButton);
         buttons.Children.Add(continueButton);
         panel.Children.Add(buttons);
         window.Content = panel;
 
-        AvatarStartupSelection selection = new("", "");
+        AvatarLoginSelection selection = new("", "");
         continueButton.Click += (_, _) =>
         {
             var typedName = nameBox.Text.Trim();
             if (!string.IsNullOrWhiteSpace(typedName))
             {
-                selection = new AvatarStartupSelection("", typedName);
+                selection = new AvatarLoginSelection("", typedName);
                 window.DialogResult = true;
                 return;
             }
 
             if (combo.SelectedItem is AvatarProfile profile)
             {
-                selection = new AvatarStartupSelection(profile.Id, "");
+                selection = new AvatarLoginSelection(profile.Id, "");
                 window.DialogResult = true;
                 return;
             }
 
             status.Text = "Type the user's name before continuing.";
         };
-        cancelButton.Click += (_, _) =>
-        {
-            if (combo.SelectedItem is AvatarProfile profile)
-            {
-                selection = new AvatarStartupSelection(profile.Id, "");
-                window.DialogResult = true;
-            }
-        };
+        cancelButton.Click += (_, _) => window.DialogResult = false;
 
         var result = window.ShowDialog();
-        if (result == true)
-        {
-            return selection;
-        }
-
-        var fallback = profiles.FirstOrDefault(profile => string.Equals(profile.Id, registry.SelectedProfileId, StringComparison.OrdinalIgnoreCase))
-            ?? profiles.FirstOrDefault();
-        return fallback is null
-            ? new AvatarStartupSelection("", DefaultAvatarProfileDisplayName)
-            : new AvatarStartupSelection(fallback.Id, "");
+        return result == true ? selection : new AvatarLoginSelection("", "");
     }
 
-    private void RefreshAvatarProfileList()
+    private AvatarProfile? ResolveAvatarLoginSelection(AvatarLoginSelection selection)
     {
-        _isUpdatingAvatarProfileUi = true;
-        try
+        if (!string.IsNullOrWhiteSpace(selection.NewDisplayName))
         {
-            _avatarProfiles.Clear();
-            foreach (var profile in _avatarProfileRegistry.Profiles.OrderBy(static profile => profile.DisplayName, StringComparer.OrdinalIgnoreCase))
-            {
-                _avatarProfiles.Add(profile);
-            }
+            return _avatarProfileStore.AddOrUpdateProfile(
+                _outputFolder,
+                _avatarProfileRegistry,
+                selection.NewDisplayName);
         }
-        finally
-        {
-            _isUpdatingAvatarProfileUi = false;
-        }
+
+        return string.IsNullOrWhiteSpace(selection.ProfileId)
+            ? null
+            : _avatarProfileStore.SelectProfile(
+                _outputFolder,
+                _avatarProfileRegistry,
+                selection.ProfileId);
     }
 
     private AvatarProfile? FindSelectedAvatarProfile()
     {
-        return _avatarProfiles.FirstOrDefault(profile =>
+        return _avatarProfileRegistry.Profiles.FirstOrDefault(profile =>
                 string.Equals(profile.Id, _avatarProfileRegistry.SelectedProfileId, StringComparison.OrdinalIgnoreCase))
-            ?? _avatarProfiles.OrderByDescending(static profile => profile.LastSelectedAtUtc ?? DateTime.MinValue).FirstOrDefault();
+            ?? _avatarProfileRegistry.Profiles
+                .OrderByDescending(static profile => profile.LastSelectedAtUtc ?? DateTime.MinValue)
+                .FirstOrDefault();
     }
 
-    private void ApplyCurrentAvatarProfile(AvatarProfile profile, bool loadModel, bool stopLearning)
+    private void ApplyCurrentAvatarProfile(AvatarProfile profile, bool loadModel)
     {
-        _currentAvatarProfile = profile;
-        if (stopLearning)
+        if (_avatarUserSession.IsLoggedIn
+            && !string.Equals(_avatarUserSession.LoggedInProfileId, profile.Id, StringComparison.OrdinalIgnoreCase))
         {
-            _avatarLearningRequested = false;
+            _avatarUserSession.LogOut();
         }
 
-        _isUpdatingAvatarProfileUi = true;
-        try
-        {
-            AvatarProfileComboBox.SelectedItem = _avatarProfiles.FirstOrDefault(item =>
-                string.Equals(item.Id, profile.Id, StringComparison.OrdinalIgnoreCase));
-            AvatarProfileNameTextBox.Text = "";
-            var displayName = CurrentAvatarProfileDisplayName;
-            AvatarSubjectCheckBox.Content = $"This is {displayName} - allow avatar capture";
-            AvatarSubjectCheckBox.ToolTip = $"Turn this on only when {displayName} is in front of the camera.";
-            AvatarProfileStatusText.Text = $"Selected user: {displayName}. Data folder: {GetAvatarDataFolder()}";
-        }
-        finally
-        {
-            _isUpdatingAvatarProfileUi = false;
-        }
+        _currentAvatarProfile = profile;
+        _avatarLearningRequested = false;
 
         _avatarProfileStore.SelectProfile(_outputFolder, _avatarProfileRegistry, profile.Id);
         if (loadModel)
         {
-            AvatarSubjectCheckBox.IsChecked = false;
-            ResetAvatarRuntimeForProfile("selected avatar user changed; confirm the subject before avatar capture");
+            ResetAvatarRuntimeForProfile("selected avatar profile changed; login required before avatar capture");
             PrepareAvatarCaptureFolder(showStatus: true);
         }
 
+        UpdateAvatarSessionUi();
         UpdateAvatarLearningStatusUi();
     }
 
@@ -486,6 +449,84 @@ public partial class MainWindow : Window
         ? DefaultAvatarProfileDisplayName
         : _currentAvatarProfile.DisplayName;
 
+    private bool IsAvatarUserLoggedIn => _avatarUserSession.IsLoggedIn
+        && string.Equals(
+            _avatarUserSession.LoggedInProfileId,
+            CurrentAvatarProfileId,
+            StringComparison.OrdinalIgnoreCase);
+
+    private void LogInAvatarProfile(AvatarProfile profile, bool loadModel, bool announce)
+    {
+        if (!string.Equals(CurrentAvatarProfileId, profile.Id, StringComparison.OrdinalIgnoreCase) || loadModel)
+        {
+            ApplyCurrentAvatarProfile(profile, loadModel);
+        }
+
+        _avatarLearningRequested = false;
+        _avatarUserSession.LogIn(profile.Id);
+        _currentThreeDdfaOnnxResponse = ThreeDdfaOnnxSidecarResponse.Waiting;
+        ResetAvatarCaptureGate("avatar user logged in; waiting for high-confidence face tracking");
+        _currentAvatarCaptureQuality = AvatarCaptureQualityAssessment.Waiting;
+        UpdateAvatarSessionUi();
+        UpdateAvatarLearningStatusUi();
+        QueueAvatarSessionStatusReport();
+
+        if (announce)
+        {
+            SetStatus($"Logged in as {CurrentAvatarProfileDisplayName}. Avatar capture is ready to start.");
+        }
+    }
+
+    private void LogOutAvatarUser(bool announce)
+    {
+        var displayName = CurrentAvatarProfileDisplayName;
+        _avatarLearningRequested = false;
+        _avatarUserSession.LogOut();
+        _currentThreeDdfaOnnxResponse = ThreeDdfaOnnxSidecarResponse.Waiting;
+        ResetAvatarCaptureGate("no avatar user logged in; capture stopped");
+        UpdateAvatarCaptureQuality();
+        UpdateAvatarSessionUi();
+        UpdateAvatarLearningStatusUi();
+        QueueAvatarSessionStatusReport();
+
+        if (announce)
+        {
+            SetStatus($"{displayName} logged out. Avatar capture has stopped.");
+        }
+    }
+
+    private void UpdateAvatarSessionUi()
+    {
+        var loggedIn = IsAvatarUserLoggedIn;
+        LoginLogoutMenuItem.Header = loggedIn
+            ? $"_Logout {CurrentAvatarProfileDisplayName}"
+            : "_Login...";
+        AvatarLoginStatusText.Text = loggedIn
+            ? $"Logged in as {CurrentAvatarProfileDisplayName}. Avatar capture can be started."
+            : "No avatar user logged in. Use File > Login to begin a capture session.";
+        AvatarLoginStatusText.Foreground = new SolidColorBrush(loggedIn
+            ? Color.FromRgb(128, 224, 164)
+            : Color.FromRgb(255, 207, 122));
+        AvatarLearningToggleButton.IsEnabled = loggedIn;
+    }
+
+    private void QueueAvatarSessionStatusReport()
+    {
+        if (!IsLoaded)
+        {
+            return;
+        }
+
+        try
+        {
+            QueueAvatarReportSave(CreateAvatarReportSnapshot(GetAvatarDataFolder()));
+        }
+        catch
+        {
+            // Login and logout must remain reliable when the data folder is unavailable.
+        }
+    }
+
     private void ResetAvatarCaptureGate(string reason, bool accepted = false)
     {
         _avatarCaptureGateAccepted = accepted;
@@ -496,6 +537,7 @@ public partial class MainWindow : Window
     {
         ResetAvatarCaptureGate(reason);
         _currentAvatarCaptureQuality = AvatarCaptureQualityAssessment.Waiting;
+        _currentThreeDdfaOnnxResponse = ThreeDdfaOnnxSidecarResponse.Waiting;
         _avatarSystemDashboardPath = "";
         _avatarModelHtmlPath = "";
         _lastGoodThreeDdfaJsonPath = "";
@@ -896,14 +938,32 @@ public partial class MainWindow : Window
         }
     }
 
-    private void TrackingFidelitySelectionChanged(object sender, System.Windows.Controls.SelectionChangedEventArgs e)
+    private void TrackingFidelityMenuItemClicked(object sender, RoutedEventArgs e)
     {
+        if (sender is not MenuItem menuItem
+            || !int.TryParse(menuItem.Tag?.ToString(), out var selectedIndex)
+            || selectedIndex < 0
+            || selectedIndex >= TrackingFidelityOptions.Count)
+        {
+            UpdateTrackingFidelityMenuChecks();
+            return;
+        }
+
+        _selectedTrackingFidelityIndex = selectedIndex;
+        UpdateTrackingFidelityMenuChecks();
         ApplyTrackingFidelity();
         SelectRecommendedCameraModeForFidelity(replaceAutoOnly: true);
         if (_isCameraEnabled)
         {
             RestartPreview();
         }
+    }
+
+    private void UpdateTrackingFidelityMenuChecks()
+    {
+        TrackingFidelitySafeMenuItem.IsChecked = _selectedTrackingFidelityIndex == 0;
+        TrackingFidelityHdMenuItem.IsChecked = _selectedTrackingFidelityIndex == 1;
+        TrackingFidelity4KMenuItem.IsChecked = _selectedTrackingFidelityIndex == 2;
     }
 
     private void ApplyTrackingFidelity()
@@ -916,88 +976,6 @@ public partial class MainWindow : Window
         _directX12AnalysisMaxOutputWidth = analysisOutputWidth;
         _directX12AnalysisFrameInterval = TimeSpan.FromSeconds(1d / Math.Clamp(option.MaxFramesPerSecond, 1d, 60d));
         _faceLandmarkTracker.MaxDetectionDimension = option.MaxOutputWidth >= 3840 ? 1920 : Math.Clamp(option.MaxOutputWidth, 640, 960);
-        TrackingFidelityValueText.Text = option.ShortLabel;
-        _trackingFidelityConfigurationStatus = $"Camera mode target: {option.MaxOutputWidth}px. Analysis frames: {analysisOutputWidth}px max at {option.MaxFramesPerSecond:0.###} fps; landmark detector max {_faceLandmarkTracker.MaxDetectionDimension}px.";
-        UpdateTrackingFidelityHealthText(force: true);
-    }
-
-    private void TrackCameraDisplayFrame(DateTime utcNow)
-    {
-        if (_cameraHealthWindowStartedAtUtc == DateTime.MinValue)
-        {
-            _cameraHealthWindowStartedAtUtc = utcNow;
-        }
-
-        _cameraDisplayFramesInHealthWindow++;
-        var elapsed = utcNow - _cameraHealthWindowStartedAtUtc;
-        if (elapsed.TotalSeconds < 2d)
-        {
-            return;
-        }
-
-        _cameraDisplayFramesPerSecond = _cameraDisplayFramesInHealthWindow / Math.Max(0.001d, elapsed.TotalSeconds);
-        _cameraDisplayFramesInHealthWindow = 0;
-        _cameraHealthWindowStartedAtUtc = utcNow;
-        UpdateTrackingFidelityHealthText();
-    }
-
-    private void TrackFeatureOverlayFrame(DateTime utcNow)
-    {
-        if (_featureOverlayHealthWindowStartedAtUtc == DateTime.MinValue)
-        {
-            _featureOverlayHealthWindowStartedAtUtc = utcNow;
-        }
-
-        _featureOverlayFramesInHealthWindow++;
-        var elapsed = utcNow - _featureOverlayHealthWindowStartedAtUtc;
-        if (elapsed.TotalSeconds < 2d)
-        {
-            return;
-        }
-
-        _featureOverlayFramesPerSecond = _featureOverlayFramesInHealthWindow / Math.Max(0.001d, elapsed.TotalSeconds);
-        _featureOverlayFramesInHealthWindow = 0;
-        _featureOverlayHealthWindowStartedAtUtc = utcNow;
-        UpdateTrackingFidelityHealthText();
-    }
-
-    private void UpdateTrackingFidelityHealthText(bool force = false)
-    {
-        if (TrackingFidelityStatusText is null)
-        {
-            return;
-        }
-
-        var option = GetSelectedTrackingFidelityOption();
-        var cameraRate = _directX12RenderFramesPerSecond > 0d
-            ? _directX12RenderFramesPerSecond
-            : _cameraDisplayFramesPerSecond;
-        var cameraLabel = cameraRate > 0d
-            ? $"{cameraRate:0.#} fps"
-            : "warming";
-        var featureLabel = _featureOverlayFramesPerSecond > 0d
-            ? $"{_featureOverlayFramesPerSecond:0.#} fps"
-            : "warming";
-        var featureTarget = Math.Min(
-            option.MaxFramesPerSecond,
-            1d / Math.Max(0.001d, FaceFeatureDetectionTargetInterval.TotalSeconds));
-        var health = "health ok";
-        if (cameraRate > 0d && cameraRate < option.MaxFramesPerSecond * 0.55d)
-        {
-            health = "camera/render rate low";
-        }
-        else if (_featureOverlayFramesPerSecond > 0d && _featureOverlayFramesPerSecond < featureTarget * 0.45d)
-        {
-            health = _avatarReportWriterTask is { IsCompleted: false }
-                ? "feature overlay low while report writer is active"
-                : "feature overlay rate low";
-        }
-
-        var text = $"{_trackingFidelityConfigurationStatus} Live health: camera/render {cameraLabel}; feature overlay {featureLabel} target {featureTarget:0.#} fps; {health}.";
-        if (force || !string.Equals(TrackingFidelityStatusText.Text, text, StringComparison.Ordinal))
-        {
-            TrackingFidelityStatusText.Text = text;
-        }
     }
 
     private static int GetTrackingAnalysisOutputWidth(TrackingFidelityOption option)
@@ -1012,9 +990,7 @@ public partial class MainWindow : Window
 
     private TrackingFidelityOption GetSelectedTrackingFidelityOption()
     {
-        return TrackingFidelityComboBox.SelectedItem as TrackingFidelityOption
-            ?? TrackingFidelityOptions.ElementAtOrDefault(1)
-            ?? TrackingFidelityOptions[0];
+        return TrackingFidelityOptions[Math.Clamp(_selectedTrackingFidelityIndex, 0, TrackingFidelityOptions.Count - 1)];
     }
 
     private void SelectRecommendedCameraModeForFidelity(bool replaceAutoOnly)
@@ -1083,8 +1059,9 @@ public partial class MainWindow : Window
         }
     }
 
-    private void DirectX12PreviewChanged(object sender, RoutedEventArgs e)
+    private void DirectX12PreviewMenuItemClicked(object sender, RoutedEventArgs e)
     {
+        _isDirectX12PreviewEnabled = DirectX12PreviewMenuItem.IsChecked;
         if (_isCameraEnabled)
         {
             RestartPreview();
@@ -1098,12 +1075,9 @@ public partial class MainWindow : Window
         }
     }
 
-    private void LiveWireframePreviewChanged(object sender, RoutedEventArgs e)
+    private void LiveWireframeMenuItemClicked(object sender, RoutedEventArgs e)
     {
-        _showLiveWireframePreview = LiveWireframePreviewToggle.IsChecked == true;
-        LiveWireframePreviewToggle.Content = _showLiveWireframePreview
-            ? "Show Webcam Preview"
-            : "Show Live Wireframe";
+        _showLiveWireframePreview = LiveWireframeMenuItem.IsChecked;
         SetPreviewState(_showLiveWireframePreview ? "Live wireframe preview" : "Camera active", _latestFrame);
     }
 
@@ -1472,7 +1446,7 @@ public partial class MainWindow : Window
 
     private bool IsDirectX12PreviewEnabled()
     {
-        return DirectX12PreviewCheckBox.IsChecked == true;
+        return _isDirectX12PreviewEnabled;
     }
 
     private static double GetDirectX12PreviewRenderFramesPerSecond(CameraVideoMode mode, bool nativeTexturePath)
@@ -1539,7 +1513,11 @@ public partial class MainWindow : Window
                 DirectX12PreviewLayer.Children.Clear();
                 DirectX12PreviewLayer.Visibility = Visibility.Collapsed;
                 SetStatus($"DX12 preview unavailable: {ex.Message}");
-                Dispatcher.InvokeAsync(() => DirectX12PreviewCheckBox.IsChecked = false, DispatcherPriority.Background);
+                Dispatcher.InvokeAsync(() =>
+                {
+                    _isDirectX12PreviewEnabled = false;
+                    DirectX12PreviewMenuItem.IsChecked = false;
+                }, DispatcherPriority.Background);
                 return false;
             }
         }
@@ -1592,14 +1570,12 @@ public partial class MainWindow : Window
     private void DirectX12PreviewDiagnosticsChanged(object? sender, Direct3D12PreviewDiagnostics diagnostics)
     {
         var now = DateTime.UtcNow;
-        _directX12RenderFramesPerSecond = diagnostics.RenderFramesPerSecond;
         if ((now - _lastDirectX12DiagnosticsAtUtc).TotalSeconds < 2d)
         {
             return;
         }
 
         _lastDirectX12DiagnosticsAtUtc = now;
-        UpdateTrackingFidelityHealthText();
         Dispatcher.InvokeAsync(
             () => SetStatus(FormatDirectX12DiagnosticsStatus(diagnostics)),
             DispatcherPriority.Background);
@@ -1640,7 +1616,6 @@ public partial class MainWindow : Window
             if (frame is not null)
             {
                 _lastPreviewFrameAcceptedAt = DateTime.UtcNow;
-                TrackCameraDisplayFrame(_lastPreviewFrameAcceptedAt);
                 _latestFrame = frame;
                 SetPreviewState("Camera active", frame);
                 ProcessFrame(frame);
@@ -1897,63 +1872,41 @@ public partial class MainWindow : Window
         MonitorStatusText.Text = "Face tracking field reset. Waiting for a fresh landmark lock.";
     }
 
-    private void AvatarProfileSelectionChanged(object sender, SelectionChangedEventArgs e)
+    private void LoginLogoutClicked(object sender, RoutedEventArgs e)
     {
-        if (!IsLoaded || _isUpdatingAvatarProfileUi || AvatarProfileComboBox.SelectedItem is not AvatarProfile profile)
+        if (IsAvatarUserLoggedIn)
         {
-            return;
-        }
-
-        ApplyCurrentAvatarProfile(profile, loadModel: true, stopLearning: true);
-        SetStatus($"Avatar user switched to {CurrentAvatarProfileDisplayName}. Confirm the subject before starting avatar capture.");
-    }
-
-    private void AddAvatarProfileClicked(object sender, RoutedEventArgs e)
-    {
-        var displayName = AvatarProfileNameTextBox.Text.Trim();
-        if (string.IsNullOrWhiteSpace(displayName))
-        {
-            SetStatus("Type the avatar user's name before adding a profile.");
+            LogOutAvatarUser(announce: true);
             return;
         }
 
         try
         {
-            var profile = _avatarProfileStore.AddOrUpdateProfile(_outputFolder, _avatarProfileRegistry, displayName);
-            RefreshAvatarProfileList();
-            ApplyCurrentAvatarProfile(profile, loadModel: true, stopLearning: true);
-            SetStatus($"Avatar user {profile.DisplayName} is selected. Confirm the subject before starting avatar capture.");
+            var profile = ResolveAvatarLoginSelection(PromptForAvatarLogin(_avatarProfileRegistry));
+            if (profile is null)
+            {
+                SetStatus("Avatar user login canceled. Avatar capture remains stopped.");
+                return;
+            }
+
+            LogInAvatarProfile(profile, loadModel: true, announce: true);
         }
         catch (Exception ex)
         {
-            SetStatus($"Could not add avatar user: {ex.Message}");
+            SetStatus($"Could not log in avatar user: {ex.Message}");
         }
-    }
-
-    private void AvatarSubjectChanged(object sender, RoutedEventArgs e)
-    {
-        if (!IsLoaded || _isUpdatingAvatarProfileUi)
-        {
-            return;
-        }
-
-        var displayName = CurrentAvatarProfileDisplayName;
-        if (AvatarSubjectCheckBox.IsChecked == true)
-        {
-            ResetAvatarCaptureGate("subject confirmed; waiting for high-confidence face tracking");
-            SetStatus($"{displayName} confirmed for Avatar System capture.");
-        }
-        else
-        {
-            ResetAvatarCaptureGate("subject not confirmed; avatar capture paused");
-            SetStatus($"Avatar System capture paused until {displayName} is confirmed.");
-        }
-
-        UpdateAvatarLearningStatusUi();
     }
 
     private void AvatarLearningToggleClicked(object sender, RoutedEventArgs e)
     {
+        if (!IsAvatarUserLoggedIn)
+        {
+            _avatarLearningRequested = false;
+            UpdateAvatarLearningStatusUi();
+            SetStatus("Log in an avatar user from the File menu before starting avatar capture.");
+            return;
+        }
+
         _avatarLearningRequested = !_avatarLearningRequested;
         UpdateAvatarLearningStatusUi();
         SetStatus(_avatarLearningRequested
@@ -1968,6 +1921,7 @@ public partial class MainWindow : Window
             return;
         }
 
+        UpdateAvatarSessionUi();
         var state = GetAvatarLearningState();
         ApplyStartStopButtonState(
             AvatarLearningToggleButton,
@@ -1994,7 +1948,9 @@ public partial class MainWindow : Window
         var response = _currentThreeDdfaOnnxResponse;
         var pending = Interlocked.CompareExchange(ref _threeDdfaOnnxReconstructionPending, 0, 0) == 1;
         var canRun = _threeDdfaOnnxEnvironment.IsReady;
-        var reconstructionStatus = canRun
+        var reconstructionStatus = !IsAvatarUserLoggedIn
+            ? "3DDFA/ONNX paused until avatar user login"
+            : canRun
             ? pending
                 ? "3DDFA/ONNX reconstructing latest avatar frame"
                 : !string.IsNullOrWhiteSpace(response.Status) ? response.Status : "3DDFA/ONNX ready; waiting for avatar frame"
@@ -2002,10 +1958,14 @@ public partial class MainWindow : Window
         var fastStatus = _faceLandmarkTracker.IsAvailable
             ? _faceLandmarkTracker.LastBackendStatus
             : "fast tracking lane unavailable";
-        var trustLevel = response.Ok && response.HasFace
+        var trustLevel = !IsAvatarUserLoggedIn
+            ? "logged-out"
+            : response.Ok && response.HasFace
             ? "cross-checked"
             : canRun ? "3DDFA-ready" : "measurement-only";
-        var trustDecision = response.Ok && response.HasFace
+        var trustDecision = !IsAvatarUserLoggedIn
+            ? "Avatar reconstruction: logged out; capture stopped. MediaPipe preview tracking remains live."
+            : response.Ok && response.HasFace
             ? $"Avatar reconstruction: 3DDFA lock {response.ReconstructionConfidencePercent:0}% | A/B/C {response.Pose.ARotationAroundXDegrees:0.#}/{response.Pose.BRotationAroundYDegrees:0.#}/{response.Pose.CRotationAroundZDegrees:0.#} deg | dense {response.DenseVertexCount} vertices."
             : canRun
                 ? $"Avatar reconstruction: {reconstructionStatus}. MediaPipe remains live tracking."
@@ -2035,7 +1995,9 @@ public partial class MainWindow : Window
             AvatarReconstructionExpectedOutputs = _threeDdfaOnnxModelInfo.ExpectedOutputs,
             TrustLevel = trustLevel,
             TrustDecision = trustDecision,
-            LearningImpact = canRun
+            LearningImpact = !IsAvatarUserLoggedIn
+                ? "No avatar observations are accepted until a user logs in and starts capture."
+                : canRun
                 ? "3DDFA/ONNX runs asynchronously for avatar reconstruction trust and does not block live MediaPipe tracking."
                 : "Live MediaPipe/OpenCV tracking remains available while avatar reconstruction waits for the 3DDFA/ONNX bundle.",
             Warnings = warnings
@@ -2093,13 +2055,12 @@ public partial class MainWindow : Window
 
     private AvatarLearningState GetAvatarLearningState()
     {
-        var subjectConfirmed = AvatarSubjectCheckBox.IsChecked == true;
-        if (!subjectConfirmed)
+        if (!IsAvatarUserLoggedIn)
         {
             return new AvatarLearningState(
                 false,
                 "Avatar capture stopped",
-                $"Not capturing: check 'This is {CurrentAvatarProfileDisplayName}' only when that person is in front of the camera.",
+                "Not capturing: use File > Login to identify the person in front of the camera.",
                 Color.FromRgb(89, 97, 107));
         }
 
@@ -2160,6 +2121,13 @@ public partial class MainWindow : Window
 
     private AvatarTrackingSanityState GetAvatarTrackingSanityState()
     {
+        if (!IsAvatarUserLoggedIn)
+        {
+            return new AvatarTrackingSanityState(
+                "Tracking sanity: avatar capture is logged out. MediaPipe preview tracking remains live, but 3DDFA avatar observations are not being collected.",
+                Color.FromRgb(185, 215, 239));
+        }
+
         if (HasStrongThreeDdfaPoseLock())
         {
             return new AvatarTrackingSanityState(
@@ -2190,7 +2158,7 @@ public partial class MainWindow : Window
     {
         var state = AvatarCaptureGuidanceAdvisor.Create(new AvatarCaptureGuidanceInput
         {
-            SubjectConfirmed = AvatarSubjectCheckBox.IsChecked == true,
+            UserLoggedIn = IsAvatarUserLoggedIn,
             AvatarLearningRequested = _avatarLearningRequested,
             CameraActive = _isCameraEnabled && _latestFrame is not null,
             FaceLocked = _currentFaceLandmarkFrame.HasFace && _currentFaceLandmarkMetrics.HasFace,
@@ -2225,7 +2193,7 @@ public partial class MainWindow : Window
             OpenLocalFile(_avatarSystemDashboardPath);
             var status = _currentThreeDdfaOnnxResponse is { Ok: true, HasFace: true }
                 ? $"Opened live Avatar System: {_avatarSystemDashboardPath}"
-                : $"Opened live waiting Avatar System. Confirm {CurrentAvatarProfileDisplayName} and start avatar capture.";
+                : "Opened live waiting Avatar System. Log in the person at the camera and start avatar capture.";
             MonitorStatusText.Text = status;
             SetStatus(status);
         }
@@ -2545,7 +2513,6 @@ public partial class MainWindow : Window
                     _currentFaceFeatureDetection,
                     _currentFaceLandmarkFrame,
                     _currentFaceLandmarkMetrics);
-                TrackFeatureOverlayFrame(now);
                 QueueThreeDdfaOnnxReconstruction(_latestFrame, now);
                 UpdateAvatarCaptureState(now);
             }
@@ -2569,7 +2536,7 @@ public partial class MainWindow : Window
         if (_isClosing
             || bitmap is null
             || !_threeDdfaOnnxEnvironment.IsReady
-            || AvatarSubjectCheckBox.IsChecked != true
+            || !IsAvatarUserLoggedIn
             || !_avatarLearningRequested
             || !_currentFaceFeatureDetection.HasFace
             || (capturedAtUtc - _lastThreeDdfaOnnxRequestAtUtc).TotalMilliseconds < 900d)
@@ -2590,13 +2557,22 @@ public partial class MainWindow : Window
         }
 
         var faceBox = CreateThreeDdfaFaceBox(_currentFaceFeatureDetection);
-        _ = Task.Run(() => ProcessThreeDdfaOnnxReconstructionAsync(frame, capturedAtUtc, faceBox));
+        var profileId = CurrentAvatarProfileId;
+        var sessionGeneration = _avatarUserSession.Generation;
+        _ = Task.Run(() => ProcessThreeDdfaOnnxReconstructionAsync(
+            frame,
+            capturedAtUtc,
+            faceBox,
+            profileId,
+            sessionGeneration));
     }
 
     private async Task ProcessThreeDdfaOnnxReconstructionAsync(
         BitmapSource bitmap,
         DateTime capturedAtUtc,
-        ThreeDdfaOnnxSidecarFaceBox? faceBox)
+        ThreeDdfaOnnxSidecarFaceBox? faceBox,
+        string profileId,
+        long sessionGeneration)
     {
         ThreeDdfaOnnxSidecarResponse response;
         ThreeDdfaReconstructionSnapshot? snapshot = null;
@@ -2626,7 +2602,7 @@ public partial class MainWindow : Window
 
         await Dispatcher.InvokeAsync(() =>
         {
-            if (_isClosing)
+            if (_isClosing || !_avatarUserSession.Matches(profileId, sessionGeneration))
             {
                 return;
             }
@@ -2634,7 +2610,6 @@ public partial class MainWindow : Window
             _currentThreeDdfaOnnxResponse = response;
             UpdateAvatarLearningStatusUi();
             TrackLastGoodThreeDdfaSnapshot(snapshot);
-            UpdateTrackingFidelityHealthText();
             if (_showLiveWireframePreview)
             {
                 DrawLiveWireframePreview();
@@ -2801,9 +2776,9 @@ public partial class MainWindow : Window
 
     private void UpdateAvatarCaptureState(DateTime utcNow)
     {
-        if (AvatarSubjectCheckBox.IsChecked != true)
+        if (!IsAvatarUserLoggedIn)
         {
-            ResetAvatarCaptureGate("subject not confirmed; avatar capture paused");
+            ResetAvatarCaptureGate("no avatar user logged in; capture stopped");
             UpdateAvatarCaptureQuality();
             UpdateAvatarLearningStatusUi();
             return;
@@ -2851,7 +2826,7 @@ public partial class MainWindow : Window
             LandmarkFrame = _currentFaceLandmarkFrame,
             Metrics = _currentFaceLandmarkMetrics,
             Stability = _currentFaceLockStabilityAnalysis,
-            SubjectConfirmed = AvatarSubjectCheckBox.IsChecked == true,
+            UserLoggedIn = IsAvatarUserLoggedIn,
             AvatarCaptureRequested = _avatarLearningRequested,
             CaptureGateAccepted = _avatarCaptureGateAccepted,
             CaptureGateReason = _avatarCaptureGateReason
@@ -2861,7 +2836,7 @@ public partial class MainWindow : Window
     private void SaveAvatarReportsIfDue(DateTime utcNow)
     {
         if (!_avatarLearningRequested
-            || AvatarSubjectCheckBox.IsChecked != true
+            || !IsAvatarUserLoggedIn
             || (utcNow - _lastAvatarReportSavedAtUtc).TotalSeconds < AvatarReportSaveIntervalSeconds)
         {
             return;
@@ -2882,7 +2857,7 @@ public partial class MainWindow : Window
     private AvatarReportSnapshot CreateAvatarReportSnapshot(string folder)
     {
         var state = GetAvatarLearningState();
-        var subjectConfirmed = AvatarSubjectCheckBox.IsChecked == true
+        var userLoggedIn = IsAvatarUserLoggedIn
             && !string.IsNullOrWhiteSpace(CurrentAvatarProfileId);
 
         return new AvatarReportSnapshot(
@@ -2890,7 +2865,7 @@ public partial class MainWindow : Window
             CurrentAvatarProfileId,
             CurrentAvatarProfileDisplayName,
             CloneCaptureQuality(_currentAvatarCaptureQuality),
-            subjectConfirmed,
+            userLoggedIn,
             _avatarLearningRequested,
             state.Active,
             state.Title,
@@ -3014,7 +2989,7 @@ public partial class MainWindow : Window
         {
             SubjectId = snapshot.SubjectId,
             SubjectDisplayName = snapshot.SubjectDisplayName,
-            SubjectConfirmed = snapshot.SubjectConfirmed,
+            UserLoggedIn = snapshot.UserLoggedIn,
             AvatarCaptureRequested = snapshot.AvatarCaptureRequested,
             AvatarCaptureActive = snapshot.AvatarCaptureActive,
             AvatarCaptureStatus = snapshot.AvatarCaptureStatus,
@@ -3110,26 +3085,39 @@ public partial class MainWindow : Window
         AtomicTextFileWriter.WriteAllText(path, html, Encoding.UTF8);
     }
 
-    private void BrowseOutputClicked(object sender, RoutedEventArgs e)
+    private void OpenDataFolderClicked(object sender, RoutedEventArgs e)
     {
-        var dialog = new OpenFolderDialog
+        var dialog = new AvatarDataFolderDialog(_outputFolder)
         {
-            Title = "Choose avatar data folder",
-            InitialDirectory = Directory.Exists(_outputFolder) ? _outputFolder : AppContext.BaseDirectory,
-            Multiselect = false
+            Owner = this
         };
 
-        if (dialog.ShowDialog(this) != true)
+        if (dialog.ShowDialog() != true)
         {
             return;
         }
 
-        _outputFolder = dialog.FolderName;
+        var selectedFolder = Path.GetFullPath(dialog.SelectedFolder);
+        if (string.Equals(selectedFolder, Path.GetFullPath(_outputFolder), StringComparison.OrdinalIgnoreCase))
+        {
+            SetStatus($"Avatar data folder unchanged: {_outputFolder}");
+            return;
+        }
+
+        var userWasLoggedIn = IsAvatarUserLoggedIn;
+        if (userWasLoggedIn)
+        {
+            LogOutAvatarUser(announce: false);
+        }
+
+        _outputFolder = selectedFolder;
         SaveOutputFolderPointer(_outputFolder);
-        UpdateOutputFolderText();
         InitializeAvatarProfiles(promptForStartupUser: false);
         var avatarStatus = PrepareAvatarCaptureFolder(showStatus: false);
-        MonitorStatusText.Text = $"Avatar data folder set: {_outputFolder}. {avatarStatus}".Trim();
+        var loginStatus = userWasLoggedIn ? " The previous avatar user was logged out." : "";
+        var status = $"Avatar data folder set: {_outputFolder}.{loginStatus} {avatarStatus}".Trim();
+        MonitorStatusText.Text = status;
+        SetStatus(status);
     }
 
     private void CloseClicked(object sender, RoutedEventArgs e)
@@ -3160,11 +3148,6 @@ public partial class MainWindow : Window
         FaceFieldXValueText.Text = $"{FaceFieldXSlider.Value:0}%";
         FaceFieldYValueText.Text = $"{FaceFieldYSlider.Value:0}%";
         FaceFieldSizeValueText.Text = $"{FaceFieldSizeSlider.Value:0}%";
-    }
-
-    private void UpdateOutputFolderText()
-    {
-        OutputFolderText.Text = $"{_outputFolder}{Environment.NewLine}{GetStorageLabel(_outputFolder)}";
     }
 
     private static string ResolveInitialOutputFolder(string requestedOutputFolder = "")
@@ -3455,57 +3438,6 @@ public partial class MainWindow : Window
     {
         TopStatusText.Text = status;
         FooterText.Text = status;
-    }
-
-    private void EnableDarkWindowFrame()
-    {
-        try
-        {
-            var hwnd = new WindowInteropHelper(this).Handle;
-            if (hwnd == IntPtr.Zero)
-            {
-                return;
-            }
-
-            var enabled = 1;
-            if (DwmSetWindowAttribute(hwnd, 20, ref enabled, sizeof(int)) != 0)
-            {
-                _ = DwmSetWindowAttribute(hwnd, 19, ref enabled, sizeof(int));
-            }
-        }
-        catch
-        {
-        }
-    }
-
-    private string GetStorageLabel(string folder)
-    {
-        try
-        {
-            var fullPath = Path.GetFullPath(folder);
-            var root = Path.GetPathRoot(fullPath);
-            if (string.IsNullOrWhiteSpace(root))
-            {
-                return "Storage: unknown drive.";
-            }
-
-            var drive = new DriveInfo(root);
-            if (!drive.IsReady)
-            {
-                return $"Storage: {root} is not ready.";
-            }
-
-            var freeGb = drive.AvailableFreeSpace / 1024d / 1024d / 1024d;
-            var windowsRoot = Path.GetPathRoot(Environment.GetFolderPath(Environment.SpecialFolder.Windows));
-            var driveNote = root.Equals(windowsRoot, StringComparison.OrdinalIgnoreCase)
-                ? "Windows drive"
-                : "off-system drive";
-            return $"Storage: {drive.Name} {freeGb:0.0} GB free ({driveNote}).";
-        }
-        catch (Exception ex)
-        {
-            return $"Storage: unavailable ({ex.Message}).";
-        }
     }
 
     private void UpdateTrackingOverlay(string state, string metrics, string trigger, string accentColor)
@@ -4040,6 +3972,11 @@ public partial class MainWindow : Window
 
     private string FormatCompactReconstructionLaneLine()
     {
+        if (!IsAvatarUserLoggedIn)
+        {
+            return "3DDFA avatar lane: logged out";
+        }
+
         var pending = Interlocked.CompareExchange(ref _threeDdfaOnnxReconstructionPending, 0, 0) == 1;
         if (!_threeDdfaOnnxEnvironment.IsReady)
         {
@@ -4062,9 +3999,9 @@ public partial class MainWindow : Window
         var quality = _currentAvatarCaptureQuality.ScorePercent > 0d
             ? $"quality {_currentAvatarCaptureQuality.Label} {_currentAvatarCaptureQuality.ScorePercent:0}%"
             : "quality waiting";
-        if (AvatarSubjectCheckBox.IsChecked != true)
+        if (!IsAvatarUserLoggedIn)
         {
-            return $"Avatar: subject off | {quality}";
+            return $"Avatar: logged out | {quality}";
         }
 
         if (!_avatarLearningRequested)
@@ -4156,26 +4093,7 @@ public partial class MainWindow : Window
 
     private sealed record LiveWireframeProjectedPoint(int Index, double X, double Y, double Z);
 
-    private sealed record TrackingFidelityOption(string Label, int MaxOutputWidth, double MaxFramesPerSecond)
-    {
-        public string ShortLabel
-        {
-            get
-            {
-                if (MaxOutputWidth >= 3840)
-                {
-                    return "4K";
-                }
-
-                if (MaxOutputWidth >= 1920)
-                {
-                    return "HD";
-                }
-
-                return "Safe";
-            }
-        }
-    }
+    private sealed record TrackingFidelityOption(int MaxOutputWidth, double MaxFramesPerSecond);
 
     private sealed record AvatarLearningState(bool Active, string Title, string Detail, Color Accent);
 
@@ -4186,7 +4104,7 @@ public partial class MainWindow : Window
         string SubjectId,
         string SubjectDisplayName,
         AvatarCaptureQualityAssessment CaptureQuality,
-        bool SubjectConfirmed,
+        bool UserLoggedIn,
         bool AvatarCaptureRequested,
         bool AvatarCaptureActive,
         string AvatarCaptureStatus,
@@ -4203,8 +4121,6 @@ public partial class MainWindow : Window
         string AvatarModelHtmlPath,
         string AvatarModelObservationJsonPath);
 
-    private sealed record AvatarStartupSelection(string ProfileId, string NewDisplayName);
+    private sealed record AvatarLoginSelection(string ProfileId, string NewDisplayName);
 
-    [DllImport("dwmapi.dll")]
-    private static extern int DwmSetWindowAttribute(IntPtr hwnd, int attribute, ref int attributeValue, int attributeSize);
 }

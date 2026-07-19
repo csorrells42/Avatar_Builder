@@ -53,7 +53,7 @@ public sealed class AvatarSystemDashboardStore
         html.AppendLine($"<p>{H(dashboard.AvatarCaptureCorrection)}</p>");
         html.AppendLine("<div class=\"grid\">");
         html.AppendLine(Metric("Subject", string.IsNullOrWhiteSpace(dashboard.SubjectDisplayName) ? dashboard.SubjectId : dashboard.SubjectDisplayName));
-        html.AppendLine(Metric("Subject confirmed", dashboard.SubjectConfirmed ? "Yes" : "No"));
+        html.AppendLine(Metric("Avatar user logged in", dashboard.UserLoggedIn ? "Yes" : "No"));
         html.AppendLine(Metric("Capture switch", dashboard.AvatarCaptureRequested ? "Started" : "Stopped"));
         html.AppendLine(Metric("Currently capturing", dashboard.AvatarCaptureActive ? "Yes" : "No"));
         html.AppendLine(Metric("Current quality", $"{quality.Label} {quality.ScorePercent:0}%"));

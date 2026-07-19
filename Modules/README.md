@@ -4,13 +4,13 @@ Runtime capabilities live in purpose-named modules. Folder path and namespace sh
 
 ## Reusable module rule
 
-The WPF shell composes modules and owns controls, drawing, and workflow. Camera capture, facial measurement, subject gating, reconstruction, storage, and report generation belong behind narrow module contracts. Backend implementations must not depend on WPF controls.
+The WPF shell composes modules and owns controls, drawing, and workflow. Camera capture, facial measurement, user-session gating, reconstruction, storage, and report generation belong behind narrow module contracts. Backend implementations must not depend on WPF controls.
 
 Prefer backend-neutral DTOs and latest-frame asynchronous workers. Reusable modules must be independently callable by a future AI application without copying `MainWindow.xaml.cs`.
 
 ## App shell
 
-`MainWindow.xaml` defines the visible workflow. `MainWindow.xaml.cs` coordinates camera state, fast tracking, subject confirmation, 3DDFA capture, immutable report snapshots, and UI status. New backend algorithms do not belong in the app shell.
+`MainWindow.xaml` defines the visible workflow. `MainWindow.xaml.cs` coordinates camera state, fast tracking, avatar-user login, 3DDFA capture, immutable report snapshots, and UI status. `AvatarDataFolderDialog.xaml` owns the File-menu storage dialog and pending folder selection. New backend algorithms do not belong in the app shell.
 
 ## Webcam
 
@@ -38,7 +38,7 @@ Owns face localization, landmarks, feature measurements, capture quality, recons
 - `MediaPipe`: Face Landmarker model discovery, Python sidecar, and dense-result mapping.
 - `Onnx`: 3DDFA_V2 model discovery, Python sidecar client, and dense reconstruction protocol.
 - `Pipeline`: tracker ordering and fusion rules.
-- `Personalization`: profile registry, subject gate, and avatar capture-quality scoring.
+- `Personalization`: profile registry, explicit user login session, and avatar capture-quality scoring.
 - `Reconstruction`: persistent 3DDFA observations, model builder, regression history, dashboard, and dense reconstruction review page.
 
 ## Infrastructure

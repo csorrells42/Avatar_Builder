@@ -13,7 +13,7 @@ public sealed class AvatarSystemDashboard
 
     public string SubjectDisplayName { get; set; } = "";
 
-    public bool SubjectConfirmed { get; set; }
+    public bool UserLoggedIn { get; set; }
 
     public bool AvatarCaptureRequested { get; set; }
 

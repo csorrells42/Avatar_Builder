@@ -6,11 +6,11 @@ public static class AvatarCaptureGuidanceAdvisor
     {
         ArgumentNullException.ThrowIfNull(input);
 
-        if (!input.SubjectConfirmed)
+        if (!input.UserLoggedIn)
         {
             return Blocked(
-                "Confirm selected user",
-                "Avatar capture is paused until the subject checkbox confirms the selected user is the person in front of the camera.");
+                "Login required",
+                "Avatar capture is stopped. Use File > Login to identify the person in front of the camera.");
         }
 
         if (!input.CameraActive)
@@ -46,7 +46,7 @@ public static class AvatarCaptureGuidanceAdvisor
 
         return Good(
             "3D capture running",
-            "3DDFA_V2 ONNX is the avatar reconstruction lane. Keep a relaxed, subject-confirmed session running with natural blinks, speech, small head turns, and distance changes.",
+            "3DDFA_V2 ONNX is the avatar reconstruction lane. Keep a relaxed, logged-in session running with natural blinks, speech, small head turns, and distance changes.",
             severity: AvatarCaptureGuidanceSeverity.Good);
     }
 
