@@ -208,7 +208,7 @@ public sealed class OpenCvFacemarkLandmarkTracker : IStatefulFaceLandmarkTracker
 
         try
         {
-            var parameters = new FacemarkLBF.Params
+            using var parameters = new FacemarkLBF.Params
             {
                 ModelFilename = _modelInfo.ModelPath
             };

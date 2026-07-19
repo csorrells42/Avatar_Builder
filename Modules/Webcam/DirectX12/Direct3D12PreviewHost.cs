@@ -171,36 +171,44 @@ public sealed class Direct3D12PreviewHost : WebcamDirectX12ViewportHost, ICamera
             return;
         }
 
-        var frameLease = frame.Duplicate();
-        if (frameLease is null)
+        TextureNativeFrameLease? frameLease = null;
+        try
         {
-            RecordDroppedFrame();
-            return;
-        }
-
-        lock (_renderWorkerLock)
-        {
-            if (_renderWorkerStopping)
+            frameLease = frame.Duplicate();
+            if (frameLease is null)
             {
-                frameLease.Dispose();
                 RecordDroppedFrame();
                 return;
             }
 
-            if (_pendingTextureFrame is not null)
+            lock (_renderWorkerLock)
             {
-                _pendingTextureFrame.Dispose();
-                RecordDroppedFrame();
+                if (_renderWorkerStopping)
+                {
+                    RecordDroppedFrame();
+                    return;
+                }
+
+                if (_pendingTextureFrame is not null)
+                {
+                    _pendingTextureFrame.Dispose();
+                    RecordDroppedFrame();
+                }
+
+                _pendingTextureFrame = new QueuedTextureFrame(
+                    frameLease,
+                    colorSettings,
+                    denoiseEnabled,
+                    denoiseStrength);
+                frameLease = null;
             }
 
-            _pendingTextureFrame = new QueuedTextureFrame(
-                frameLease,
-                colorSettings,
-                denoiseEnabled,
-                denoiseStrength);
+            _renderFrameReady.Set();
         }
-
-        _renderFrameReady.Set();
+        finally
+        {
+            frameLease?.Dispose();
+        }
     }
 
     public void UpdateTrackingOverlay(PreviewTrackingOverlay? overlay)
@@ -709,6 +717,7 @@ public sealed class Direct3D12PreviewHost : WebcamDirectX12ViewportHost, ICamera
     private sealed class Direct3D12SwapChainRenderer : IDisposable
     {
         private readonly RawRect[] _overlayBorders = new RawRect[4];
+        private readonly RawRect[] _overlayLineRects = new RawRect[8192];
         private const int FrameCount = 3;
         private const int D3D12DefaultShader4ComponentMappingValue = 5768;
         private const int BgraColorSettingsDescriptorStart = 3;
@@ -1210,7 +1219,7 @@ public sealed class Direct3D12PreviewHost : WebcamDirectX12ViewportHost, ICamera
 
         private void DrawTrackingOverlay(CpuDescriptorHandle renderTarget, PreviewTrackingOverlay overlay)
         {
-            if (!overlay.HasRegions)
+            if (!overlay.HasContent)
             {
                 return;
             }
@@ -1219,6 +1228,104 @@ public sealed class Direct3D12PreviewHost : WebcamDirectX12ViewportHost, ICamera
             DrawOverlayRectangle(renderTarget, overlay.LeftEyeBox, new Color4(0.40f, 0.91f, 0.78f, 1f), 3);
             DrawOverlayRectangle(renderTarget, overlay.RightEyeBox, new Color4(0.40f, 0.91f, 0.78f, 1f), 3);
             DrawOverlayRectangle(renderTarget, overlay.MouthBox, new Color4(0.96f, 0.52f, 0.69f, 1f), 3);
+            DrawOverlayPolyline(renderTarget, overlay.FaceContour, new Color4(0.73f, 0.84f, 0.94f, 1f), 2);
+            DrawOverlayPolyline(renderTarget, overlay.JawContour, new Color4(0.73f, 0.84f, 0.94f, 1f), 3);
+            DrawOverlayPolyline(renderTarget, overlay.LeftEyeContour, GetEyeContourColor(overlay.LeftEyeContour), 4);
+            DrawOverlayPolyline(renderTarget, overlay.RightEyeContour, GetEyeContourColor(overlay.RightEyeContour), 4);
+            DrawOverlayPolyline(renderTarget, overlay.LeftBrowContour, new Color4(0.77f, 0.97f, 0.64f, 1f), 3);
+            DrawOverlayPolyline(renderTarget, overlay.RightBrowContour, new Color4(0.77f, 0.97f, 0.64f, 1f), 3);
+            DrawOverlayPolyline(renderTarget, overlay.OuterLipContour, GetLipContourColor(overlay.OuterLipContour), 4);
+            DrawOverlayPolyline(renderTarget, overlay.InnerLipContour, GetLipContourColor(overlay.InnerLipContour), 3);
+        }
+
+        private static Color4 GetEyeContourColor(PreviewOverlayPolyline? contour)
+        {
+            return contour?.Inferred == true
+                ? new Color4(0.93f, 0.68f, 0.29f, 1f)
+                : new Color4(0.48f, 0.85f, 1f, 1f);
+        }
+
+        private static Color4 GetLipContourColor(PreviewOverlayPolyline? contour)
+        {
+            return contour?.Inferred == true
+                ? new Color4(0.93f, 0.68f, 0.29f, 1f)
+                : new Color4(1f, 0.75f, 0.43f, 1f);
+        }
+
+        private void DrawOverlayPolyline(
+            CpuDescriptorHandle renderTarget,
+            PreviewOverlayPolyline? polyline,
+            Color4 color,
+            int thickness)
+        {
+            if (polyline is null || polyline.Points.Count < 2)
+            {
+                return;
+            }
+
+            var rectangleCount = 0;
+            for (var index = 1; index < polyline.Points.Count; index++)
+            {
+                AppendOverlayLineSegment(
+                    polyline.Points[index - 1],
+                    polyline.Points[index],
+                    thickness,
+                    polyline.Inferred,
+                    ref rectangleCount);
+            }
+
+            if (polyline.Closed)
+            {
+                AppendOverlayLineSegment(
+                    polyline.Points[^1],
+                    polyline.Points[0],
+                    thickness,
+                    polyline.Inferred,
+                    ref rectangleCount);
+            }
+
+            if (rectangleCount > 0)
+            {
+                _commandList.ClearRenderTargetView(renderTarget, color, (uint)rectangleCount, _overlayLineRects);
+            }
+        }
+
+        private void AppendOverlayLineSegment(
+            PreviewOverlayPoint from,
+            PreviewOverlayPoint to,
+            int thickness,
+            bool dashed,
+            ref int rectangleCount)
+        {
+            var start = from.Clamp();
+            var end = to.Clamp();
+            var startX = start.X * Math.Max(1, _width - 1);
+            var startY = start.Y * Math.Max(1, _height - 1);
+            var endX = end.X * Math.Max(1, _width - 1);
+            var endY = end.Y * Math.Max(1, _height - 1);
+            var deltaX = endX - startX;
+            var deltaY = endY - startY;
+            var distance = Math.Max(Math.Abs(deltaX), Math.Abs(deltaY));
+            var spacing = Math.Max(1d, thickness * 0.70d);
+            var steps = Math.Max(1, (int)Math.Ceiling(distance / spacing));
+            var half = Math.Max(1, thickness / 2);
+
+            for (var step = 0; step <= steps && rectangleCount < _overlayLineRects.Length; step++)
+            {
+                if (dashed && ((step / 4) & 1) == 1)
+                {
+                    continue;
+                }
+
+                var progress = step / (double)steps;
+                var x = (int)Math.Round(startX + deltaX * progress);
+                var y = (int)Math.Round(startY + deltaY * progress);
+                var left = Math.Clamp(x - half, 0, Math.Max(0, _width - 1));
+                var top = Math.Clamp(y - half, 0, Math.Max(0, _height - 1));
+                var right = Math.Clamp(x + half + 1, left + 1, _width);
+                var bottom = Math.Clamp(y + half + 1, top + 1, _height);
+                _overlayLineRects[rectangleCount++] = new RawRect(left, top, right, bottom);
+            }
         }
 
         private void DrawOverlayRectangle(

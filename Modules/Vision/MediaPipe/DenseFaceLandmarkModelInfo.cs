@@ -9,6 +9,10 @@ public sealed class DenseFaceLandmarkModelInfo
     private const string RelativeModelDirectory = "dependencies/vision/dense-face-landmarks";
     private const string DefaultManifestFileName = "face_landmarker_manifest.json";
     private const string DefaultModelFileName = "face_landmarker.task";
+    private static readonly JsonSerializerOptions ManifestJsonOptions = new()
+    {
+        PropertyNameCaseInsensitive = true
+    };
 
     public string ModelDirectory { get; init; } = "";
 
@@ -103,7 +107,7 @@ public sealed class DenseFaceLandmarkModelInfo
         {
             var manifest = JsonSerializer.Deserialize<Manifest>(
                 File.ReadAllText(manifestPath),
-                new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+                ManifestJsonOptions);
             var modelFile = string.IsNullOrWhiteSpace(manifest?.ModelFile)
                 ? DefaultModelFileName
                 : manifest.ModelFile;

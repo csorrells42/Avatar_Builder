@@ -14,50 +14,113 @@ internal static class DenseMeshRigidAligner
             return source;
         }
 
-        var targetByIndex = target.ToDictionary(static point => point.Index);
-        var pairs = source
-            .Where(point => targetByIndex.ContainsKey(point.Index))
-            .Select(point => (Source: point, Target: targetByIndex[point.Index]))
-            .ToList();
-        if (pairs.Count < 3)
+        IReadOnlyList<FaceMeshLandmarkPoint> matchedSource;
+        IReadOnlyList<FaceMeshLandmarkPoint> matchedTarget;
+        if (HasMatchingIndexOrder(source, target))
+        {
+            matchedSource = source;
+            matchedTarget = target;
+        }
+        else
+        {
+            var targetByIndex = target.ToDictionary(static point => point.Index);
+            var sourceMatches = new List<FaceMeshLandmarkPoint>(Math.Min(source.Count, target.Count));
+            var targetMatches = new List<FaceMeshLandmarkPoint>(sourceMatches.Capacity);
+            foreach (var point in source)
+            {
+                if (targetByIndex.TryGetValue(point.Index, out var targetPoint))
+                {
+                    sourceMatches.Add(point);
+                    targetMatches.Add(targetPoint);
+                }
+            }
+
+            matchedSource = sourceMatches;
+            matchedTarget = targetMatches;
+        }
+
+        if (matchedSource.Count < 3)
         {
             return source;
         }
 
-        var sourceCenter = new CenterPoint(
-            pairs.Average(static pair => pair.Source.X),
-            pairs.Average(static pair => pair.Source.Y),
-            pairs.Average(static pair => pair.Source.Z));
-        var targetCenter = new CenterPoint(
-            pairs.Average(static pair => pair.Target.X),
-            pairs.Average(static pair => pair.Target.Y),
-            pairs.Average(static pair => pair.Target.Z));
-        var covariance = new double[3, 3];
-        foreach (var pair in pairs)
+        var sourceXTotal = 0d;
+        var sourceYTotal = 0d;
+        var sourceZTotal = 0d;
+        var targetXTotal = 0d;
+        var targetYTotal = 0d;
+        var targetZTotal = 0d;
+        for (var index = 0; index < matchedSource.Count; index++)
         {
-            var sourcePoint = new[]
-            {
-                pair.Source.X - sourceCenter.X,
-                pair.Source.Y - sourceCenter.Y,
-                pair.Source.Z - sourceCenter.Z
-            };
-            var targetPoint = new[]
-            {
-                pair.Target.X - targetCenter.X,
-                pair.Target.Y - targetCenter.Y,
-                pair.Target.Z - targetCenter.Z
-            };
-            for (var row = 0; row < 3; row++)
-            {
-                for (var column = 0; column < 3; column++)
-                {
-                    covariance[row, column] += sourcePoint[row] * targetPoint[column];
-                }
-            }
+            var sourcePoint = matchedSource[index];
+            var targetPoint = matchedTarget[index];
+            sourceXTotal += sourcePoint.X;
+            sourceYTotal += sourcePoint.Y;
+            sourceZTotal += sourcePoint.Z;
+            targetXTotal += targetPoint.X;
+            targetYTotal += targetPoint.Y;
+            targetZTotal += targetPoint.Z;
+        }
+
+        var inverseCount = 1d / matchedSource.Count;
+        var sourceCenter = new CenterPoint(
+            sourceXTotal * inverseCount,
+            sourceYTotal * inverseCount,
+            sourceZTotal * inverseCount);
+        var targetCenter = new CenterPoint(
+            targetXTotal * inverseCount,
+            targetYTotal * inverseCount,
+            targetZTotal * inverseCount);
+        var covariance = new double[3, 3];
+        for (var index = 0; index < matchedSource.Count; index++)
+        {
+            var sourcePoint = matchedSource[index];
+            var targetPoint = matchedTarget[index];
+            var sourceX = sourcePoint.X - sourceCenter.X;
+            var sourceY = sourcePoint.Y - sourceCenter.Y;
+            var sourceZ = sourcePoint.Z - sourceCenter.Z;
+            var targetX = targetPoint.X - targetCenter.X;
+            var targetY = targetPoint.Y - targetCenter.Y;
+            var targetZ = targetPoint.Z - targetCenter.Z;
+            covariance[0, 0] += sourceX * targetX;
+            covariance[0, 1] += sourceX * targetY;
+            covariance[0, 2] += sourceX * targetZ;
+            covariance[1, 0] += sourceY * targetX;
+            covariance[1, 1] += sourceY * targetY;
+            covariance[1, 2] += sourceY * targetZ;
+            covariance[2, 0] += sourceZ * targetX;
+            covariance[2, 1] += sourceZ * targetY;
+            covariance[2, 2] += sourceZ * targetZ;
         }
 
         var rotation = CalculateRotation(covariance);
-        return source.Select(point => Transform(point, sourceCenter, targetCenter, rotation)).ToList();
+        var aligned = new List<FaceMeshLandmarkPoint>(source.Count);
+        foreach (var point in source)
+        {
+            aligned.Add(Transform(point, sourceCenter, targetCenter, rotation));
+        }
+
+        return aligned;
+    }
+
+    private static bool HasMatchingIndexOrder(
+        IReadOnlyList<FaceMeshLandmarkPoint> source,
+        IReadOnlyList<FaceMeshLandmarkPoint> target)
+    {
+        if (source.Count != target.Count)
+        {
+            return false;
+        }
+
+        for (var index = 0; index < source.Count; index++)
+        {
+            if (source[index].Index != target[index].Index)
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     private static double[,] CalculateRotation(double[,] covariance)

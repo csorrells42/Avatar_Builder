@@ -2,7 +2,6 @@ using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Text;
-using System.Text.Json;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
@@ -94,7 +93,9 @@ public partial class MainWindow : Window
     private readonly object _directX12AnalysisFrameLock = new();
     private readonly object _faceFeatureDetectionFrameLock = new();
     private readonly object _personalFaceReportWriterLock = new();
+    private readonly object _threeDdfaTopologyLock = new();
     private readonly List<ThreeDdfaReconstructionSnapshot> _lastGoodThreeDdfaSamples = [];
+    private List<MeshTopologyEdge> _threeDdfaDenseTopologyEdges = [];
     private IReadOnlyList<CameraDevice> _cameras = [];
     private CancellationTokenSource? _modeLoadCancellation;
     private string _outputFolder;
@@ -116,7 +117,6 @@ public partial class MainWindow : Window
     };
     private string _avatarSystemDashboardPath = "";
     private string _avatarModelHtmlPath = "";
-    private string _lastGoodThreeDdfaJsonPath = "";
     private string _lastGoodThreeDdfaHtmlPath = "";
     private BitmapSource? _pendingPreviewFrame;
     private BitmapSource? _pendingFaceFeatureDetectionFrame;
@@ -561,7 +561,6 @@ public partial class MainWindow : Window
         _currentThreeDdfaOnnxResponse = ThreeDdfaOnnxSidecarResponse.Waiting;
         _avatarSystemDashboardPath = "";
         _avatarModelHtmlPath = "";
-        _lastGoodThreeDdfaJsonPath = "";
         _lastGoodThreeDdfaHtmlPath = "";
         _lastGoodThreeDdfaSamples.Clear();
     }
@@ -1467,13 +1466,22 @@ public partial class MainWindow : Window
             return;
         }
 
-        var analysisFrame = frame.Duplicate();
-        if (analysisFrame is null)
+        TextureNativeFrameLease? analysisFrame = null;
+        try
         {
-            return;
-        }
+            analysisFrame = frame.Duplicate();
+            if (analysisFrame is null)
+            {
+                return;
+            }
 
-        QueueDirectX12AnalysisFrame(analysisFrame);
+            QueueDirectX12AnalysisFrame(analysisFrame);
+            analysisFrame = null;
+        }
+        finally
+        {
+            analysisFrame?.Dispose();
+        }
     }
 
     private void QueueDirectX12AnalysisFrame(TextureNativeFrameLease frame)
@@ -2397,26 +2405,29 @@ public partial class MainWindow : Window
         {
             var folder = GetAvatarDataFolder();
             Directory.CreateDirectory(folder);
+            var currentSamples = _lastGoodThreeDdfaSamples.ToList();
+            var observationSet = await Task.Run(() => new AvatarModelObservationStore().Read(folder));
+            var samples = LastGoodThreeDdfaStore.CreateSamples(observationSet, currentSamples);
             var report = new LastGoodThreeDdfaReport
             {
                 SubjectId = CurrentAvatarProfileId,
                 SubjectDisplayName = CurrentAvatarProfileDisplayName,
                 AvatarModelProgressHtmlPath = AvatarModelStore.GetHtmlPath(folder),
                 ReconstructionLane = CreateFaceReconstructionLaneStatus(),
-                Samples = _lastGoodThreeDdfaSamples.ToList()
+                DenseTopologyEdges = LastGoodThreeDdfaStore.SelectSharedTopology(observationSet, currentSamples),
+                Samples = samples
             };
             SetStatus("Writing 3DDFA Last 5 Dense Reconstructions...");
-            var files = await Task.Run(() => _lastGoodThreeDdfaStore.Write(folder, report));
+            var htmlPath = await Task.Run(() => _lastGoodThreeDdfaStore.Write(folder, report));
             if (_isClosing)
             {
                 return;
             }
 
-            _lastGoodThreeDdfaJsonPath = files.JsonPath;
-            _lastGoodThreeDdfaHtmlPath = files.HtmlPath;
-            OpenLocalFile(files.HtmlPath);
-            var status = _lastGoodThreeDdfaSamples.Count > 0
-                ? $"Opened 3DDFA Last 5 Dense Reconstructions: {files.HtmlPath}"
+            _lastGoodThreeDdfaHtmlPath = htmlPath;
+            OpenLocalFile(htmlPath);
+            var status = samples.Count > 0
+                ? $"Opened 3DDFA Last 5 Dense Reconstructions: {htmlPath}"
                 : $"Opened 3DDFA Last 5 Dense Reconstructions. Start Avatar Capture and wait for the 3DDFA lane to lock.";
             SetStatus(status);
             MonitorStatusText.Text = status;
@@ -2486,7 +2497,6 @@ public partial class MainWindow : Window
             _currentAvatarCaptureQuality = AvatarCaptureQualityAssessment.Waiting;
             _avatarSystemDashboardPath = "";
             _avatarModelHtmlPath = "";
-            _lastGoodThreeDdfaJsonPath = "";
             _lastGoodThreeDdfaHtmlPath = "";
             _lastGoodThreeDdfaSamples.Clear();
             _avatarLearningRequested = false;
@@ -3119,15 +3129,20 @@ public partial class MainWindow : Window
         };
     }
 
-    private static ThreeDdfaReconstructionSnapshot? CreateThreeDdfaLastGoodSnapshot(
+    private ThreeDdfaReconstructionSnapshot? CreateThreeDdfaLastGoodSnapshot(
         ThreeDdfaOnnxSidecarResponse response,
         DateTime sampleCapturedAtUtc)
     {
         if (!response.Ok
             || !response.HasFace
             || response.DenseVertexCount < 30000
-            || response.DenseVertices.Count < 30000
-            || response.DenseEdges.Count == 0)
+            || response.DenseVertices.Count < 30000)
+        {
+            return null;
+        }
+
+        var topologyEdges = GetOrCreateThreeDdfaTopology(response.DenseEdges);
+        if (topologyEdges.Count == 0)
         {
             return null;
         }
@@ -3172,17 +3187,7 @@ public partial class MainWindow : Window
                     Z = RoundThreeDdfaValue(vertex.Z)
                 })
                 .ToList(),
-            TopologyEdges = response.DenseEdges
-                .Select(edge => new MeshTopologyEdge
-                {
-                    FromIndex = edge.FromIndex,
-                    ToIndex = edge.ToIndex,
-                    Role = "surface",
-                    Source = "3ddfa-full-resolution-topology",
-                    LengthPercent = 0d,
-                    ConfidencePercent = confidencePercent
-                })
-                .ToList(),
+            TopologyEdges = topologyEdges,
             SparseLandmarks = response.SparseLandmarks
                 .Select(static vertex => new FaceMeshLandmarkPoint
                 {
@@ -3343,15 +3348,9 @@ public partial class MainWindow : Window
             state.Active,
             state.Title,
             state.Detail,
-            CloneForBackgroundSave(_currentFaceFrameGeometry),
+            _currentFaceFrameGeometry,
             _lastGoodThreeDdfaSamples.ToList(),
-            CloneForBackgroundSave(CreateFaceReconstructionLaneStatus()));
-    }
-
-    private static T CloneForBackgroundSave<T>(T value)
-    {
-        var json = JsonSerializer.Serialize(value);
-        return JsonSerializer.Deserialize<T>(json) ?? value;
+            CreateFaceReconstructionLaneStatus());
     }
 
     private static AvatarCaptureQualityAssessment CloneCaptureQuality(AvatarCaptureQualityAssessment value)
@@ -3442,12 +3441,11 @@ public partial class MainWindow : Window
             snapshot.SubjectDisplayName,
             snapshot.LastGoodThreeDdfaSamples);
         var avatarModelObservations = observationMerge.ObservationSet;
-        var lastGoodJsonPath = LastGoodThreeDdfaStore.GetJsonPath(snapshot.Folder);
+        var lastGoodSamples = LastGoodThreeDdfaStore.CreateSamples(avatarModelObservations);
         var lastGoodHtmlPath = LastGoodThreeDdfaStore.GetHtmlPath(snapshot.Folder);
-        LastGoodThreeDdfaFiles lastGoodThreeDdfaFiles;
-        if (observationMerge.Changed || !File.Exists(lastGoodJsonPath) || !File.Exists(lastGoodHtmlPath))
+        if (observationMerge.Changed || !File.Exists(lastGoodHtmlPath))
         {
-            lastGoodThreeDdfaFiles = lastGoodThreeDdfaStore.Write(
+            lastGoodHtmlPath = lastGoodThreeDdfaStore.Write(
                 snapshot.Folder,
                 new LastGoodThreeDdfaReport
                 {
@@ -3455,15 +3453,11 @@ public partial class MainWindow : Window
                     SubjectDisplayName = snapshot.SubjectDisplayName,
                     AvatarModelProgressHtmlPath = AvatarModelStore.GetHtmlPath(snapshot.Folder),
                     ReconstructionLane = snapshot.ReconstructionLane,
-                    Samples = snapshot.LastGoodThreeDdfaSamples
+                    DenseTopologyEdges = LastGoodThreeDdfaStore.SelectSharedTopology(avatarModelObservations),
+                    Samples = lastGoodSamples
                 });
         }
-        else
-        {
-            lastGoodThreeDdfaFiles = new LastGoodThreeDdfaFiles(lastGoodJsonPath, lastGoodHtmlPath);
-        }
 
-        var avatarModelJsonPath = AvatarModelStore.GetJsonPath(snapshot.Folder);
         var avatarModel = avatarModelStore.Read(snapshot.Folder);
         AvatarModelHistoryReport avatarModelHistory;
         if (observationMerge.Changed
@@ -3478,11 +3472,12 @@ public partial class MainWindow : Window
                 snapshot.Folder,
                 avatarModelObservations,
                 avatarModel);
-            avatarModelJsonPath = avatarModelStore.Write(snapshot.Folder, avatarModel);
+            avatarModelStore.Write(snapshot.Folder, avatarModel);
         }
         else
         {
             avatarModelHistory = avatarModelHistoryStore.ReadReport(snapshot.Folder);
+            avatarModelStore.EnsureViewer(snapshot.Folder, avatarModel);
         }
 
         var dashboard = new AvatarSystemDashboard
@@ -3498,8 +3493,8 @@ public partial class MainWindow : Window
             CurrentFaceFrameGeometry = snapshot.FaceFrameGeometry,
             ReconstructionLane = snapshot.ReconstructionLane,
             FastTrackingSummary = $"{snapshot.ReconstructionLane.FastTrackingLaneName} supplies live face, eye, jaw, brow, mouth, overlay, and capture measurements.",
-            LastGoodThreeDdfaSampleCount = snapshot.LastGoodThreeDdfaSamples.Count,
-            LastGoodThreeDdfaHtmlPath = lastGoodThreeDdfaFiles.HtmlPath,
+            LastGoodThreeDdfaSampleCount = lastGoodSamples.Count,
+            LastGoodThreeDdfaHtmlPath = lastGoodHtmlPath,
             AvatarModelStatus = avatarModel.Status,
             AvatarModelObservationCount = avatarModelObservations.Observations.Count,
             AvatarModelConfidencePercent = avatarModel.Identity.ConfidencePercent,
@@ -3513,12 +3508,9 @@ public partial class MainWindow : Window
 
         var dashboardJsonPath = avatarSystemDashboardStore.Write(snapshot.Folder, dashboard);
         return new AvatarReportSaveResult(
-            lastGoodThreeDdfaFiles.JsonPath,
-            lastGoodThreeDdfaFiles.HtmlPath,
+            lastGoodHtmlPath,
             AvatarSystemDashboardStore.GetHtmlPath(dashboardJsonPath),
-            avatarModelJsonPath,
-            AvatarModelStore.GetHtmlPath(snapshot.Folder),
-            AvatarModelObservationStore.GetJsonPath(snapshot.Folder));
+            AvatarModelStore.GetHtmlPath(snapshot.Folder));
     }
 
     private void ApplyAvatarReportSaveResult(AvatarReportSaveResult result)
@@ -3528,7 +3520,6 @@ public partial class MainWindow : Window
             return;
         }
 
-        _lastGoodThreeDdfaJsonPath = result.LastGoodThreeDdfaJsonPath;
         _lastGoodThreeDdfaHtmlPath = result.LastGoodThreeDdfaHtmlPath;
         _avatarSystemDashboardPath = result.AvatarSystemDashboardPath;
         _avatarModelHtmlPath = result.AvatarModelHtmlPath;
@@ -4290,11 +4281,80 @@ public partial class MainWindow : Window
             return PreviewTrackingOverlay.Empty;
         }
 
-        return new PreviewTrackingOverlay(
-            ToPreviewOverlayRect(_currentFaceFeatureDetection.FaceBox),
-            ToPreviewOverlayRect(_currentFaceFeatureDetection.LeftEyeBox),
-            ToPreviewOverlayRect(_currentFaceFeatureDetection.RightEyeBox),
-            ToPreviewOverlayRect(_currentFaceFeatureDetection.MouthBox));
+        var frame = _currentFaceLandmarkFrame;
+        var inferredEyes = frame.EyeArtifactSuppressed;
+        return new PreviewTrackingOverlay
+        {
+            FaceBox = ToPreviewOverlayRect(_currentFaceFeatureDetection.FaceBox),
+            LeftEyeBox = ToPreviewOverlayRect(_currentFaceFeatureDetection.LeftEyeBox),
+            RightEyeBox = ToPreviewOverlayRect(_currentFaceFeatureDetection.RightEyeBox),
+            MouthBox = ToPreviewOverlayRect(_currentFaceFeatureDetection.MouthBox),
+            FaceContour = ToPreviewOverlayPolyline(frame.FaceContour, closed: true),
+            JawContour = ToPreviewOverlayPolyline(frame.JawContour, closed: false),
+            LeftEyeContour = ToPreviewOverlayPolyline(
+                frame.LeftEyeContour,
+                closed: true,
+                inferred: frame.LeftEyeReconstructed || inferredEyes),
+            RightEyeContour = ToPreviewOverlayPolyline(
+                frame.RightEyeContour,
+                closed: true,
+                inferred: frame.RightEyeReconstructed || inferredEyes),
+            LeftBrowContour = ToPreviewOverlayPolyline(frame.LeftBrowContour, closed: false),
+            RightBrowContour = ToPreviewOverlayPolyline(frame.RightBrowContour, closed: false),
+            OuterLipContour = ToPreviewOverlayPolyline(
+                frame.OuterLipContour,
+                closed: true,
+                inferred: frame.MouthReconstructed),
+            InnerLipContour = ToPreviewOverlayPolyline(
+                frame.InnerLipContour,
+                closed: true,
+                inferred: frame.MouthReconstructed)
+        };
+    }
+
+    private List<MeshTopologyEdge> GetOrCreateThreeDdfaTopology(
+        IReadOnlyList<ThreeDdfaOnnxSidecarEdge> source)
+    {
+        lock (_threeDdfaTopologyLock)
+        {
+            if (_threeDdfaDenseTopologyEdges.Count >= source.Count
+                && _threeDdfaDenseTopologyEdges.Count > 0)
+            {
+                return _threeDdfaDenseTopologyEdges;
+            }
+
+            _threeDdfaDenseTopologyEdges = source
+                .Select(static edge => new MeshTopologyEdge
+                {
+                    FromIndex = edge.FromIndex,
+                    ToIndex = edge.ToIndex,
+                    Role = "surface",
+                    Source = "3ddfa-full-resolution-topology",
+                    LengthPercent = 0d,
+                    ConfidencePercent = 100d
+                })
+                .ToList();
+            return _threeDdfaDenseTopologyEdges;
+        }
+    }
+
+    private static PreviewOverlayPolyline? ToPreviewOverlayPolyline(
+        IReadOnlyList<Point> points,
+        bool closed,
+        bool inferred = false)
+    {
+        if (points.Count < 2)
+        {
+            return null;
+        }
+
+        var normalized = points
+            .Where(static point => double.IsFinite(point.X) && double.IsFinite(point.Y))
+            .Select(static point => new PreviewOverlayPoint(point.X, point.Y).Clamp())
+            .ToArray();
+        return normalized.Length >= 2
+            ? new PreviewOverlayPolyline(normalized, closed, inferred)
+            : null;
     }
 
     private static PreviewOverlayRect? ToPreviewOverlayRect(Rect? region)
@@ -4686,12 +4746,9 @@ public partial class MainWindow : Window
         FaceReconstructionLaneStatus ReconstructionLane);
 
     private sealed record AvatarReportSaveResult(
-        string LastGoodThreeDdfaJsonPath,
         string LastGoodThreeDdfaHtmlPath,
         string AvatarSystemDashboardPath,
-        string AvatarModelJsonPath,
-        string AvatarModelHtmlPath,
-        string AvatarModelObservationJsonPath);
+        string AvatarModelHtmlPath);
 
     private sealed record AvatarLoginSelection(string ProfileId, string NewDisplayName);
 

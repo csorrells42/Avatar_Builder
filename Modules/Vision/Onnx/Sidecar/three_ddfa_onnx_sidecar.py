@@ -235,7 +235,7 @@ def sampled_dense_mesh_to_json(vertices, triangles, stride=72, return_all_vertic
     ]
 
 
-def dense_mesh_to_compact_json(np, vertices, triangles):
+def dense_mesh_to_compact_json(np, vertices, triangles, include_topology=True):
     if vertices is None:
         return [], []
 
@@ -245,7 +245,7 @@ def dense_mesh_to_compact_json(np, vertices, triangles):
 
     coordinates = np.asarray(vertices, dtype=np.float64).T.reshape(-1)
     coordinates = np.nan_to_num(coordinates, nan=0.0, posinf=0.0, neginf=0.0)
-    if triangles is None:
+    if triangles is None or not include_topology:
         return coordinates.tolist(), []
 
     triangle_rows = np.asarray(triangles, dtype=np.int32).T
@@ -420,6 +420,7 @@ def handle_request(cv2, np, face_boxes, tddfa, calc_pose, parse_param, dense_tri
                 },
             )[0]
     stride = int(request.get("denseSampleStride", 24) or 24)
+    include_topology = bool(request.get("includeTopology", True))
     return_dense_vertices = mode == "full"
     serialize_started = time.perf_counter()
     dense_vertex_coordinates = []
@@ -429,7 +430,8 @@ def handle_request(cv2, np, face_boxes, tddfa, calc_pose, parse_param, dense_tri
         dense_vertex_coordinates, dense_edge_indices = dense_mesh_to_compact_json(
             np,
             dense,
-            dense_triangles)
+            dense_triangles,
+            include_topology=include_topology)
         canonical_identity_coordinates = vertices_to_compact_json(np, canonical_identity)
         dense_vertices = []
         dense_edges = []

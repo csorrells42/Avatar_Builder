@@ -81,7 +81,9 @@ public sealed class MediaFoundationBitmapCameraPreviewService : ICameraPreviewSe
             _cancellation = new CancellationTokenSource();
             var startup = new TaskCompletionSource<string?>(TaskCreationOptions.RunContinuationsAsynchronously);
             var firstFrame = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-            _captureTask = Task.Run(() => CaptureLoop(camera, mode, _cancellation.Token, startup, firstFrame));
+            _captureTask = Task.Run(
+                () => CaptureLoop(camera, mode, _cancellation.Token, startup, firstFrame),
+                CancellationToken.None);
 
             var startupReady = await Task.WhenAny(startup.Task, Task.Delay(TimeSpan.FromSeconds(5), cancellationToken));
             if (startupReady != startup.Task)
@@ -100,7 +102,7 @@ public sealed class MediaFoundationBitmapCameraPreviewService : ICameraPreviewSe
             }
 
             var frameReady = await Task.WhenAny(firstFrame.Task, Task.Delay(TimeSpan.FromSeconds(2), cancellationToken));
-            if (frameReady == firstFrame.Task && firstFrame.Task.Result)
+            if (frameReady == firstFrame.Task && await firstFrame.Task)
             {
                 return true;
             }

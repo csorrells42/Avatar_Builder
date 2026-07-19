@@ -15,6 +15,7 @@ public sealed class ThreeDdfaOnnxReconstructionClient : IDisposable
     private readonly object _sync = new();
     private readonly TimeSpan _timeout;
     private Process? _process;
+    private IReadOnlyList<ThreeDdfaOnnxSidecarEdge> _denseTopology = [];
     private string _lastStandardError = "";
     private bool _firstResponseAfterStart;
     private int _requestNumber;
@@ -64,6 +65,7 @@ public sealed class ThreeDdfaOnnxReconstructionClient : IDisposable
                     FaceBox = faceBox,
                     Mode = ToProtocolMode(mode),
                     DenseSampleStride = Math.Clamp(denseSampleStride, 1, 200),
+                    IncludeTopology = mode == ThreeDdfaOnnxRequestMode.Full && _denseTopology.Count == 0,
                     ImageBase64 = Convert.ToBase64String(jpeg)
                 };
                 var line = JsonSerializer.Serialize(request, JsonOptions);
@@ -104,6 +106,14 @@ public sealed class ThreeDdfaOnnxReconstructionClient : IDisposable
                 }
 
                 response.ExpandCompactMeshData();
+                if (response.DenseEdges.Count > 0)
+                {
+                    _denseTopology = response.DenseEdges;
+                }
+                else if (mode == ThreeDdfaOnnxRequestMode.Full && _denseTopology.Count > 0)
+                {
+                    response.DenseEdges = _denseTopology;
+                }
 
                 if (!string.Equals(response.RequestId, request.RequestId, StringComparison.Ordinal))
                 {
@@ -168,9 +178,10 @@ public sealed class ThreeDdfaOnnxReconstructionClient : IDisposable
         }
 
         StopProcess();
+        Process? process = null;
         try
         {
-            var process = new Process
+            process = new Process
             {
                 StartInfo = new ProcessStartInfo
                 {
@@ -195,9 +206,11 @@ public sealed class ThreeDdfaOnnxReconstructionClient : IDisposable
             }
 
             _process = process;
+            var runningProcess = process;
+            process = null;
             _firstResponseAfterStart = true;
             Volatile.Write(ref _lastStandardError, "");
-            _ = Task.Run(() => ReadErrors(process));
+            _ = Task.Run(() => ReadErrors(runningProcess));
             Status = "3DDFA/ONNX sidecar process started.";
             return true;
         }
@@ -205,6 +218,10 @@ public sealed class ThreeDdfaOnnxReconstructionClient : IDisposable
         {
             Status = $"3DDFA/ONNX sidecar process failed to start: {ex.Message}";
             return false;
+        }
+        finally
+        {
+            process?.Dispose();
         }
     }
 

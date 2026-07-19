@@ -15,7 +15,7 @@ Files:
 - `AvatarModel.cs`, `AvatarModelBuilder.cs`, `AvatarModelStore.cs`: persistent avatar model path. The builder averages canonical 3DDFA BFM identity vertices, uses rigid generalized Procrustes only for legacy camera-space observations, tracks expression coefficients separately, scores pose/depth coverage, and writes `avatar_model.json` plus the interactive `avatar_model_progress.html` viewer. The viewer includes every identity vertex and samples only topology edges.
 - `DenseMeshRigidAligner.cs`: reflection-safe Kabsch rigid alignment for legacy complete meshes. It may rotate and translate a scan but never deform it.
 - `ThreeDdfaReconstructionSnapshot.cs`, `MeshTopologyEdge.cs`: reusable full-resolution 3DDFA snapshot and mesh-topology contracts shared by review and persistent model storage.
-- `LastGoodThreeDdfaReport.cs`, `LastGoodThreeDdfaStore.cs`: write `last_5_3ddfa_reconstructions.json` and `last_5_3ddfa_reconstructions.html` as the dense 3DDFA Last 5 audit page. It carries full-resolution vertices/topology, A/B/C pose, confidence, trust status, and warnings.
+- `LastGoodThreeDdfaReport.cs`, `LastGoodThreeDdfaStore.cs`: rebuild the self-contained `last_5_3ddfa_reconstructions.html` viewer from the persisted observation database so review survives restarts. It carries five observed full-resolution meshes, one shared topology, A/B/C pose, confidence, trust status, and warnings without duplicating either the canonical identity mesh or a standalone JSON cache.
 Rules:
 
 - Never learn without an explicit login for the person in front of the camera.

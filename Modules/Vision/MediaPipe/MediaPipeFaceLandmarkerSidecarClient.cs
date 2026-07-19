@@ -156,9 +156,10 @@ internal sealed class MediaPipeFaceLandmarkerSidecarClient : IDisposable
         }
 
         StopProcess();
+        Process? process = null;
         try
         {
-            var process = new Process
+            process = new Process
             {
                 StartInfo = new ProcessStartInfo
                 {
@@ -181,9 +182,11 @@ internal sealed class MediaPipeFaceLandmarkerSidecarClient : IDisposable
             }
 
             _process = process;
+            var runningProcess = process;
+            process = null;
             _firstResponseAfterStart = true;
             _lastTimestampMilliseconds = 0L;
-            _ = Task.Run(() => ReadErrors(process));
+            _ = Task.Run(() => ReadErrors(runningProcess));
             Status = "MediaPipe sidecar process started.";
             return true;
         }
@@ -191,6 +194,10 @@ internal sealed class MediaPipeFaceLandmarkerSidecarClient : IDisposable
         {
             Status = $"MediaPipe sidecar process failed to start: {ex.Message}";
             return false;
+        }
+        finally
+        {
+            process?.Dispose();
         }
     }
 

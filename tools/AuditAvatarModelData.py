@@ -135,22 +135,31 @@ def audit(profile: Path) -> dict[str, Any]:
     request_ids = [str(item.get("requestId", "")) for item in observations]
     vertex_counts = [len(item.get("vertices", [])) for item in observations]
     index_sets = []
-    basic_sets = []
-    current_sets = []
+    observed_basic_sets = []
+    legacy_abc_sets = []
+    canonical_sets = []
+    canonical_observation_count = 0
     weights = []
     for item in observations:
         indices, raw = vertices(item)
         index_sets.append(indices)
-        basic = center_and_scale(raw)
-        basic_sets.append(basic)
-        current_sets.append(
+        observed_basic = center_and_scale(raw)
+        observed_basic_sets.append(observed_basic)
+        legacy_abc_sets.append(
             csharp_inverse_abc(
-                basic,
+                observed_basic,
                 float(item.get("aRotationAroundXDegrees", 0.0)),
                 float(item.get("bRotationAroundYDegrees", 0.0)),
                 float(item.get("cRotationAroundZDegrees", 0.0)),
             )
         )
+        canonical_indices, canonical = vertices(item, "canonicalIdentityVertices")
+        if len(canonical) == len(raw) and np.array_equal(canonical_indices, indices):
+            identity = canonical
+            canonical_observation_count += 1
+        else:
+            identity = raw
+        canonical_sets.append(np.round(center_and_scale(identity), 6))
         weights.append(max(0.0, float(item.get("identityWeightPercent", 0.0))) / 100.0)
     weight_array = np.asarray(weights, dtype=np.float64)
     if float(weight_array.sum()) <= 0.0:
@@ -158,8 +167,8 @@ def audit(profile: Path) -> dict[str, Any]:
 
     topology_count = len(observation_set.get("denseTopologyEdges", []))
     common_indices = all(np.array_equal(index_sets[0], item) for item in index_sets[1:])
-    current_rounded = [np.round(points, 6) for points in current_sets]
-    recomputed_model = np.round(weighted_mean(current_rounded, weight_array), 6)
+    builder_sets, builder_mean = generalized_procrustes(canonical_sets, weight_array)
+    recomputed_model = np.round(builder_mean, 6)
     model_indices, stored_model = vertices(model.get("identity", {}), "meanDenseVertices")
     model_matches_indices = np.array_equal(index_sets[0], model_indices)
     model_recompute_rms = rms_percent(stored_model, recomputed_model) if model_matches_indices else math.inf
@@ -167,12 +176,10 @@ def audit(profile: Path) -> dict[str, Any]:
         float(np.max(np.abs(stored_model - recomputed_model))) if model_matches_indices else math.inf
     )
 
-    basic_mean = weighted_mean(basic_sets, weight_array)
-    current_mean = weighted_mean(current_sets, weight_array)
-    procrustes_sets, procrustes_mean = generalized_procrustes(basic_sets, weight_array)
-    model_to_procrustes = rms_percent(kabsch_align(stored_model, procrustes_mean), procrustes_mean)
-    per_scan_current = [rms_percent(points, current_mean) for points in current_sets]
-    per_scan_procrustes = [rms_percent(points, procrustes_mean) for points in procrustes_sets]
+    observed_basic_mean = weighted_mean(observed_basic_sets, weight_array)
+    legacy_abc_mean = weighted_mean(legacy_abc_sets, weight_array)
+    per_scan_legacy_abc = [rms_percent(points, legacy_abc_mean) for points in legacy_abc_sets]
+    per_scan_builder = [rms_percent(points, builder_mean) for points in builder_sets]
 
     shape_coefficients = np.asarray([item.get("shapeCoefficients", []) for item in observations], dtype=np.float64)
     expression_coefficients = np.asarray(
@@ -193,22 +200,22 @@ def audit(profile: Path) -> dict[str, Any]:
     history_statuses = collections.Counter(str(item.get("status", "")) for item in history)
     history_movements = [float(item.get("overallVertexRmsFaceSpanPercent", 0.0)) for item in history]
 
-    current_rms = ensemble_rms_percent(current_sets, current_mean, weight_array)
-    no_rotation_rms = ensemble_rms_percent(basic_sets, basic_mean, weight_array)
-    procrustes_rms = ensemble_rms_percent(procrustes_sets, procrustes_mean, weight_array)
-    normalization_ratio = current_rms / max(procrustes_rms, 1e-9)
-    rotation_effect_ratio = current_rms / max(no_rotation_rms, 1e-9)
+    legacy_abc_rms = ensemble_rms_percent(legacy_abc_sets, legacy_abc_mean, weight_array)
+    no_rotation_rms = ensemble_rms_percent(observed_basic_sets, observed_basic_mean, weight_array)
+    builder_rms = ensemble_rms_percent(builder_sets, builder_mean, weight_array)
+    legacy_vs_builder_ratio = legacy_abc_rms / max(builder_rms, 1e-9)
+    legacy_vs_no_rotation_ratio = legacy_abc_rms / max(no_rotation_rms, 1e-9)
     findings = []
     if model_recompute_rms <= 0.0002:
-        findings.append("The stored identity mesh exactly matches the weighted mean produced by the current C# builder.")
+        findings.append("The stored identity mesh exactly matches the canonical rigid mean produced by the current C# builder.")
     else:
         findings.append("The stored identity mesh does not reproduce from the stored observations; inspect persistence or build determinism.")
     if all("3DDFA" in source.upper() for source in source_counts):
         findings.append("Every stored identity observation declares a 3DDFA source; no MediaPipe vertex set is present.")
-    if rotation_effect_ratio > 1.10:
-        findings.append("Current A/B/C inverse rotation aligns the scans worse than centering/scaling alone.")
-    if normalization_ratio > 1.50:
-        findings.append("Current A/B/C normalization is materially worse than optimal rigid alignment and can blur or warp the accumulated face.")
+    if legacy_vs_no_rotation_ratio > 1.10:
+        findings.append("The retired inverse-A/B/C method aligns observed scans worse than centering/scaling alone; keep it out of the identity builder.")
+    if legacy_vs_builder_ratio > 1.50:
+        findings.append("Canonical rigid alignment is materially stronger than the retired inverse-A/B/C method.")
     if len(observations) < 12:
         findings.append("The identity model is immature because it contains fewer than 12 accepted scans.")
     if len(set(vertex_counts)) != 1 or not common_indices:
@@ -217,7 +224,7 @@ def audit(profile: Path) -> dict[str, Any]:
         findings.append("Duplicate request IDs are present in the retained observation set.")
 
     return {
-        "schemaVersion": "avatar-model-data-audit-v1",
+        "schemaVersion": "avatar-model-data-audit-v2",
         "evaluatedAtUtc": dt.datetime.now(dt.timezone.utc).isoformat(),
         "profileFolder": str(profile),
         "dataset": {
@@ -236,19 +243,19 @@ def audit(profile: Path) -> dict[str, Any]:
             "modelVertexCount": len(stored_model),
             "modelTopologyEdgeCount": len(model.get("identity", {}).get("topologyEdges", [])),
             "mediaPipeLandmarkSignaturePresent": any(count in (468, 478) for count in vertex_counts),
+            "canonicalIdentityObservationCount": canonical_observation_count,
             "modelMatchesObservationIndices": model_matches_indices,
             "storedModelVsRecomputedRmsFaceSpanPercent": round(model_recompute_rms, 9),
             "storedModelVsRecomputedMaximumCoordinateDelta": round(model_recompute_max, 9),
         },
         "geometryAlignment": {
             "centerScaleOnlyEnsembleRmsFaceSpanPercent": round(no_rotation_rms, 6),
-            "currentInverseAbcEnsembleRmsFaceSpanPercent": round(current_rms, 6),
-            "optimalRigidEnsembleRmsFaceSpanPercent": round(procrustes_rms, 6),
-            "currentVsNoRotationRmsRatio": round(rotation_effect_ratio, 6),
-            "currentVsOptimalRmsRatio": round(normalization_ratio, 6),
-            "storedModelVsOptimalRigidMeanRmsFaceSpanPercent": round(model_to_procrustes, 6),
-            "perScanCurrentRmsFaceSpanPercent": [round(value, 6) for value in per_scan_current],
-            "perScanOptimalRigidRmsFaceSpanPercent": [round(value, 6) for value in per_scan_procrustes],
+            "retiredInverseAbcEnsembleRmsFaceSpanPercent": round(legacy_abc_rms, 6),
+            "canonicalRigidEnsembleRmsFaceSpanPercent": round(builder_rms, 6),
+            "retiredInverseAbcVsNoRotationRmsRatio": round(legacy_vs_no_rotation_ratio, 6),
+            "retiredInverseAbcVsCanonicalRigidRmsRatio": round(legacy_vs_builder_ratio, 6),
+            "perScanRetiredInverseAbcRmsFaceSpanPercent": [round(value, 6) for value in per_scan_legacy_abc],
+            "perScanCanonicalRigidRmsFaceSpanPercent": [round(value, 6) for value in per_scan_builder],
         },
         "learningSignal": {
             "shapeCoefficientCount": shape_count,
@@ -310,21 +317,22 @@ Evaluated `{report['evaluatedAtUtc']}` from `{report['profileFolder']}`.
 | Stable vertex indices | {dataset['commonVertexIndices']} |
 | Unique request IDs | {dataset['uniqueRequestIdCount']} |
 | MediaPipe-sized mesh present | {provenance['mediaPipeLandmarkSignaturePresent']} |
+| Canonical identity observations | {provenance['canonicalIdentityObservationCount']} |
 | Stored model vertices | {provenance['modelVertexCount']} |
 | Model vs exact recomputation RMS | {provenance['storedModelVsRecomputedRmsFaceSpanPercent']:.9f}% of face span |
 
 ## Geometry Alignment
 
-Lower is better. The optimal rigid result is a mathematical reference that rotates each complete 3DDFA scan without deforming it.
+Lower is better. The canonical rigid result reproduces the current C# identity builder: expression-free 3DDFA identity vertices are centered, scaled, and rigidly aligned without deformation.
 
 | Combination method | Ensemble RMS |
 | --- | ---: |
-| Center and scale only | {geometry['centerScaleOnlyEnsembleRmsFaceSpanPercent']:.6f}% |
-| Current inverse A/B/C | {geometry['currentInverseAbcEnsembleRmsFaceSpanPercent']:.6f}% |
-| Optimal rigid alignment | {geometry['optimalRigidEnsembleRmsFaceSpanPercent']:.6f}% |
+| Observed vertices, center and scale only | {geometry['centerScaleOnlyEnsembleRmsFaceSpanPercent']:.6f}% |
+| Observed vertices, retired inverse A/B/C | {geometry['retiredInverseAbcEnsembleRmsFaceSpanPercent']:.6f}% |
+| Canonical identity, current rigid builder | {geometry['canonicalRigidEnsembleRmsFaceSpanPercent']:.6f}% |
 
-Current A/B/C versus no rotation ratio: `{geometry['currentVsNoRotationRmsRatio']:.3f}`.
-Current A/B/C versus optimal rigid ratio: `{geometry['currentVsOptimalRmsRatio']:.3f}`.
+Retired A/B/C versus no rotation ratio: `{geometry['retiredInverseAbcVsNoRotationRmsRatio']:.3f}`.
+Retired A/B/C versus canonical rigid ratio: `{geometry['retiredInverseAbcVsCanonicalRigidRmsRatio']:.3f}`.
 
 ## Learning Signal
 
@@ -341,8 +349,8 @@ Current A/B/C versus optimal rigid ratio: `{geometry['currentVsOptimalRmsRatio']
 ## Interpretation Rule
 
 - A 38,365-point observation with 3DDFA provenance is not a MediaPipe mesh.
-- An exact recomputation match proves which stored observations produced the model, but does not prove the normalization is geometrically correct.
-- Current inverse A/B/C RMS materially above no-rotation or optimal-rigid RMS indicates that pose removal is blurring or warping the accumulated identity.
+- An exact recomputation match proves which stored observations and canonical rigid algorithm produced the model.
+- Retired inverse-A/B/C measurements remain diagnostic only and must not feed the persistent identity geometry.
 - Fewer than 12 observations is an early model; fine proportions should not yet be treated as stable.
 """
 

@@ -5,7 +5,7 @@ Owns GPU camera preview and texture-native rendering.
 Responsibilities:
 - Render NV12 and BGRA camera preview frames through DX12.
 - Reuse pooled NV12 frame buffers and coalesce pending render work to the newest frame instead of building a preview queue.
-- Draw face, eye, and mouth tracking regions in the native DX12 target so the child-window viewport cannot cover the overlay.
+- Draw face/eye/mouth regions plus face, jaw, brow, eye, and inner/outer-lip contours in the native DX12 target so the child-window viewport cannot cover the overlay.
 - Own GPU denoise and color-polish shader paths for preview.
 - Manage texture-native camera stream preview.
 - Report the active GPU preview path, render FPS, dropped frames, format, processing state, recording mode, and fallback reason.

@@ -121,10 +121,9 @@ public sealed class FfmpegCameraPreviewService : ICameraPreviewService
             return false;
         }
 
-        _ = Task.Run(() => ReadFramesAsync(_process, _cancellation.Token));
-        _ = Task.Run(() => ReadErrorsAsync(_process, _cancellation.Token));
+        _ = ReadFramesAsync(_process, _cancellation.Token);
+        _ = ReadErrorsAsync(_process, _cancellation.Token);
         var exitTask = WatchExitAsync(_process, _cancellation.Token);
-        _ = Task.Run(() => exitTask);
         StatusChanged?.Invoke(this, $"Starting preview: {cameraName}");
 
         try

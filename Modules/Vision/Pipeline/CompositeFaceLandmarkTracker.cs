@@ -16,12 +16,7 @@ public sealed class CompositeFaceLandmarkTracker : IStatefulFaceLandmarkTracker
     private DateTime _lastFusedFaceCapturedAtUtc = DateTime.MinValue;
 
     public CompositeFaceLandmarkTracker()
-        : this([
-            new MediaPipeFaceLandmarkerSidecarTracker(),
-            new DenseFaceMeshLandmarkTracker(),
-            new OpenCvFacemarkLandmarkTracker(),
-            new OpenCvApertureLandmarkTracker()
-        ])
+        : this(CreateDefaultTrackers())
     {
     }
 
@@ -153,6 +148,44 @@ public sealed class CompositeFaceLandmarkTracker : IStatefulFaceLandmarkTracker
         foreach (var tracker in _trackers)
         {
             tracker.Dispose();
+        }
+    }
+
+    private static IReadOnlyList<IFaceLandmarkTracker> CreateDefaultTrackers()
+    {
+        var trackers = new List<IFaceLandmarkTracker>(3);
+        try
+        {
+            AddOwnedTracker(trackers, static () => new MediaPipeFaceLandmarkerSidecarTracker());
+            AddOwnedTracker(trackers, static () => new OpenCvFacemarkLandmarkTracker());
+            AddOwnedTracker(trackers, static () => new OpenCvApertureLandmarkTracker());
+            return trackers;
+        }
+        catch
+        {
+            foreach (var tracker in trackers)
+            {
+                tracker.Dispose();
+            }
+
+            throw;
+        }
+    }
+
+    private static void AddOwnedTracker(
+        ICollection<IFaceLandmarkTracker> trackers,
+        Func<IFaceLandmarkTracker> createTracker)
+    {
+        IFaceLandmarkTracker? tracker = null;
+        try
+        {
+            tracker = createTracker();
+            trackers.Add(tracker);
+            tracker = null;
+        }
+        finally
+        {
+            tracker?.Dispose();
         }
     }
 

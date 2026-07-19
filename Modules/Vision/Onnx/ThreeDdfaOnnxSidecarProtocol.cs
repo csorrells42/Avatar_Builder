@@ -30,6 +30,9 @@ internal sealed class ThreeDdfaOnnxSidecarRequest
 
     [JsonPropertyName("denseSampleStride")]
     public int DenseSampleStride { get; init; } = 24;
+
+    [JsonPropertyName("includeTopology")]
+    public bool IncludeTopology { get; init; }
 }
 
 public sealed class ThreeDdfaOnnxSidecarResponse

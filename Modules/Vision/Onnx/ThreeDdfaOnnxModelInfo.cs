@@ -8,6 +8,10 @@ public sealed class ThreeDdfaOnnxModelInfo
     private const string RelativeModelDirectory = "dependencies/vision/3ddfa-onnx";
     private const string DefaultManifestFileName = "three_ddfa_onnx_manifest.json";
     private const string DefaultPrimaryModelFileName = "3DDFA_V2/TDDFA_ONNX.py";
+    private static readonly JsonSerializerOptions ManifestJsonOptions = new()
+    {
+        PropertyNameCaseInsensitive = true
+    };
 
     public string ModelDirectory { get; init; } = "";
 
@@ -107,7 +111,7 @@ public sealed class ThreeDdfaOnnxModelInfo
         {
             var manifest = JsonSerializer.Deserialize<Manifest>(
                 File.ReadAllText(manifestPath),
-                new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+                ManifestJsonOptions);
             var modelFiles = manifest?.ModelFiles?.Where(static file => !string.IsNullOrWhiteSpace(file)).ToList() ?? [];
             var primaryModel = string.IsNullOrWhiteSpace(manifest?.PrimaryModelFile)
                 ? modelFiles.FirstOrDefault() ?? DefaultPrimaryModelFileName

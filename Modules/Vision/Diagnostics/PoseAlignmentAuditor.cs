@@ -21,6 +21,10 @@ public sealed class PoseAlignmentAuditor
     private const double MinimumNovelPoseDeltaDegrees = 1.25d;
     private static readonly TimeSpan MaximumDuplicatePoseInterval = TimeSpan.FromSeconds(10);
     private static readonly TimeSpan ReportWriteInterval = TimeSpan.FromSeconds(5);
+    private static readonly JsonSerializerOptions ReportJsonOptions = new(JsonSerializerDefaults.Web)
+    {
+        WriteIndented = true
+    };
     private readonly object _sync = new();
     private readonly List<PoseAlignmentSample> _samples = [];
     private string _folder = "";
@@ -270,7 +274,7 @@ public sealed class PoseAlignmentAuditor
         }
 
         Directory.CreateDirectory(_folder);
-        var json = JsonSerializer.Serialize(_summary, new JsonSerializerOptions(JsonSerializerDefaults.Web) { WriteIndented = true });
+        var json = JsonSerializer.Serialize(_summary, ReportJsonOptions);
         WriteSamplesLocked();
         AtomicTextFileWriter.WriteAllText(Path.Combine(_folder, JsonFileName), json, Encoding.UTF8);
         AtomicTextFileWriter.WriteAllText(Path.Combine(_folder, HtmlFileName), BuildHtml(_summary, _samples.TakeLast(60).ToList()), Encoding.UTF8);

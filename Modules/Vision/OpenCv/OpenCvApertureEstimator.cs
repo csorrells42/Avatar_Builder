@@ -75,7 +75,8 @@ public static class OpenCvApertureEstimator
             return ApertureEstimate.None;
         }
 
-        using var view = new Mat(gray, roi).Clone();
+        using var roiView = new Mat(gray, roi);
+        using var view = roiView.Clone();
         if (view.Empty() || view.Width < 8 || view.Height < 6)
         {
             return ApertureEstimate.None;

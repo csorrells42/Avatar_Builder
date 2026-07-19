@@ -9,22 +9,21 @@ namespace AvatarBuilder.Modules.Vision.Reconstruction;
 
 public sealed class LastGoodThreeDdfaStore
 {
-    public const string JsonFileName = "last_5_3ddfa_reconstructions.json";
+    private const string LegacyJsonFileName = "last_5_3ddfa_reconstructions.json";
     public const string HtmlFileName = "last_5_3ddfa_reconstructions.html";
 
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
-    public LastGoodThreeDdfaFiles Write(string folder, LastGoodThreeDdfaReport report)
+    public string Write(string folder, LastGoodThreeDdfaReport report)
     {
         ArgumentNullException.ThrowIfNull(report);
 
         report = PrepareReport(report);
         Directory.CreateDirectory(folder);
-        var jsonPath = Path.Combine(folder, JsonFileName);
         var htmlPath = Path.Combine(folder, HtmlFileName);
-        AtomicTextFileWriter.WriteAllText(jsonPath, JsonSerializer.Serialize(report, JsonOptions), Encoding.UTF8);
         AtomicTextFileWriter.WriteAllText(htmlPath, BuildHtml(report), Encoding.UTF8);
-        return new LastGoodThreeDdfaFiles(jsonPath, htmlPath);
+        TryDeleteLegacyJson(folder);
+        return htmlPath;
     }
 
     public static string GetHtmlPath(string folder)
@@ -32,24 +31,135 @@ public sealed class LastGoodThreeDdfaStore
         return Path.Combine(folder, HtmlFileName);
     }
 
-    public static string GetJsonPath(string folder)
+    private static void TryDeleteLegacyJson(string folder)
     {
-        return Path.Combine(folder, JsonFileName);
+        try
+        {
+            var path = Path.Combine(folder, LegacyJsonFileName);
+            if (File.Exists(path))
+            {
+                File.Delete(path);
+            }
+        }
+        catch
+        {
+            // The HTML viewer is authoritative; a locked legacy cache can be removed next time.
+        }
+    }
+
+    public static IReadOnlyList<ThreeDdfaReconstructionSnapshot> CreateSamples(
+        AvatarModelObservationSet observationSet,
+        IReadOnlyList<ThreeDdfaReconstructionSnapshot>? currentSamples = null)
+    {
+        ArgumentNullException.ThrowIfNull(observationSet);
+
+        var persisted = observationSet.Observations.Select(static observation => new ThreeDdfaReconstructionSnapshot
+        {
+            RequestId = observation.RequestId,
+            CapturedAtUtc = observation.CapturedAtUtc,
+            Source = observation.Source,
+            DenseVertexCount = observation.Vertices.Count,
+            DenseSampleStride = 1,
+            ReconstructionConfidencePercent = observation.ReconstructionConfidencePercent,
+            ARotationAroundXDegrees = observation.ARotationAroundXDegrees,
+            BRotationAroundYDegrees = observation.BRotationAroundYDegrees,
+            CRotationAroundZDegrees = observation.CRotationAroundZDegrees,
+            PoseSource = "3DDFA_V2 ONNX",
+            TrustDecision = observation.TrustDecision,
+            Vertices = observation.Vertices,
+            CameraMatrixCoefficients = observation.CameraMatrixCoefficients,
+            ShapeCoefficients = observation.ShapeCoefficients,
+            ExpressionCoefficients = observation.ExpressionCoefficients,
+            Warnings = observation.Warnings
+        });
+        var combined = currentSamples is { Count: > 0 }
+            ? persisted.Concat(currentSamples)
+            : persisted;
+
+        return combined
+            .GroupBy(CreateSampleKey, StringComparer.Ordinal)
+            .Select(static group => group.OrderByDescending(sample => sample.CapturedAtUtc).First())
+            .OrderBy(static sample => sample.CapturedAtUtc)
+            .TakeLast(5)
+            .ToList();
+    }
+
+    public static List<MeshTopologyEdge> SelectSharedTopology(
+        AvatarModelObservationSet observationSet,
+        IReadOnlyList<ThreeDdfaReconstructionSnapshot>? currentSamples = null)
+    {
+        ArgumentNullException.ThrowIfNull(observationSet);
+
+        IReadOnlyList<MeshTopologyEdge> best = observationSet.DenseTopologyEdges;
+        if (currentSamples is not null)
+        {
+            foreach (var sample in currentSamples)
+            {
+                if (sample.TopologyEdges.Count > best.Count)
+                {
+                    best = sample.TopologyEdges;
+                }
+            }
+        }
+
+        return best.ToList();
     }
 
     private static LastGoodThreeDdfaReport PrepareReport(LastGoodThreeDdfaReport report)
     {
+        IReadOnlyList<MeshTopologyEdge> topology = report.DenseTopologyEdges;
+        foreach (var sample in report.Samples)
+        {
+            if (sample.TopologyEdges.Count > topology.Count)
+            {
+                topology = sample.TopologyEdges;
+            }
+        }
+
         return new LastGoodThreeDdfaReport
         {
-            SchemaVersion = report.SchemaVersion,
+            SchemaVersion = "last-good-3ddfa-v2",
             CreatedAtUtc = report.CreatedAtUtc,
             SubjectId = report.SubjectId,
             SubjectDisplayName = report.SubjectDisplayName,
             StoragePolicy = report.StoragePolicy,
             AvatarModelProgressHtmlPath = report.AvatarModelProgressHtmlPath,
             ReconstructionLane = report.ReconstructionLane,
-            Samples = report.Samples.TakeLast(5).ToList()
+            DenseTopologyEdges = topology.ToList(),
+            Samples = report.Samples.TakeLast(5).Select(CopyWithoutTopology).ToList()
         };
+    }
+
+    private static ThreeDdfaReconstructionSnapshot CopyWithoutTopology(ThreeDdfaReconstructionSnapshot sample)
+    {
+        return new ThreeDdfaReconstructionSnapshot
+        {
+            RequestId = sample.RequestId,
+            CapturedAtUtc = sample.CapturedAtUtc,
+            Source = sample.Source,
+            CoordinateSpace = sample.CoordinateSpace,
+            DenseVertexCount = sample.DenseVertexCount,
+            DenseSampleStride = sample.DenseSampleStride,
+            ReconstructionConfidencePercent = sample.ReconstructionConfidencePercent,
+            ARotationAroundXDegrees = sample.ARotationAroundXDegrees,
+            BRotationAroundYDegrees = sample.BRotationAroundYDegrees,
+            CRotationAroundZDegrees = sample.CRotationAroundZDegrees,
+            PoseSource = sample.PoseSource,
+            TrustDecision = sample.TrustDecision,
+            Vertices = sample.Vertices,
+            SparseLandmarks = sample.SparseLandmarks,
+            CameraMatrixCoefficients = sample.CameraMatrixCoefficients,
+            ShapeCoefficients = sample.ShapeCoefficients,
+            ExpressionCoefficients = sample.ExpressionCoefficients,
+            Warnings = sample.Warnings
+        };
+    }
+
+    private static string CreateSampleKey(ThreeDdfaReconstructionSnapshot sample)
+    {
+        return string.IsNullOrWhiteSpace(sample.RequestId)
+            ? $"{sample.Source}|{sample.CapturedAtUtc.Ticks.ToString(CultureInfo.InvariantCulture)}"
+            : sample.RequestId;
     }
 
     private static string BuildHtml(LastGoodThreeDdfaReport report)
@@ -117,6 +227,7 @@ public sealed class LastGoodThreeDdfaStore
 (() => {
   const report = JSON.parse(document.getElementById('meshReport')?.textContent || '{}');
   const samples = report.samples || report.Samples || [];
+  const sharedEdges = report.denseTopologyEdges || report.DenseTopologyEdges || [];
   const canvas = document.getElementById('mesh3d');
   const overlay = document.getElementById('sampleOverlay');
   const details = document.getElementById('sampleDetails');
@@ -262,7 +373,8 @@ public sealed class LastGoodThreeDdfaStore
     }
 
     const vertices = sample.vertices || sample.Vertices || [];
-    const edges = sample.topologyEdges || sample.TopologyEdges || [];
+    const sampleEdges = sample.topologyEdges || sample.TopologyEdges || [];
+    const edges = sampleEdges.length > 0 ? sampleEdges : sharedEdges;
     const normalized = normalize(vertices);
     const byIndex = new Map(normalized.map(point => [point.index, point]));
 
@@ -425,5 +537,3 @@ public sealed class LastGoodThreeDdfaStore
         return WebUtility.HtmlEncode(value ?? "");
     }
 }
-
-public sealed record LastGoodThreeDdfaFiles(string JsonPath, string HtmlPath);

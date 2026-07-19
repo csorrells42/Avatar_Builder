@@ -11,6 +11,7 @@ public sealed class AvatarModelStore
 {
     public const string JsonFileName = "avatar_model.json";
     public const string HtmlFileName = "avatar_model_progress.html";
+    private const string ViewerVersion = "avatar-model-viewer-v2";
 
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
@@ -19,8 +20,24 @@ public sealed class AvatarModelStore
         Directory.CreateDirectory(folder);
         var jsonPath = GetJsonPath(folder);
         AtomicTextFileWriter.WriteAllText(jsonPath, JsonSerializer.Serialize(model, JsonOptions), Encoding.UTF8);
-        AtomicTextFileWriter.WriteAllText(GetHtmlPath(folder), BuildHtml(model), Encoding.UTF8);
+        WriteViewer(folder, model);
         return jsonPath;
+    }
+
+    public string WriteViewer(string folder, AvatarModel model)
+    {
+        Directory.CreateDirectory(folder);
+        var htmlPath = GetHtmlPath(folder);
+        AtomicTextFileWriter.WriteAllText(htmlPath, BuildHtml(model), Encoding.UTF8);
+        return htmlPath;
+    }
+
+    public string EnsureViewer(string folder, AvatarModel model)
+    {
+        var htmlPath = GetHtmlPath(folder);
+        return IsCurrentViewer(htmlPath)
+            ? htmlPath
+            : WriteViewer(folder, model);
     }
 
     public AvatarModel? Read(string folder)
@@ -76,6 +93,7 @@ public sealed class AvatarModelStore
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="avatar-builder-viewer" content="{{{ViewerVersion}}}">
 <meta http-equiv="refresh" content="30">
 <title>Avatar Model Progress</title>
 <style>
@@ -313,7 +331,8 @@ public sealed class AvatarModelStore
     const zoom = Math.min(rect.width, rect.height) * 0.70 * view.zoom / Math.max(0.35, depth);
     return {
       x: rect.width * 0.5 + x1 * zoom,
-      y: rect.height * 0.52 + y1 * zoom,
+      // Canonical 3DDFA/BFM geometry is Y-up; browser canvas coordinates are Y-down.
+      y: rect.height * 0.52 - y1 * zoom,
       z: z2,
       scale: Math.max(0.35, Math.min(1.8, 1 / Math.max(0.35, depth)))
     };
@@ -368,6 +387,26 @@ public sealed class AvatarModelStore
                 FullTopologyEdgeCount = model.Identity.TopologyEdges.Count
             }
         };
+    }
+
+    private static bool IsCurrentViewer(string path)
+    {
+        if (!File.Exists(path))
+        {
+            return false;
+        }
+
+        try
+        {
+            using var reader = new StreamReader(path, Encoding.UTF8, detectEncodingFromByteOrderMarks: true);
+            var buffer = new char[2048];
+            var read = reader.ReadBlock(buffer, 0, buffer.Length);
+            return read > 0 && new string(buffer, 0, read).Contains(ViewerVersion, StringComparison.Ordinal);
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     private static string H(string? value)
