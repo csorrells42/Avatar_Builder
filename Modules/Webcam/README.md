@@ -92,6 +92,7 @@ Direct3D 11 device setup used by the texture-native Media Foundation camera sour
 Files:
 
 - `Direct3D11DeviceManager.cs`: creates the D3D11 device/context and Media Foundation DXGI device manager used by texture-native source readers.
+- `Direct3D11SharedTextureBridge.cs`: copies each D3D11 NV12 camera texture into the reusable NT-handle texture that the DX12 presenter opens.
 
 Change this folder when the D3D11 device-manager setup needs work. Keep high-level camera selection in `Pipeline` or `DirectX12`.
 
@@ -104,7 +105,7 @@ Jericho Down-derived Direct3D 12 preview host, native texture camera wrapper, an
 Files:
 
 - `WebcamDirectX12ViewportHost.cs`: WPF `HwndHost` wrapper that owns the native child window used by the DX12 swap chain.
-- `Direct3D12PreviewHost.cs`: Direct3D 12 renderer that uploads BGRA/NV12 camera frames, coalesces render work to the newest frame, draws native tracking overlays, manages the swap chain, and reports render diagnostics.
+- `Direct3D12PreviewHost.cs`: Direct3D 12 renderer that imports the D3D11 shared NV12 texture, uploads fallback BGRA/NV12 frames, coalesces upload work to the newest frame, draws native tracking overlays, manages the swap chain, and reports render diagnostics.
 - `Direct3D12PreviewDiagnostics.cs`: compact render-path, FPS, frame-count, and fallback status model for overlays/logging.
 - `ICameraPreviewPresenter.cs`: narrow UI-facing presenter contract for a camera preview surface.
 - `Direct3D12DeviceManager.cs`: D3D12-backed Media Foundation device-manager implementation for native texture capture.
@@ -115,3 +116,5 @@ Files:
 - `PreviewTrackingOverlay.cs`: immutable normalized face/eye/mouth regions passed from analysis into the native renderer.
 
 Change this folder when GPU preview rendering, swap-chain management, Direct3D shader upload, or texture-native preview/recording needs work. Keep generic camera enumeration in `Common`, Media Foundation source-reader setup in `MediaFoundation`, and high-level backend choice in `Pipeline` or the UI integration layer.
+
+The D3D11 bridge is timing-critical. Its shared texture is reusable, so bridge presentation remains synchronous through `WaitForGpu()` before the capture loop may copy the next frame. CPU analysis uses a data-only frame duplicate and must never hold the GPU resource or shared handle. Do not remove the bridge because an NV12 upload fallback exists; the upload path is recovery, not the primary D3D11-to-DX12 camera path.

@@ -1,4 +1,5 @@
 using System.Buffers;
+using System.Runtime.InteropServices;
 using AvatarBuilder.Modules.Webcam.Common;
 using AvatarBuilder.Modules.Webcam.DirectX11;
 using AvatarBuilder.Modules.Webcam.MediaFoundation;
@@ -39,6 +40,7 @@ public sealed record TextureNativeFrameInfo(
 public sealed class TextureNativeFrameLease : IDisposable
 {
     private IntPtr _resource;
+    private IntPtr _d3d12SharedTextureHandle;
     private PooledFrameBuffer? _nv12PreviewBuffer;
 
     internal TextureNativeFrameLease(
@@ -50,6 +52,7 @@ public sealed class TextureNativeFrameLease : IDisposable
         string deviceMode,
         string mediaSubtype,
         long frameNumber,
+        IntPtr d3d12SharedTextureHandle = default,
         PooledFrameBuffer? nv12PreviewBuffer = null,
         int nv12PreviewStride = 0)
     {
@@ -61,6 +64,7 @@ public sealed class TextureNativeFrameLease : IDisposable
         DeviceMode = deviceMode;
         MediaSubtype = mediaSubtype;
         FrameNumber = frameNumber;
+        _d3d12SharedTextureHandle = d3d12SharedTextureHandle;
         _nv12PreviewBuffer = nv12PreviewBuffer;
         Nv12PreviewStride = nv12PreviewStride;
     }
@@ -81,6 +85,8 @@ public sealed class TextureNativeFrameLease : IDisposable
 
     public long FrameNumber { get; }
 
+    public IntPtr D3D12SharedTextureHandle => _d3d12SharedTextureHandle;
+
     public byte[]? Nv12PreviewBytes => _nv12PreviewBuffer?.Bytes;
 
     public int Nv12PreviewStride { get; }
@@ -96,7 +102,30 @@ public sealed class TextureNativeFrameLease : IDisposable
         }
 
         System.Runtime.InteropServices.Marshal.AddRef(resource);
-        var nv12PreviewBuffer = _nv12PreviewBuffer?.AddReference();
+        var sharedTextureHandle = IntPtr.Zero;
+        PooledFrameBuffer? nv12PreviewBuffer = null;
+        try
+        {
+            if (D3D12SharedTextureHandle != IntPtr.Zero
+                && !TryDuplicateHandle(D3D12SharedTextureHandle, out sharedTextureHandle))
+            {
+                System.Runtime.InteropServices.Marshal.Release(resource);
+                return null;
+            }
+
+            nv12PreviewBuffer = _nv12PreviewBuffer?.AddReference();
+        }
+        catch
+        {
+            nv12PreviewBuffer?.Dispose();
+            if (sharedTextureHandle != IntPtr.Zero)
+            {
+                CloseHandle(sharedTextureHandle);
+            }
+
+            System.Runtime.InteropServices.Marshal.Release(resource);
+            throw;
+        }
 
         return new TextureNativeFrameLease(
             resource,
@@ -107,7 +136,30 @@ public sealed class TextureNativeFrameLease : IDisposable
             DeviceMode,
             MediaSubtype,
             FrameNumber,
+            sharedTextureHandle,
             nv12PreviewBuffer,
+            Nv12PreviewStride);
+    }
+
+    public TextureNativeFrameLease? DuplicatePreviewData()
+    {
+        var nv12PreviewBuffer = _nv12PreviewBuffer;
+        if (nv12PreviewBuffer is null)
+        {
+            return null;
+        }
+
+        return new TextureNativeFrameLease(
+            IntPtr.Zero,
+            Subresource,
+            Width,
+            Height,
+            FramesPerSecond,
+            DeviceMode,
+            MediaSubtype,
+            FrameNumber,
+            IntPtr.Zero,
+            nv12PreviewBuffer.AddReference(),
             Nv12PreviewStride);
     }
 
@@ -119,8 +171,48 @@ public sealed class TextureNativeFrameLease : IDisposable
             System.Runtime.InteropServices.Marshal.Release(resource);
         }
 
+        var sharedTextureHandle = Interlocked.Exchange(ref _d3d12SharedTextureHandle, IntPtr.Zero);
+        CloseOwnedSharedTextureHandle(sharedTextureHandle);
+
         Interlocked.Exchange(ref _nv12PreviewBuffer, null)?.Dispose();
     }
+
+    internal static void CloseOwnedSharedTextureHandle(IntPtr handle)
+    {
+        if (handle != IntPtr.Zero)
+        {
+            CloseHandle(handle);
+        }
+    }
+
+    private static bool TryDuplicateHandle(IntPtr sourceHandle, out IntPtr duplicatedHandle)
+    {
+        var currentProcess = GetCurrentProcess();
+        return DuplicateHandle(
+            currentProcess,
+            sourceHandle,
+            currentProcess,
+            out duplicatedHandle,
+            0,
+            false,
+            0x2);
+    }
+
+    [DllImport("kernel32.dll")]
+    private static extern IntPtr GetCurrentProcess();
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool DuplicateHandle(
+        IntPtr sourceProcessHandle,
+        IntPtr sourceHandle,
+        IntPtr targetProcessHandle,
+        out IntPtr targetHandle,
+        uint desiredAccess,
+        [MarshalAs(UnmanagedType.Bool)] bool inheritHandle,
+        uint options);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool CloseHandle(IntPtr handle);
 }
 
 internal sealed class PooledFrameBuffer : IDisposable
@@ -626,6 +718,8 @@ public sealed class TextureNativeCameraStream : IDisposable
     private long _sampleDuration;
     private MediaFoundationTextureVideoRecorder? _recorder;
     private MediaFoundationVideoRecorder? _processedRecorder;
+    private Direct3D11SharedTextureBridge? _d3d11SharedTextureBridge;
+    private bool _d3d11SharedTextureBridgeUnavailable;
     private byte[]? _previousProcessedDenoiseFrame;
     private string? _recordingPath;
     private string _recordingPipeline = "Media Foundation texture-native raw camera samples";
@@ -900,6 +994,9 @@ public sealed class TextureNativeCameraStream : IDisposable
         _streamReady.Dispose();
         MediaFoundationInterop.ReleaseComObject(_reader);
         MediaFoundationInterop.ReleaseComObject(_mediaSource);
+        _d3d11SharedTextureBridge?.Dispose();
+        _d3d11SharedTextureBridge = null;
+        _d3d11SharedTextureBridgeUnavailable = false;
         _deviceManager?.Dispose();
         _mediaFoundationScope?.Dispose();
     }
@@ -953,8 +1050,7 @@ public sealed class TextureNativeCameraStream : IDisposable
                 {
                     var frameNumber = Interlocked.Increment(ref _framesRead);
                     using var frameLease = TryCreateFrameLease(sample, frameNumber);
-                    FrameAvailable?.Invoke(
-                        this,
+                    NotifyFrameAvailable(
                         new TextureNativeFrameInfo(
                             _width,
                             _height,
@@ -964,7 +1060,7 @@ public sealed class TextureNativeCameraStream : IDisposable
                             frameNumber));
                     if (frameLease is not null)
                     {
-                        TextureFrameAvailable?.Invoke(this, frameLease);
+                        NotifyTextureFrameAvailable(frameLease);
                     }
 
                     WriteRecordingSample(sample);
@@ -1060,7 +1156,80 @@ public sealed class TextureNativeCameraStream : IDisposable
             _status = status;
         }
 
-        StatusChanged?.Invoke(this, status);
+        NotifyStatusChanged(status);
+    }
+
+    private void NotifyFrameAvailable(TextureNativeFrameInfo frame)
+    {
+        var handlers = FrameAvailable;
+        if (handlers is null)
+        {
+            return;
+        }
+
+        foreach (var callback in handlers.GetInvocationList())
+        {
+            try
+            {
+                ((EventHandler<TextureNativeFrameInfo>)callback)(this, frame);
+            }
+            catch (Exception ex)
+            {
+                SetObserverFailureStatus("frame", ex);
+            }
+        }
+    }
+
+    private void NotifyTextureFrameAvailable(TextureNativeFrameLease frame)
+    {
+        var handlers = TextureFrameAvailable;
+        if (handlers is null)
+        {
+            return;
+        }
+
+        foreach (var callback in handlers.GetInvocationList())
+        {
+            try
+            {
+                ((EventHandler<TextureNativeFrameLease>)callback)(this, frame);
+            }
+            catch (Exception ex)
+            {
+                SetObserverFailureStatus("texture", ex);
+            }
+        }
+    }
+
+    private void SetObserverFailureStatus(string observer, Exception exception)
+    {
+        lock (_stateLock)
+        {
+            _status = $"Texture-native {observer} observer failed: {exception.Message}";
+        }
+
+        NotifyStatusChanged(_status);
+    }
+
+    private void NotifyStatusChanged(string status)
+    {
+        var handlers = StatusChanged;
+        if (handlers is null)
+        {
+            return;
+        }
+
+        foreach (var callback in handlers.GetInvocationList())
+        {
+            try
+            {
+                ((EventHandler<string>)callback)(this, status);
+            }
+            catch
+            {
+                // Status observers cannot be allowed to terminate the capture worker.
+            }
+        }
     }
 
     private void ResetProcessedDenoiseHistory()
@@ -1151,19 +1320,44 @@ public sealed class TextureNativeCameraStream : IDisposable
                     return null;
                 }
 
-                var nv12PreviewBytes = TryCreateNv12Preview(buffer, out var nv12PreviewStride);
+                PooledFrameBuffer? nv12PreviewBuffer = null;
+                var d3d12SharedTextureHandle = IntPtr.Zero;
+                try
+                {
+                    nv12PreviewBuffer = TryCreateNv12Preview(buffer, out var nv12PreviewStride);
+                    var mediaSubtype = MediaFoundationInterop.FormatSubtype(_subtype);
+                    if (!TextureNativePreviewPolicy.ShouldPreferNv12UploadFallback(
+                            mediaSubtype,
+                            _width,
+                            _height,
+                            nv12PreviewBuffer?.Bytes,
+                            nv12PreviewStride))
+                    {
+                        d3d12SharedTextureHandle = TryCreateD3D11SharedTextureHandle(resource, deviceManager);
+                    }
 
-                return new TextureNativeFrameLease(
-                    resource,
-                    subresource,
-                    _width,
-                    _height,
-                    _fps,
-                    deviceManager.ModeName,
-                    MediaFoundationInterop.FormatSubtype(_subtype),
-                    frameNumber,
-                    nv12PreviewBytes,
-                    nv12PreviewStride);
+                    var frameLease = new TextureNativeFrameLease(
+                        resource,
+                        subresource,
+                        _width,
+                        _height,
+                        _fps,
+                        deviceManager.ModeName,
+                        mediaSubtype,
+                        frameNumber,
+                        d3d12SharedTextureHandle,
+                        nv12PreviewBuffer,
+                        nv12PreviewStride);
+                    nv12PreviewBuffer = null;
+                    return frameLease;
+                }
+                catch
+                {
+                    nv12PreviewBuffer?.Dispose();
+                    System.Runtime.InteropServices.Marshal.Release(resource);
+                    TextureNativeFrameLease.CloseOwnedSharedTextureHandle(d3d12SharedTextureHandle);
+                    throw;
+                }
             }
             finally
             {
@@ -1174,6 +1368,49 @@ public sealed class TextureNativeCameraStream : IDisposable
         {
             MediaFoundationInterop.ReleaseComObject(buffer);
         }
+    }
+
+    private IntPtr TryCreateD3D11SharedTextureHandle(IntPtr sourceTexture, ITextureNativeDeviceManager deviceManager)
+    {
+        if (_subtype != MediaFoundationGuids.MFVideoFormat_NV12
+            || deviceManager is not Direct3D11DeviceManager direct3D11DeviceManager
+            || _d3d11SharedTextureBridgeUnavailable)
+        {
+            return IntPtr.Zero;
+        }
+
+        try
+        {
+            _d3d11SharedTextureBridge ??= direct3D11DeviceManager.CreateSharedTextureBridge(_width, _height);
+            if (_d3d11SharedTextureBridge.TryCopyToSharedHandle(sourceTexture, out var sharedHandle, out var failureReason))
+            {
+                return sharedHandle;
+            }
+
+            if (!string.IsNullOrWhiteSpace(failureReason))
+            {
+                DisableD3D11SharedTextureBridge(failureReason);
+            }
+        }
+        catch (Exception ex)
+        {
+            DisableD3D11SharedTextureBridge(ex.Message);
+        }
+
+        return IntPtr.Zero;
+    }
+
+    private void DisableD3D11SharedTextureBridge(string? reason)
+    {
+        if (_d3d11SharedTextureBridgeUnavailable)
+        {
+            return;
+        }
+
+        _d3d11SharedTextureBridgeUnavailable = true;
+        _d3d11SharedTextureBridge?.Dispose();
+        _d3d11SharedTextureBridge = null;
+        ReportStatus($"D3D11 shared texture bridge unavailable: {reason ?? "unknown failure"}");
     }
 
     private PooledFrameBuffer? TryCreateNv12Preview(IMFMediaBuffer buffer, out int nv12Stride)

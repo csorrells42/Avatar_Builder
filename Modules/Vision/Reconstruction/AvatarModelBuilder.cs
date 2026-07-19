@@ -10,7 +10,7 @@ public static class AvatarModelBuilder
     public static AvatarModel Build(AvatarModelObservationSet observationSet)
     {
         var observations = observationSet.Observations
-            .Where(static observation => observation.Vertices.Count > 0)
+            .Where(HasIdentityGeometry)
             .OrderBy(static observation => observation.CapturedAtUtc)
             .ToList();
 
@@ -61,37 +61,71 @@ public static class AvatarModelBuilder
         var totalWeight = 0d;
         var confidenceWeight = 0d;
 
-        var identityGeometries = observations
-            .Select(observation => new WeightedIdentityGeometry(
+        var weightedObservations = observations
+            .Select(observation => new WeightedObservation(
                 observation,
-                Math.Clamp(observation.IdentityWeightPercent, 0d, 100d) / 100d,
-                NormalizeIdentityVertices(observation)))
-            .Where(static geometry => geometry.Weight > 0.001d && geometry.Vertices.Count > 0)
+                Math.Clamp(observation.IdentityWeightPercent, 0d, 100d) / 100d))
+            .Where(static item => item.Weight > 0.001d)
             .ToList();
-        var alignedGeometries = AlignIdentityGeometries(identityGeometries);
-        foreach (var geometry in alignedGeometries)
+
+        var canonicalObservations = weightedObservations
+            .Where(static item => HasCanonicalIdentityGeometry(item.Observation))
+            .ToList();
+        foreach (var item in canonicalObservations)
         {
-            foreach (var point in geometry.Vertices)
-            {
-                if (!vertexAccumulators.TryGetValue(point.Index, out var accumulator))
-                {
-                    accumulator = new WeightedPointAccumulator(point.Index);
-                    vertexAccumulators[point.Index] = accumulator;
-                }
-
-                accumulator.Add(point, geometry.Weight);
-            }
-
-            AddCoefficients(shapeAccumulators, geometry.Observation.ShapeCoefficients, geometry.Weight);
-            totalWeight += geometry.Weight;
-            confidenceWeight += geometry.Observation.ReconstructionConfidencePercent * geometry.Weight;
+            AddIdentityGeometry(
+                item,
+                NormalizeIdentityVertices(item.Observation),
+                vertexAccumulators,
+                shapeAccumulators,
+                ref totalWeight,
+                ref confidenceWeight);
         }
 
-        var meanVertices = vertexAccumulators.Values
-            .Where(static accumulator => accumulator.Weight > 0d)
-            .OrderBy(static accumulator => accumulator.Index)
-            .Select(static accumulator => accumulator.ToPoint())
+        var legacyObservations = weightedObservations
+            .Where(static item => !HasCanonicalIdentityGeometry(item.Observation))
             .ToList();
+        if (legacyObservations.Count > 0)
+        {
+            if (canonicalObservations.Count > 0)
+            {
+                var canonicalMean = CreateMeanVertices(vertexAccumulators.Values);
+                foreach (var item in legacyObservations)
+                {
+                    var aligned = DenseMeshRigidAligner.Align(
+                        NormalizeIdentityVertices(item.Observation),
+                        canonicalMean);
+                    AddIdentityGeometry(
+                        item,
+                        aligned,
+                        vertexAccumulators,
+                        shapeAccumulators,
+                        ref totalWeight,
+                        ref confidenceWeight);
+                }
+            }
+            else
+            {
+                var alignedLegacy = AlignLegacyIdentityGeometries(legacyObservations
+                    .Select(item => new WeightedIdentityGeometry(
+                        item.Observation,
+                        item.Weight,
+                        NormalizeIdentityVertices(item.Observation)))
+                    .ToList());
+                foreach (var geometry in alignedLegacy)
+                {
+                    AddIdentityGeometry(
+                        new WeightedObservation(geometry.Observation, geometry.Weight),
+                        geometry.Vertices,
+                        vertexAccumulators,
+                        shapeAccumulators,
+                        ref totalWeight,
+                        ref confidenceWeight);
+                }
+            }
+        }
+
+        var meanVertices = CreateMeanVertices(vertexAccumulators.Values);
         var confidence = totalWeight <= 0d
             ? 0d
             : confidenceWeight / totalWeight;
@@ -217,13 +251,14 @@ public static class AvatarModelBuilder
         IReadOnlyList<FaceMeshLandmarkPoint> target)
     {
         var normalized = NormalizeIdentityVertices(observation);
-        return target.Count == 0 ? normalized : DenseMeshRigidAligner.Align(normalized, target);
+        return target.Count == 0 || HasCanonicalIdentityGeometry(observation)
+            ? normalized
+            : DenseMeshRigidAligner.Align(normalized, target);
     }
 
     private static IReadOnlyList<FaceMeshLandmarkPoint> NormalizeIdentityVertices(AvatarModelObservation observation)
     {
-        var source = observation.CanonicalIdentityVertices.Count == observation.Vertices.Count
-            && observation.CanonicalIdentityVertices.Count > 0
+        var source = HasCanonicalIdentityGeometry(observation)
             ? observation.CanonicalIdentityVertices
             : observation.Vertices;
         var bounds = Bounds.From(source);
@@ -246,7 +281,7 @@ public static class AvatarModelBuilder
         return normalized;
     }
 
-    private static List<WeightedIdentityGeometry> AlignIdentityGeometries(
+    private static List<WeightedIdentityGeometry> AlignLegacyIdentityGeometries(
         IReadOnlyList<WeightedIdentityGeometry> geometries)
     {
         if (geometries.Count <= 1)
@@ -254,9 +289,7 @@ public static class AvatarModelBuilder
             return geometries.ToList();
         }
 
-        IReadOnlyList<FaceMeshLandmarkPoint> mean = geometries
-            .FirstOrDefault(static geometry => geometry.Observation.CanonicalIdentityVertices.Count > 0)?.Vertices
-            ?? geometries[0].Vertices;
+        IReadOnlyList<FaceMeshLandmarkPoint> mean = geometries[0].Vertices;
         var aligned = geometries.ToList();
         for (var iteration = 0; iteration < 4; iteration++)
         {
@@ -294,6 +327,50 @@ public static class AvatarModelBuilder
             .OrderBy(static accumulator => accumulator.Index)
             .Select(static accumulator => accumulator.ToPoint())
             .ToList();
+    }
+
+    private static void AddIdentityGeometry(
+        WeightedObservation item,
+        IReadOnlyList<FaceMeshLandmarkPoint> vertices,
+        IDictionary<int, WeightedPointAccumulator> vertexAccumulators,
+        IReadOnlyList<WeightedCoefficientAccumulator> shapeAccumulators,
+        ref double totalWeight,
+        ref double confidenceWeight)
+    {
+        foreach (var point in vertices)
+        {
+            if (!vertexAccumulators.TryGetValue(point.Index, out var accumulator))
+            {
+                accumulator = new WeightedPointAccumulator(point.Index);
+                vertexAccumulators[point.Index] = accumulator;
+            }
+
+            accumulator.Add(point, item.Weight);
+        }
+
+        AddCoefficients(shapeAccumulators, item.Observation.ShapeCoefficients, item.Weight);
+        totalWeight += item.Weight;
+        confidenceWeight += item.Observation.ReconstructionConfidencePercent * item.Weight;
+    }
+
+    private static List<FaceMeshLandmarkPoint> CreateMeanVertices(
+        IEnumerable<WeightedPointAccumulator> accumulators)
+    {
+        return accumulators
+            .Where(static accumulator => accumulator.Weight > 0d)
+            .OrderBy(static accumulator => accumulator.Index)
+            .Select(static accumulator => accumulator.ToPoint())
+            .ToList();
+    }
+
+    private static bool HasIdentityGeometry(AvatarModelObservation observation)
+    {
+        return HasCanonicalIdentityGeometry(observation) || observation.Vertices.Count > 0;
+    }
+
+    private static bool HasCanonicalIdentityGeometry(AvatarModelObservation observation)
+    {
+        return observation.CanonicalIdentityVertices.Count > 0;
     }
 
     private static List<WeightedCoefficientAccumulator> CreateCoefficientAccumulators(int count)
@@ -386,7 +463,7 @@ public static class AvatarModelBuilder
     {
         var findings = new List<string>
         {
-            $"Stored {observations.Count} bounded 3DDFA observation(s); identity uses canonical expression-free geometry with rigid, non-deforming alignment and the expression model stays separate.",
+            $"Stored {observations.Count} bounded 3DDFA observation(s); identity uses direct canonical expression-free geometry, legacy scans use rigid non-deforming alignment, and the expression model stays separate.",
             $"Current dense identity preview has {identity.DenseVertexCount:n0} averaged vertices and {identity.DenseTopologyEdgeCount:n0} topology edges."
         };
         if (observations.Count < 12)
@@ -430,7 +507,9 @@ public static class AvatarModelBuilder
             ARotationAroundXDegrees = Round(observation.ARotationAroundXDegrees),
             BRotationAroundYDegrees = Round(observation.BRotationAroundYDegrees),
             CRotationAroundZDegrees = Round(observation.CRotationAroundZDegrees),
-            VertexCount = observation.Vertices.Count,
+            VertexCount = HasCanonicalIdentityGeometry(observation)
+                ? observation.CanonicalIdentityVertices.Count
+                : observation.Vertices.Count,
             IdentityUse = observation.IdentityUse
         };
     }
@@ -542,6 +621,10 @@ public static class AvatarModelBuilder
         AvatarModelObservation Observation,
         double Weight,
         IReadOnlyList<FaceMeshLandmarkPoint> Vertices);
+
+    private sealed record WeightedObservation(
+        AvatarModelObservation Observation,
+        double Weight);
 
     private readonly record struct Bounds(double MinX, double MaxX, double MinY, double MaxY, double MinZ, double MaxZ)
     {

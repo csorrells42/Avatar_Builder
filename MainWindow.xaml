@@ -335,13 +335,6 @@
                         <TextBlock Text="Avatar Builder" FontSize="30" FontWeight="Bold" HorizontalAlignment="Center" />
                         <TextBlock x:Name="PreviewStateText" Text="Camera disabled" Margin="0,10,0,0" Foreground="#b9d7ef" HorizontalAlignment="Center" />
                     </StackPanel>
-                    <Border x:Name="TrackingOverlay" HorizontalAlignment="Left" VerticalAlignment="Top" Margin="14" Background="#d8080d12" BorderBrush="#37506a" BorderThickness="1" Padding="10" MinWidth="360" MaxWidth="860">
-                        <StackPanel>
-                            <TextBlock x:Name="OverlayStateText" Text="Avatar tracking idle" FontWeight="Bold" TextWrapping="Wrap" />
-                            <TextBlock x:Name="OverlayMetricText" Text="Face lock -- | eye -- | mouth --" Foreground="#b9d7ef" TextWrapping="Wrap" Margin="0,4,0,0" />
-                            <TextBlock x:Name="OverlayTriggerText" Text="Turn on the camera to begin face tracking." Foreground="#b9d7ef" TextWrapping="Wrap" Margin="0,4,0,0" />
-                        </StackPanel>
-                    </Border>
                 </Grid>
             </Border>
 

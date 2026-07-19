@@ -7,7 +7,7 @@ public static class TextureNativePreviewPolicy
     private static readonly TimeSpan FailureCooldown = TimeSpan.FromSeconds(20);
     private static readonly Dictionary<string, PreviewFailure> PreviewFailures = new(StringComparer.OrdinalIgnoreCase);
 
-    public static bool CanUseNv12UploadFallback(
+    public static bool ShouldPreferNv12UploadFallback(
         string? mediaSubtype,
         int width,
         int height,

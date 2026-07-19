@@ -14,12 +14,17 @@ public sealed class AvatarModelStore
     private const string ViewerVersion = "avatar-model-viewer-v2";
 
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
+    private readonly object _cacheLock = new();
+    private string _cachedPath = "";
+    private FileStamp _cachedStamp;
+    private AvatarModel? _cachedModel;
 
     public string Write(string folder, AvatarModel model)
     {
         Directory.CreateDirectory(folder);
         var jsonPath = GetJsonPath(folder);
         AtomicTextFileWriter.WriteAllText(jsonPath, JsonSerializer.Serialize(model, JsonOptions), Encoding.UTF8);
+        UpdateCache(jsonPath, model);
         WriteViewer(folder, model);
         return jsonPath;
     }
@@ -43,18 +48,37 @@ public sealed class AvatarModelStore
     public AvatarModel? Read(string folder)
     {
         var path = GetJsonPath(folder);
-        if (!File.Exists(path))
+        lock (_cacheLock)
         {
-            return null;
-        }
+            var stamp = FileStamp.Read(path);
+            if (!stamp.Exists)
+            {
+                ClearCache();
+                return null;
+            }
 
-        try
-        {
-            return JsonSerializer.Deserialize<AvatarModel>(File.ReadAllText(path), JsonOptions);
-        }
-        catch
-        {
-            return null;
+            if (_cachedModel is not null
+                && string.Equals(_cachedPath, path, StringComparison.OrdinalIgnoreCase)
+                && _cachedStamp == stamp)
+            {
+                return _cachedModel;
+            }
+
+            try
+            {
+                var model = JsonSerializer.Deserialize<AvatarModel>(File.ReadAllText(path), JsonOptions);
+                if (model is not null)
+                {
+                    UpdateCache(path, model);
+                }
+
+                return model;
+            }
+            catch
+            {
+                ClearCache();
+                return null;
+            }
         }
     }
 
@@ -406,6 +430,37 @@ public sealed class AvatarModelStore
         catch
         {
             return false;
+        }
+    }
+
+    private void UpdateCache(string path, AvatarModel model)
+    {
+        lock (_cacheLock)
+        {
+            _cachedPath = path;
+            _cachedStamp = FileStamp.Read(path);
+            _cachedModel = model;
+        }
+    }
+
+    private void ClearCache()
+    {
+        _cachedPath = "";
+        _cachedStamp = default;
+        _cachedModel = null;
+    }
+
+    private readonly record struct FileStamp(bool Exists, long Length, long LastWriteTimeUtcTicks)
+    {
+        public static FileStamp Read(string path)
+        {
+            if (!File.Exists(path))
+            {
+                return default;
+            }
+
+            var file = new FileInfo(path);
+            return new FileStamp(true, file.Length, file.LastWriteTimeUtc.Ticks);
         }
     }
 

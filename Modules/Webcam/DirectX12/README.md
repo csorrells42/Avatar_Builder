@@ -4,12 +4,13 @@ Owns GPU camera preview and texture-native rendering.
 
 Responsibilities:
 - Render NV12 and BGRA camera preview frames through DX12.
-- Reuse pooled NV12 frame buffers and coalesce pending render work to the newest frame instead of building a preview queue.
-- Draw face/eye/mouth regions plus face, jaw, brow, eye, and inner/outer-lip contours in the native DX12 target so the child-window viewport cannot cover the overlay.
+- Prefer validated NV12 staging uploads for D3D11 cameras; import a shared NT texture only when a valid NV12 payload is unavailable.
+- Reuse pooled NV12 frame buffers and coalesce upload work to the newest frame instead of building a preview queue.
+- Render face/eye/mouth regions plus face, jaw, brow, eye, and inner/outer-lip contours through one bounded instanced DX12 draw call.
 - Own GPU denoise and color-polish shader paths for preview.
 - Manage texture-native camera stream preview.
 - Report the active GPU preview path, render FPS, dropped frames, format, processing state, recording mode, and fallback reason.
-- Keep expensive preview work off the camera capture thread.
+- Keep upload and analysis work off the camera capture thread. The last-resort D3D11 shared-texture presentation is synchronous because its `WaitForGpu()` protects the reusable bridge texture.
 - Own the webcam-local WPF child-window viewport host so the webcam module can move without a separate shared DX12 folder.
 
 Current entry points:
@@ -23,6 +24,13 @@ Current entry points:
 - `TextureNativePreviewPolicy.cs`
 - `TextureNativeCameraRecorder.cs`
 - `PreviewTrackingOverlay.cs`
+- `Direct3D12TrackingOverlayRenderer.cs`
+
+Timing invariant:
+- A validated D3D11 NV12 payload never creates or copies the shared bridge texture.
+- If no valid payload exists, `TextureNativeCameraRecorder` may copy into the shared bridge texture.
+- `Direct3D12PreviewHost` must finish that shared-texture presentation and call `WaitForGpu()` before capture may copy another frame into the bridge texture.
+- Analysis receives `DuplicatePreviewData()`, which owns only the pooled CPU bytes.
 
 Drop-in boundary:
 - Use `ICameraPreviewPresenter` when another program needs a camera preview surface without knowing whether the backing renderer is DX12, WPF, or a fallback.

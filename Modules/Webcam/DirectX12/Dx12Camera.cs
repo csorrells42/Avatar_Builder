@@ -954,20 +954,27 @@ public sealed class Dx12Camera : IDisposable
 
     private void StreamFrameAvailable(object? sender, TextureNativeFrameInfo frame)
     {
-        FrameAvailable?.Invoke(this, frame);
+        NotifyFrameAvailable(frame);
     }
 
     private void StreamTextureFrameAvailable(object? sender, TextureNativeFrameLease frame)
     {
         _textureFrameLeaseActive = frame.IsValid;
-        TextureFrameAvailable?.Invoke(this, frame);
+        NotifyTextureFrameAvailable(frame);
 
         if (!ShouldAcceptPreviewRenderFrame())
         {
             return;
         }
 
-        _previewHost?.RenderTextureFrame(frame, _denoiseEnabled, _denoiseStrength, _colorSettings);
+        try
+        {
+            _previewHost?.RenderTextureFrame(frame, _denoiseEnabled, _denoiseStrength, _colorSettings);
+        }
+        catch (Exception ex)
+        {
+            NotifyStatusChanged($"DX12 preview submission failed: {ex.Message}");
+        }
     }
 
     private bool ShouldAcceptPreviewRenderFrame()
@@ -990,17 +997,96 @@ public sealed class Dx12Camera : IDisposable
 
     private void StreamStatusChanged(object? sender, string status)
     {
-        StatusChanged?.Invoke(this, status);
+        NotifyStatusChanged(status);
     }
 
     private void PreviewHostStatusChanged(object? sender, string status)
     {
-        StatusChanged?.Invoke(this, status);
+        NotifyStatusChanged(status);
     }
 
     private void PreviewHostDiagnosticsChanged(object? sender, Direct3D12PreviewDiagnostics diagnostics)
     {
-        DiagnosticsChanged?.Invoke(this, diagnostics);
+        var handlers = DiagnosticsChanged;
+        if (handlers is null)
+        {
+            return;
+        }
+
+        foreach (var callback in handlers.GetInvocationList())
+        {
+            try
+            {
+                ((EventHandler<Direct3D12PreviewDiagnostics>)callback)(this, diagnostics);
+            }
+            catch (Exception ex)
+            {
+                NotifyStatusChanged($"DX12 diagnostics observer failed: {ex.Message}");
+            }
+        }
+    }
+
+    private void NotifyFrameAvailable(TextureNativeFrameInfo frame)
+    {
+        var handlers = FrameAvailable;
+        if (handlers is null)
+        {
+            return;
+        }
+
+        foreach (var callback in handlers.GetInvocationList())
+        {
+            try
+            {
+                ((EventHandler<TextureNativeFrameInfo>)callback)(this, frame);
+            }
+            catch (Exception ex)
+            {
+                NotifyStatusChanged($"DX12 frame observer failed: {ex.Message}");
+            }
+        }
+    }
+
+    private void NotifyTextureFrameAvailable(TextureNativeFrameLease frame)
+    {
+        var handlers = TextureFrameAvailable;
+        if (handlers is null)
+        {
+            return;
+        }
+
+        foreach (var callback in handlers.GetInvocationList())
+        {
+            try
+            {
+                ((EventHandler<TextureNativeFrameLease>)callback)(this, frame);
+            }
+            catch (Exception ex)
+            {
+                NotifyStatusChanged($"DX12 texture observer failed: {ex.Message}");
+            }
+        }
+    }
+
+    private void NotifyStatusChanged(string status)
+    {
+        var handlers = StatusChanged;
+        if (handlers is null)
+        {
+            return;
+        }
+
+        foreach (var callback in handlers.GetInvocationList())
+        {
+            try
+            {
+                ((EventHandler<string>)callback)(this, status);
+            }
+            catch
+            {
+                // Status observers cannot be allowed to stop the camera or render workers.
+            }
+        }
     }
 
     private void SetPreviewRecordingMode(string recordingMode)

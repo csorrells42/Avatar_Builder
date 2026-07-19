@@ -4,7 +4,7 @@ namespace AvatarBuilder.Modules.Vision.Reconstruction;
 
 public sealed class AvatarModelObservationSet
 {
-    public const string CurrentSchemaVersion = "avatar-model-observations-v2";
+    public const string CurrentSchemaVersion = "avatar-model-observations-v3-bounded-review-geometry";
 
     public string SchemaVersion { get; init; } = CurrentSchemaVersion;
 
@@ -17,14 +17,14 @@ public sealed class AvatarModelObservationSet
     public int MaxObservationCount { get; init; } = AvatarModelObservationStore.MaxObservationCount;
 
     public string StoragePolicy { get; init; } =
-        "Bounded measurement-only 3DDFA observation set. The newest accepted observations are retained; raw camera video and photos are not stored here.";
+        "Bounded measurement-only 3DDFA observation set. Canonical identity geometry is retained for learning; camera-space geometry is limited to the five newest review samples. Raw camera video and photos are not stored here.";
 
     public List<MeshTopologyEdge> DenseTopologyEdges { get; init; } = [];
 
     public List<AvatarModelObservation> Observations { get; init; } = [];
 }
 
-public sealed class AvatarModelObservation
+public sealed record AvatarModelObservation
 {
     public string RequestId { get; init; } = "";
 

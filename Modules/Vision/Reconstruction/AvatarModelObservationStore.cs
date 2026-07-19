@@ -13,8 +13,13 @@ public sealed class AvatarModelObservationStore
     public const string JsonFileName = "avatar_model_observations.json.gz";
     public const string LegacyJsonFileName = "avatar_model_observations.json";
     public const int MaxObservationCount = 120;
+    public const int MaxReviewGeometryCount = 5;
 
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
+    private readonly object _cacheLock = new();
+    private string _cachedPath = "";
+    private FileStamp _cachedStamp;
+    private AvatarModelObservationSet? _cachedObservations;
 
     public AvatarModelObservationMergeResult MergeAndWrite(
         string folder,
@@ -22,70 +27,75 @@ public sealed class AvatarModelObservationStore
         string subjectDisplayName,
         IReadOnlyList<ThreeDdfaReconstructionSnapshot> threeDdfaSamples)
     {
-        Directory.CreateDirectory(folder);
-        var path = GetJsonPath(folder);
-        var existing = Read(folder);
-        var retainedThreeDdfaObservations = existing.Observations
-            .Where(static observation => observation.Source.Contains("3DDFA", StringComparison.OrdinalIgnoreCase))
-            .ToList();
-        var byRequestId = retainedThreeDdfaObservations
-            .Where(static observation => !string.IsNullOrWhiteSpace(observation.RequestId))
-            .GroupBy(static observation => observation.RequestId, StringComparer.Ordinal)
-            .ToDictionary(static group => group.Key, static group => group.OrderByDescending(item => item.CapturedAtUtc).First(), StringComparer.Ordinal);
-
-        var bySampleFallback = retainedThreeDdfaObservations
-            .Where(static observation => string.IsNullOrWhiteSpace(observation.RequestId))
-            .GroupBy(static observation => observation.SampleId, StringComparer.Ordinal)
-            .ToDictionary(static group => group.Key, static group => group.OrderByDescending(item => item.CapturedAtUtc).First(), StringComparer.Ordinal);
-
-        var topology = existing.DenseTopologyEdges.ToList();
-        foreach (var snapshot in threeDdfaSamples)
+        lock (_cacheLock)
         {
-            if (TryCreateObservation(snapshot, out var observation))
-            {
-                if (!string.IsNullOrWhiteSpace(observation.RequestId))
-                {
-                    byRequestId[observation.RequestId] = observation;
-                }
-                else
-                {
-                    bySampleFallback[observation.SampleId] = observation;
-                }
+            Directory.CreateDirectory(folder);
+            var path = GetJsonPath(folder);
+            var existing = ReadCore(folder, path);
+            var retainedThreeDdfaObservations = existing.Observations
+                .Where(static observation => observation.Source.Contains("3DDFA", StringComparison.OrdinalIgnoreCase))
+                .ToList();
+            var byRequestId = retainedThreeDdfaObservations
+                .Where(static observation => !string.IsNullOrWhiteSpace(observation.RequestId))
+                .GroupBy(static observation => observation.RequestId, StringComparer.Ordinal)
+                .ToDictionary(static group => group.Key, static group => group.OrderByDescending(item => item.CapturedAtUtc).First(), StringComparer.Ordinal);
 
-                if (snapshot.TopologyEdges.Count > topology.Count)
+            var bySampleFallback = retainedThreeDdfaObservations
+                .Where(static observation => string.IsNullOrWhiteSpace(observation.RequestId))
+                .GroupBy(static observation => observation.SampleId, StringComparer.Ordinal)
+                .ToDictionary(static group => group.Key, static group => group.OrderByDescending(item => item.CapturedAtUtc).First(), StringComparer.Ordinal);
+
+            var topology = existing.DenseTopologyEdges.ToList();
+            foreach (var snapshot in threeDdfaSamples)
+            {
+                if (TryCreateObservation(snapshot, out var observation))
                 {
-                    topology = snapshot.TopologyEdges.ToList();
+                    if (!string.IsNullOrWhiteSpace(observation.RequestId))
+                    {
+                        byRequestId[observation.RequestId] = observation;
+                    }
+                    else
+                    {
+                        bySampleFallback[observation.SampleId] = observation;
+                    }
+
+                    if (snapshot.TopologyEdges.Count > topology.Count)
+                    {
+                        topology = snapshot.TopologyEdges.ToList();
+                    }
                 }
             }
-        }
 
-        var retained = byRequestId.Values
-            .Concat(bySampleFallback.Values)
-            .OrderByDescending(static observation => observation.CapturedAtUtc)
-            .Take(MaxObservationCount)
-            .OrderBy(static observation => observation.CapturedAtUtc)
-            .ToList();
+            var retained = byRequestId.Values
+                .Concat(bySampleFallback.Values)
+                .OrderByDescending(static observation => observation.CapturedAtUtc)
+                .Take(MaxObservationCount)
+                .OrderBy(static observation => observation.CapturedAtUtc)
+                .ToList();
+            retained = ApplyStoragePolicy(retained);
 
-        var changed = HasChanged(existing, subjectId, subjectDisplayName, retained, topology);
-        var updated = changed
-            ? new AvatarModelObservationSet
+            var changed = HasChanged(existing, subjectId, subjectDisplayName, retained, topology);
+            var updated = changed
+                ? new AvatarModelObservationSet
+                {
+                    UpdatedAtUtc = DateTime.UtcNow,
+                    SubjectId = subjectId,
+                    SubjectDisplayName = subjectDisplayName,
+                    MaxObservationCount = MaxObservationCount,
+                    DenseTopologyEdges = topology,
+                    Observations = retained
+                }
+                : existing;
+
+            if (changed || !File.Exists(path))
             {
-                UpdatedAtUtc = DateTime.UtcNow,
-                SubjectId = subjectId,
-                SubjectDisplayName = subjectDisplayName,
-                MaxObservationCount = MaxObservationCount,
-                DenseTopologyEdges = topology,
-                Observations = retained
+                WriteCompressed(path, updated);
+                TryDeleteLegacyFile(folder);
             }
-            : existing;
 
-        if (changed || !File.Exists(path))
-        {
-            WriteCompressed(path, updated);
-            TryDeleteLegacyFile(folder);
+            UpdateCache(path, updated);
+            return new AvatarModelObservationMergeResult(updated, changed);
         }
-
-        return new AvatarModelObservationMergeResult(updated, changed);
     }
 
     public static string GetJsonPath(string folder)
@@ -95,32 +105,64 @@ public sealed class AvatarModelObservationStore
 
     public AvatarModelObservationSet Read(string folder)
     {
-        var path = GetJsonPath(folder);
-        if (File.Exists(path))
+        lock (_cacheLock)
+        {
+            return ReadCore(folder, GetJsonPath(folder));
+        }
+    }
+
+    private AvatarModelObservationSet ReadCore(string folder, string path)
+    {
+        var stamp = FileStamp.Read(path);
+        if (_cachedObservations is not null
+            && string.Equals(_cachedPath, path, StringComparison.OrdinalIgnoreCase)
+            && _cachedStamp == stamp)
+        {
+            return _cachedObservations;
+        }
+
+        AvatarModelObservationSet observations;
+        if (stamp.Exists)
         {
             try
             {
                 using var file = File.OpenRead(path);
                 using var gzip = new GZipStream(file, CompressionMode.Decompress);
-                return JsonSerializer.Deserialize<AvatarModelObservationSet>(gzip, JsonOptions)
-                    ?? new AvatarModelObservationSet();
+                observations = JsonSerializer.Deserialize<AvatarModelObservationSet>(gzip, JsonOptions)
+                    ?? throw new InvalidDataException("The observation archive did not contain an observation set.");
+                UpdateCache(path, observations);
+                return observations;
             }
-            catch
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException)
             {
+                throw new InvalidDataException(
+                    $"Could not read the existing avatar observation archive '{path}'. The file was left unchanged.",
+                    ex);
             }
         }
 
         var legacyPath = Path.Combine(folder, LegacyJsonFileName);
+        if (!File.Exists(legacyPath))
+        {
+            observations = new AvatarModelObservationSet();
+            UpdateCache(path, observations);
+            return observations;
+        }
+
         try
         {
-            return File.Exists(legacyPath)
-                ? (JsonSerializer.Deserialize<AvatarModelObservationSet>(File.ReadAllText(legacyPath), JsonOptions)
-                    ?? new AvatarModelObservationSet())
-                : new AvatarModelObservationSet();
+            observations = JsonSerializer.Deserialize<AvatarModelObservationSet>(
+                File.ReadAllText(legacyPath),
+                JsonOptions)
+                ?? throw new InvalidDataException("The legacy observation file did not contain an observation set.");
+            UpdateCache(path, observations);
+            return observations;
         }
-        catch
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException)
         {
-            return new AvatarModelObservationSet();
+            throw new InvalidDataException(
+                $"Could not read the legacy avatar observation file '{legacyPath}'. The file was left unchanged.",
+                ex);
         }
     }
 
@@ -166,7 +208,7 @@ public sealed class AvatarModelObservationStore
         try
         {
             using (var file = File.Create(tempPath))
-            using (var gzip = new GZipStream(file, CompressionLevel.SmallestSize))
+            using (var gzip = new GZipStream(file, CompressionLevel.Fastest))
             {
                 JsonSerializer.Serialize(gzip, observations, JsonOptions);
             }
@@ -253,6 +295,39 @@ public sealed class AvatarModelObservationStore
         return true;
     }
 
+    private static List<AvatarModelObservation> ApplyStoragePolicy(
+        IReadOnlyList<AvatarModelObservation> observations)
+    {
+        var reviewKeys = observations
+            .Where(static observation => observation.Vertices.Count > 0)
+            .OrderByDescending(static observation => observation.CapturedAtUtc)
+            .Take(MaxReviewGeometryCount)
+            .Select(CreateObservationKey)
+            .ToHashSet(StringComparer.Ordinal);
+
+        return observations
+            .Select(observation => observation.CanonicalIdentityVertices.Count > 0
+                && observation.Vertices.Count > 0
+                && !reviewKeys.Contains(CreateObservationKey(observation))
+                    ? observation with { Vertices = [] }
+                    : observation)
+            .ToList();
+    }
+
+    private static string CreateObservationKey(AvatarModelObservation observation)
+    {
+        return !string.IsNullOrWhiteSpace(observation.RequestId)
+            ? $"request:{observation.RequestId}"
+            : $"sample:{observation.SampleId}";
+    }
+
+    private void UpdateCache(string path, AvatarModelObservationSet observations)
+    {
+        _cachedPath = path;
+        _cachedStamp = FileStamp.Read(path);
+        _cachedObservations = observations;
+    }
+
     private static FaceMeshLandmarkPoint CopyPoint(FaceMeshLandmarkPoint point)
     {
         return new FaceMeshLandmarkPoint
@@ -280,6 +355,20 @@ public sealed class AvatarModelObservationStore
         return double.IsFinite(value)
             ? Math.Round(value, 6, MidpointRounding.AwayFromZero)
             : 0d;
+    }
+
+    private readonly record struct FileStamp(bool Exists, long Length, long LastWriteTimeUtcTicks)
+    {
+        public static FileStamp Read(string path)
+        {
+            if (!File.Exists(path))
+            {
+                return default;
+            }
+
+            var file = new FileInfo(path);
+            return new FileStamp(true, file.Length, file.LastWriteTimeUtc.Ticks);
+        }
     }
 
 }

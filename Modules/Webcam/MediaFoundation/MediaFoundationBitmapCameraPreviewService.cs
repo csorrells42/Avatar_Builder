@@ -41,7 +41,7 @@ public sealed class MediaFoundationBitmapCameraPreviewService : ICameraPreviewSe
         Stop();
         if (!OperatingSystem.IsWindows())
         {
-            StatusChanged?.Invoke(this, "Media Foundation camera capture requires Windows.");
+            NotifyStatusChanged("Media Foundation camera capture requires Windows.");
             return Task.FromResult(false);
         }
 
@@ -89,7 +89,7 @@ public sealed class MediaFoundationBitmapCameraPreviewService : ICameraPreviewSe
             if (startupReady != startup.Task)
             {
                 Stop();
-                StatusChanged?.Invoke(this, $"Could not start Media Foundation preview: timed out opening {camera.Name}.");
+                NotifyStatusChanged($"Could not start Media Foundation preview: timed out opening {camera.Name}.");
                 return false;
             }
 
@@ -97,7 +97,7 @@ public sealed class MediaFoundationBitmapCameraPreviewService : ICameraPreviewSe
             if (!string.IsNullOrWhiteSpace(startupError))
             {
                 Stop();
-                StatusChanged?.Invoke(this, $"Could not start Media Foundation preview: {startupError}");
+                NotifyStatusChanged($"Could not start Media Foundation preview: {startupError}");
                 return false;
             }
 
@@ -108,7 +108,7 @@ public sealed class MediaFoundationBitmapCameraPreviewService : ICameraPreviewSe
             }
 
             Stop();
-            StatusChanged?.Invoke(this, $"Could not start Media Foundation preview: no frames arrived from {camera.Name}.");
+            NotifyStatusChanged($"Could not start Media Foundation preview: no frames arrived from {camera.Name}.");
             return false;
         }
         catch (OperationCanceledException)
@@ -119,7 +119,7 @@ public sealed class MediaFoundationBitmapCameraPreviewService : ICameraPreviewSe
         catch (Exception ex)
         {
             Stop();
-            StatusChanged?.Invoke(this, $"Could not start Media Foundation preview: {ex.Message}");
+            NotifyStatusChanged($"Could not start Media Foundation preview: {ex.Message}");
             return false;
         }
     }
@@ -144,7 +144,7 @@ public sealed class MediaFoundationBitmapCameraPreviewService : ICameraPreviewSe
             _mediaSource = mediaSource;
             UpdateActiveFormat(reader, mode);
 
-            StatusChanged?.Invoke(this, $"Media Foundation preview format: {_activeWidth}x{_activeHeight}@{_activeFramesPerSecond:0.###} {MediaFoundationInterop.FormatSubtype(_activeSubtype)}.");
+            NotifyStatusChanged($"Media Foundation preview format: {_activeWidth}x{_activeHeight}@{_activeFramesPerSecond:0.###} {MediaFoundationInterop.FormatSubtype(_activeSubtype)}.");
             startup.TrySetResult(null);
 
             while (!cancellationToken.IsCancellationRequested)
@@ -159,14 +159,14 @@ public sealed class MediaFoundationBitmapCameraPreviewService : ICameraPreviewSe
 
                 if (MediaFoundationInterop.Failed(result))
                 {
-                    StatusChanged?.Invoke(this, $"Camera read failed: 0x{result:X8}");
+                    NotifyStatusChanged($"Camera read failed: 0x{result:X8}");
                     Thread.Sleep(50);
                     continue;
                 }
 
                 if ((streamFlags & MediaFoundationInterop.MF_SOURCE_READERF_ENDOFSTREAM) != 0)
                 {
-                    StatusChanged?.Invoke(this, "Camera preview ended.");
+                    NotifyStatusChanged("Camera preview ended.");
                     break;
                 }
 
@@ -181,7 +181,7 @@ public sealed class MediaFoundationBitmapCameraPreviewService : ICameraPreviewSe
                     if (TryReadFrame(sample, _activeWidth, _activeHeight, _activeSubtype, _activeStride, out var frame))
                     {
                         firstFrame.TrySetResult(true);
-                        CameraFrameAvailable?.Invoke(this, frame);
+                        NotifyCameraFrameAvailable(frame);
 
                         if (CanEmitFrame())
                         {
@@ -203,7 +203,7 @@ public sealed class MediaFoundationBitmapCameraPreviewService : ICameraPreviewSe
         {
             startup.TrySetResult(ex.Message);
             firstFrame.TrySetResult(false);
-            StatusChanged?.Invoke(this, ex.Message);
+            NotifyStatusChanged(ex.Message);
         }
         finally
         {
@@ -274,7 +274,7 @@ public sealed class MediaFoundationBitmapCameraPreviewService : ICameraPreviewSe
 
             if (TryCreateBitmap(frame, out var bitmap))
             {
-                FrameAvailable?.Invoke(this, bitmap);
+                NotifyFrameAvailable(bitmap);
             }
         }
 
@@ -297,6 +297,69 @@ public sealed class MediaFoundationBitmapCameraPreviewService : ICameraPreviewSe
         }
 
         Interlocked.Exchange(ref _analysisFrameWorkerQueued, 0);
+    }
+
+    private void NotifyCameraFrameAvailable(CameraFrame frame)
+    {
+        var handlers = CameraFrameAvailable;
+        if (handlers is null)
+        {
+            return;
+        }
+
+        foreach (var callback in handlers.GetInvocationList())
+        {
+            try
+            {
+                ((EventHandler<CameraFrame>)callback)(this, frame);
+            }
+            catch (Exception ex)
+            {
+                NotifyStatusChanged($"Camera frame observer failed: {ex.Message}");
+            }
+        }
+    }
+
+    private void NotifyFrameAvailable(BitmapSource bitmap)
+    {
+        var handlers = FrameAvailable;
+        if (handlers is null)
+        {
+            return;
+        }
+
+        foreach (var callback in handlers.GetInvocationList())
+        {
+            try
+            {
+                ((EventHandler<BitmapSource>)callback)(this, bitmap);
+            }
+            catch (Exception ex)
+            {
+                NotifyStatusChanged($"Preview frame observer failed: {ex.Message}");
+            }
+        }
+    }
+
+    private void NotifyStatusChanged(string status)
+    {
+        var handlers = StatusChanged;
+        if (handlers is null)
+        {
+            return;
+        }
+
+        foreach (var callback in handlers.GetInvocationList())
+        {
+            try
+            {
+                ((EventHandler<string>)callback)(this, status);
+            }
+            catch
+            {
+                // Status observers cannot be allowed to terminate capture or analysis workers.
+            }
+        }
     }
 
     private void UpdateActiveFormat(IMFSourceReader reader, CameraVideoMode? requestedMode)

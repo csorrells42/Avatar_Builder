@@ -14,6 +14,8 @@ from typing import Any, Iterable
 
 import numpy as np
 
+CURRENT_MODEL_SCHEMA = "avatar-model-v3-direct-canonical-3ddfa"
+
 
 def read_json(path: Path) -> dict[str, Any]:
     with path.open("r", encoding="utf-8-sig") as handle:
@@ -133,41 +135,68 @@ def audit(profile: Path) -> dict[str, Any]:
 
     source_counts = collections.Counter(str(item.get("source", "")) for item in observations)
     request_ids = [str(item.get("requestId", "")) for item in observations]
-    vertex_counts = [len(item.get("vertices", [])) for item in observations]
+    review_vertex_counts = [len(item.get("vertices", [])) for item in observations]
+    identity_vertex_counts = []
     index_sets = []
     observed_basic_sets = []
+    observed_weights = []
     legacy_abc_sets = []
-    canonical_sets = []
+    identity_sets = []
+    canonical_flags = []
     canonical_observation_count = 0
     weights = []
     for item in observations:
         indices, raw = vertices(item)
-        index_sets.append(indices)
-        observed_basic = center_and_scale(raw)
-        observed_basic_sets.append(observed_basic)
-        legacy_abc_sets.append(
-            csharp_inverse_abc(
-                observed_basic,
-                float(item.get("aRotationAroundXDegrees", 0.0)),
-                float(item.get("bRotationAroundYDegrees", 0.0)),
-                float(item.get("cRotationAroundZDegrees", 0.0)),
+        weight = max(0.0, float(item.get("identityWeightPercent", 0.0))) / 100.0
+        if len(raw):
+            observed_basic = center_and_scale(raw)
+            observed_basic_sets.append(observed_basic)
+            observed_weights.append(weight)
+            legacy_abc_sets.append(
+                csharp_inverse_abc(
+                    observed_basic,
+                    float(item.get("aRotationAroundXDegrees", 0.0)),
+                    float(item.get("bRotationAroundYDegrees", 0.0)),
+                    float(item.get("cRotationAroundZDegrees", 0.0)),
+                )
             )
-        )
         canonical_indices, canonical = vertices(item, "canonicalIdentityVertices")
-        if len(canonical) == len(raw) and np.array_equal(canonical_indices, indices):
+        if len(canonical):
+            identity_indices = canonical_indices
             identity = canonical
             canonical_observation_count += 1
-        else:
+            canonical_flags.append(True)
+        elif len(raw):
+            identity_indices = indices
             identity = raw
-        canonical_sets.append(np.round(center_and_scale(identity), 6))
-        weights.append(max(0.0, float(item.get("identityWeightPercent", 0.0))) / 100.0)
+            canonical_flags.append(False)
+        else:
+            raise RuntimeError(f"Observation {item.get('requestId', '')!r} has no identity geometry.")
+        index_sets.append(identity_indices)
+        identity_vertex_counts.append(len(identity))
+        identity_sets.append(np.round(center_and_scale(identity), 6))
+        weights.append(weight)
     weight_array = np.asarray(weights, dtype=np.float64)
     if float(weight_array.sum()) <= 0.0:
         weight_array = np.ones(len(observations), dtype=np.float64)
 
     topology_count = len(observation_set.get("denseTopologyEdges", []))
     common_indices = all(np.array_equal(index_sets[0], item) for item in index_sets[1:])
-    builder_sets, builder_mean = generalized_procrustes(canonical_sets, weight_array)
+    if any(canonical_flags):
+        canonical_weights = weight_array[np.asarray(canonical_flags, dtype=bool)]
+        if float(canonical_weights.sum()) <= 0.0:
+            canonical_weights = np.ones(sum(canonical_flags), dtype=np.float64)
+        canonical_mean = weighted_mean(
+            [points for points, canonical in zip(identity_sets, canonical_flags) if canonical],
+            canonical_weights,
+        )
+        builder_sets = [
+            points if canonical else kabsch_align(points, canonical_mean)
+            for points, canonical in zip(identity_sets, canonical_flags)
+        ]
+        builder_mean = weighted_mean(builder_sets, weight_array)
+    else:
+        builder_sets, builder_mean = generalized_procrustes(identity_sets, weight_array)
     recomputed_model = np.round(builder_mean, 6)
     model_indices, stored_model = vertices(model.get("identity", {}), "meanDenseVertices")
     model_matches_indices = np.array_equal(index_sets[0], model_indices)
@@ -176,9 +205,19 @@ def audit(profile: Path) -> dict[str, Any]:
         float(np.max(np.abs(stored_model - recomputed_model))) if model_matches_indices else math.inf
     )
 
-    observed_basic_mean = weighted_mean(observed_basic_sets, weight_array)
-    legacy_abc_mean = weighted_mean(legacy_abc_sets, weight_array)
-    per_scan_legacy_abc = [rms_percent(points, legacy_abc_mean) for points in legacy_abc_sets]
+    observed_weight_array = np.asarray(observed_weights, dtype=np.float64)
+    if len(observed_basic_sets):
+        if float(observed_weight_array.sum()) <= 0.0:
+            observed_weight_array = np.ones(len(observed_basic_sets), dtype=np.float64)
+        observed_basic_mean = weighted_mean(observed_basic_sets, observed_weight_array)
+        legacy_abc_mean = weighted_mean(legacy_abc_sets, observed_weight_array)
+        per_scan_legacy_abc = [rms_percent(points, legacy_abc_mean) for points in legacy_abc_sets]
+        legacy_abc_rms = ensemble_rms_percent(legacy_abc_sets, legacy_abc_mean, observed_weight_array)
+        no_rotation_rms = ensemble_rms_percent(observed_basic_sets, observed_basic_mean, observed_weight_array)
+    else:
+        per_scan_legacy_abc = []
+        legacy_abc_rms = 0.0
+        no_rotation_rms = 0.0
     per_scan_builder = [rms_percent(points, builder_mean) for points in builder_sets]
 
     shape_coefficients = np.asarray([item.get("shapeCoefficients", []) for item in observations], dtype=np.float64)
@@ -200,14 +239,17 @@ def audit(profile: Path) -> dict[str, Any]:
     history_statuses = collections.Counter(str(item.get("status", "")) for item in history)
     history_movements = [float(item.get("overallVertexRmsFaceSpanPercent", 0.0)) for item in history]
 
-    legacy_abc_rms = ensemble_rms_percent(legacy_abc_sets, legacy_abc_mean, weight_array)
-    no_rotation_rms = ensemble_rms_percent(observed_basic_sets, observed_basic_mean, weight_array)
     builder_rms = ensemble_rms_percent(builder_sets, builder_mean, weight_array)
     legacy_vs_builder_ratio = legacy_abc_rms / max(builder_rms, 1e-9)
     legacy_vs_no_rotation_ratio = legacy_abc_rms / max(no_rotation_rms, 1e-9)
     findings = []
-    if model_recompute_rms <= 0.0002:
-        findings.append("The stored identity mesh exactly matches the canonical rigid mean produced by the current C# builder.")
+    model_schema = str(model.get("schemaVersion", ""))
+    if model_schema != CURRENT_MODEL_SCHEMA:
+        findings.append(
+            f"The stored model uses {model_schema or 'an unknown legacy schema'}; the next report rebuild will migrate it to {CURRENT_MODEL_SCHEMA}."
+        )
+    elif model_recompute_rms <= 0.0002:
+        findings.append("The stored identity mesh exactly matches the direct canonical mean produced by the current C# builder.")
     else:
         findings.append("The stored identity mesh does not reproduce from the stored observations; inspect persistence or build determinism.")
     if all("3DDFA" in source.upper() for source in source_counts):
@@ -215,16 +257,16 @@ def audit(profile: Path) -> dict[str, Any]:
     if legacy_vs_no_rotation_ratio > 1.10:
         findings.append("The retired inverse-A/B/C method aligns observed scans worse than centering/scaling alone; keep it out of the identity builder.")
     if legacy_vs_builder_ratio > 1.50:
-        findings.append("Canonical rigid alignment is materially stronger than the retired inverse-A/B/C method.")
+        findings.append("Direct canonical identity geometry is materially stronger than the retired inverse-A/B/C method.")
     if len(observations) < 12:
         findings.append("The identity model is immature because it contains fewer than 12 accepted scans.")
-    if len(set(vertex_counts)) != 1 or not common_indices:
-        findings.append("Stored observations do not share one stable dense vertex topology.")
+    if len(set(identity_vertex_counts)) != 1 or not common_indices:
+        findings.append("Stored identity observations do not share one stable dense vertex topology.")
     if len(set(request_ids)) != len(request_ids):
         findings.append("Duplicate request IDs are present in the retained observation set.")
 
     return {
-        "schemaVersion": "avatar-model-data-audit-v2",
+        "schemaVersion": "avatar-model-data-audit-v3-direct-canonical",
         "evaluatedAtUtc": dt.datetime.now(dt.timezone.utc).isoformat(),
         "profileFolder": str(profile),
         "dataset": {
@@ -232,7 +274,9 @@ def audit(profile: Path) -> dict[str, Any]:
             "capturedAtUtcMinimum": min(str(item.get("capturedAtUtc", "")) for item in observations),
             "capturedAtUtcMaximum": max(str(item.get("capturedAtUtc", "")) for item in observations),
             "sourceCounts": dict(source_counts),
-            "vertexCounts": dict(collections.Counter(vertex_counts)),
+            "reviewVertexCounts": dict(collections.Counter(review_vertex_counts)),
+            "identityVertexCounts": dict(collections.Counter(identity_vertex_counts)),
+            "reviewGeometryObservationCount": sum(count > 0 for count in review_vertex_counts),
             "topologyEdgeCount": topology_count,
             "commonVertexIndices": common_indices,
             "uniqueRequestIdCount": len(set(request_ids)),
@@ -240,9 +284,10 @@ def audit(profile: Path) -> dict[str, Any]:
             "warnings": sorted(set(warnings)),
         },
         "provenance": {
+            "modelSchemaVersion": model_schema,
             "modelVertexCount": len(stored_model),
             "modelTopologyEdgeCount": len(model.get("identity", {}).get("topologyEdges", [])),
-            "mediaPipeLandmarkSignaturePresent": any(count in (468, 478) for count in vertex_counts),
+            "mediaPipeLandmarkSignaturePresent": any(count in (468, 478) for count in identity_vertex_counts),
             "canonicalIdentityObservationCount": canonical_observation_count,
             "modelMatchesObservationIndices": model_matches_indices,
             "storedModelVsRecomputedRmsFaceSpanPercent": round(model_recompute_rms, 9),
@@ -251,11 +296,11 @@ def audit(profile: Path) -> dict[str, Any]:
         "geometryAlignment": {
             "centerScaleOnlyEnsembleRmsFaceSpanPercent": round(no_rotation_rms, 6),
             "retiredInverseAbcEnsembleRmsFaceSpanPercent": round(legacy_abc_rms, 6),
-            "canonicalRigidEnsembleRmsFaceSpanPercent": round(builder_rms, 6),
+            "canonicalDirectEnsembleRmsFaceSpanPercent": round(builder_rms, 6),
             "retiredInverseAbcVsNoRotationRmsRatio": round(legacy_vs_no_rotation_ratio, 6),
-            "retiredInverseAbcVsCanonicalRigidRmsRatio": round(legacy_vs_builder_ratio, 6),
+            "retiredInverseAbcVsCanonicalDirectRmsRatio": round(legacy_vs_builder_ratio, 6),
             "perScanRetiredInverseAbcRmsFaceSpanPercent": [round(value, 6) for value in per_scan_legacy_abc],
-            "perScanCanonicalRigidRmsFaceSpanPercent": [round(value, 6) for value in per_scan_builder],
+            "perScanCanonicalDirectRmsFaceSpanPercent": [round(value, 6) for value in per_scan_builder],
         },
         "learningSignal": {
             "shapeCoefficientCount": shape_count,
@@ -312,27 +357,30 @@ Evaluated `{report['evaluatedAtUtc']}` from `{report['profileFolder']}`.
 | --- | ---: |
 | Stored observations | {dataset['observationCount']} |
 | Observation sources | `{json.dumps(dataset['sourceCounts'], sort_keys=True)}` |
-| Vertices per observation | `{json.dumps(dataset['vertexCounts'], sort_keys=True)}` |
+| Canonical identity vertices per observation | `{json.dumps(dataset['identityVertexCounts'], sort_keys=True)}` |
+| Camera-space review vertices per observation | `{json.dumps(dataset['reviewVertexCounts'], sort_keys=True)}` |
+| Camera-space review observations retained | {dataset['reviewGeometryObservationCount']} |
 | Dense topology edges | {dataset['topologyEdgeCount']} |
 | Stable vertex indices | {dataset['commonVertexIndices']} |
 | Unique request IDs | {dataset['uniqueRequestIdCount']} |
 | MediaPipe-sized mesh present | {provenance['mediaPipeLandmarkSignaturePresent']} |
 | Canonical identity observations | {provenance['canonicalIdentityObservationCount']} |
+| Stored model schema | `{provenance['modelSchemaVersion']}` |
 | Stored model vertices | {provenance['modelVertexCount']} |
 | Model vs exact recomputation RMS | {provenance['storedModelVsRecomputedRmsFaceSpanPercent']:.9f}% of face span |
 
 ## Geometry Alignment
 
-Lower is better. The canonical rigid result reproduces the current C# identity builder: expression-free 3DDFA identity vertices are centered, scaled, and rigidly aligned without deformation.
+Lower is better. The direct canonical result reproduces the current C# identity builder: expression-free 3DDFA identity vertices already share BFM model coordinates, so they are centered, scaled, and averaged without a second pose transform. Rigid alignment is reserved for legacy camera-space scans.
 
 | Combination method | Ensemble RMS |
 | --- | ---: |
 | Observed vertices, center and scale only | {geometry['centerScaleOnlyEnsembleRmsFaceSpanPercent']:.6f}% |
 | Observed vertices, retired inverse A/B/C | {geometry['retiredInverseAbcEnsembleRmsFaceSpanPercent']:.6f}% |
-| Canonical identity, current rigid builder | {geometry['canonicalRigidEnsembleRmsFaceSpanPercent']:.6f}% |
+| Canonical identity, current direct builder | {geometry['canonicalDirectEnsembleRmsFaceSpanPercent']:.6f}% |
 
 Retired A/B/C versus no rotation ratio: `{geometry['retiredInverseAbcVsNoRotationRmsRatio']:.3f}`.
-Retired A/B/C versus canonical rigid ratio: `{geometry['retiredInverseAbcVsCanonicalRigidRmsRatio']:.3f}`.
+Retired A/B/C versus direct canonical ratio: `{geometry['retiredInverseAbcVsCanonicalDirectRmsRatio']:.3f}`.
 
 ## Learning Signal
 
@@ -349,7 +397,7 @@ Retired A/B/C versus canonical rigid ratio: `{geometry['retiredInverseAbcVsCanon
 ## Interpretation Rule
 
 - A 38,365-point observation with 3DDFA provenance is not a MediaPipe mesh.
-- An exact recomputation match proves which stored observations and canonical rigid algorithm produced the model.
+- An exact recomputation match proves which stored observations and direct canonical algorithm produced the model.
 - Retired inverse-A/B/C measurements remain diagnostic only and must not feed the persistent identity geometry.
 - Fewer than 12 observations is an early model; fine proportions should not yet be treated as stable.
 """

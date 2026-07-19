@@ -53,7 +53,9 @@ public sealed class LastGoodThreeDdfaStore
     {
         ArgumentNullException.ThrowIfNull(observationSet);
 
-        var persisted = observationSet.Observations.Select(static observation => new ThreeDdfaReconstructionSnapshot
+        var persisted = observationSet.Observations
+            .Where(static observation => observation.Vertices.Count > 0)
+            .Select(static observation => new ThreeDdfaReconstructionSnapshot
         {
             RequestId = observation.RequestId,
             CapturedAtUtc = observation.CapturedAtUtc,
@@ -80,7 +82,7 @@ public sealed class LastGoodThreeDdfaStore
             .GroupBy(CreateSampleKey, StringComparer.Ordinal)
             .Select(static group => group.OrderByDescending(sample => sample.CapturedAtUtc).First())
             .OrderBy(static sample => sample.CapturedAtUtc)
-            .TakeLast(5)
+            .TakeLast(AvatarModelObservationStore.MaxReviewGeometryCount)
             .ToList();
     }
 
@@ -126,7 +128,10 @@ public sealed class LastGoodThreeDdfaStore
             AvatarModelProgressHtmlPath = report.AvatarModelProgressHtmlPath,
             ReconstructionLane = report.ReconstructionLane,
             DenseTopologyEdges = topology.ToList(),
-            Samples = report.Samples.TakeLast(5).Select(CopyWithoutTopology).ToList()
+            Samples = report.Samples
+                .TakeLast(AvatarModelObservationStore.MaxReviewGeometryCount)
+                .Select(CopyWithoutTopology)
+                .ToList()
         };
     }
 

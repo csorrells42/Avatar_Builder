@@ -10,6 +10,7 @@ namespace AvatarBuilder.Modules.Vision.Diagnostics;
 
 public sealed class PoseAlignmentAuditor
 {
+    public const int CurrentPoseConventionVersion = 2;
     public const string HtmlFileName = "pose_alignment_audit.html";
     public const string JsonFileName = "pose_alignment_summary.json";
     public const string CsvFileName = "pose_alignment_samples.csv";
@@ -53,6 +54,7 @@ public sealed class PoseAlignmentAuditor
         {
             _folder = Path.Combine(Path.GetFullPath(outputRoot), "Benchmarks");
             Directory.CreateDirectory(_folder);
+            ArchiveLegacySamples(Path.Combine(_folder, CsvFileName));
             _samples.Clear();
             _samples.AddRange(ReadSamples(Path.Combine(_folder, CsvFileName)).TakeLast(MaximumSampleCount));
             _summary = BuildSummary(_samples);
@@ -79,6 +81,7 @@ public sealed class PoseAlignmentAuditor
             var sample = new PoseAlignmentSample
             {
                 CapturedAtUtc = capturedAtUtc,
+                PoseConventionVersion = CurrentPoseConventionVersion,
                 MediaPipeA = mediaPipe.A,
                 MediaPipeB = mediaPipe.B,
                 MediaPipeC = mediaPipe.C,
@@ -165,6 +168,7 @@ public sealed class PoseAlignmentAuditor
         return new PoseAlignmentSummary
         {
             UpdatedAtUtc = DateTime.UtcNow,
+            PoseConventionVersion = CurrentPoseConventionVersion,
             SampleCount = samples.Count,
             ReadyForComparison = ready,
             Status = ready ? "aligned" : "collecting alignment evidence",
@@ -250,11 +254,12 @@ public sealed class PoseAlignmentAuditor
         }
 
         var path = Path.Combine(_folder, CsvFileName);
-        var csv = new StringBuilder("capturedAtUtc,mediaPipeA,mediaPipeB,mediaPipeC,threeDdfaA,threeDdfaB,threeDdfaC\n");
+        var csv = new StringBuilder("capturedAtUtc,poseConventionVersion,mediaPipeA,mediaPipeB,mediaPipeC,threeDdfaA,threeDdfaB,threeDdfaC\n");
         foreach (var sample in _samples)
         {
             csv.AppendLine(string.Join(",",
                 sample.CapturedAtUtc.ToString("O", CultureInfo.InvariantCulture),
+                sample.PoseConventionVersion.ToString(CultureInfo.InvariantCulture),
                 Number(sample.MediaPipeA),
                 Number(sample.MediaPipeB),
                 Number(sample.MediaPipeC),
@@ -292,9 +297,11 @@ public sealed class PoseAlignmentAuditor
         foreach (var line in File.ReadLines(path).Skip(1))
         {
             var parts = line.Split(',');
-            if (parts.Length != 7
+            if (parts.Length != 8
                 || !DateTime.TryParse(parts[0], CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var capturedAtUtc)
-                || !TryNumbers(parts.Skip(1), out var values))
+                || !int.TryParse(parts[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out var conventionVersion)
+                || conventionVersion != CurrentPoseConventionVersion
+                || !TryNumbers(parts.Skip(2), out var values))
             {
                 continue;
             }
@@ -302,6 +309,7 @@ public sealed class PoseAlignmentAuditor
             samples.Add(new PoseAlignmentSample
             {
                 CapturedAtUtc = capturedAtUtc,
+                PoseConventionVersion = conventionVersion,
                 MediaPipeA = values[0],
                 MediaPipeB = values[1],
                 MediaPipeC = values[2],
@@ -312,6 +320,25 @@ public sealed class PoseAlignmentAuditor
         }
 
         return samples;
+    }
+
+    private static void ArchiveLegacySamples(string path)
+    {
+        if (!File.Exists(path))
+        {
+            return;
+        }
+
+        var header = File.ReadLines(path).FirstOrDefault() ?? string.Empty;
+        if (header.Contains("poseConventionVersion", StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        var folder = Path.GetDirectoryName(path) ?? string.Empty;
+        var timestamp = DateTime.UtcNow.ToString("yyyyMMddTHHmmssfff", CultureInfo.InvariantCulture);
+        var archivePath = Path.Combine(folder, $"pose_alignment_samples.legacy-v1-{timestamp}.csv");
+        File.Move(path, archivePath);
     }
 
     private static bool TryNumbers(IEnumerable<string> parts, out double[] values)
@@ -332,7 +359,7 @@ public sealed class PoseAlignmentAuditor
             return $"<tr><td>{H(sample.CapturedAtUtc.ToLocalTime().ToString("HH:mm:ss", CultureInfo.InvariantCulture))}</td><td>{sample.MediaPipeA:0.#}/{sample.MediaPipeB:0.#}/{sample.MediaPipeC:0.#}</td><td>{calibratedA:0.#}/{calibratedB:0.#}/{calibratedC:0.#}</td><td>{sample.ThreeDdfaA:0.#}/{sample.ThreeDdfaB:0.#}/{sample.ThreeDdfaC:0.#}</td><td>{Math.Abs(calibratedA - sample.ThreeDdfaA):0.#}/{Math.Abs(calibratedB - sample.ThreeDdfaB):0.#}/{Math.Abs(calibratedC - sample.ThreeDdfaC):0.#}</td></tr>";
         }));
         return $$$"""
-<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="refresh" content="5"><title>A/B/C Alignment Audit</title><style>:root{color-scheme:dark;--bg:#050b10;--panel:#0b141c;--line:#28435b;--text:#e7f6ff;--muted:#9db7c9;--good:#80e0a4;--warn:#ffd27a}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.45 Segoe UI,Arial,sans-serif}main{max-width:1300px;margin:auto;padding:18px}.panel{border:1px solid var(--line);background:var(--panel);padding:14px;margin:0 0 14px;border-radius:6px}.good{color:var(--good)}.warn{color:var(--warn)}.muted{color:var(--muted)}h1{margin:0 0 6px;font-size:24px}table{width:100%;border-collapse:collapse}td,th{border-bottom:1px solid #1c3042;padding:7px 5px;text-align:left;vertical-align:top}th{color:var(--muted)}code{color:#b9d7ef}</style></head><body><main><section class="panel"><h1>A/B/C Alignment Audit</h1><p class="{{{(summary.ReadyForComparison ? "good" : "warn")}}}"><strong>{{{H(summary.Status)}}}</strong></p><p>{{{H(summary.Guidance)}}}</p><p class="muted">{{{summary.SampleCount}}} exact-frame MediaPipe/3DDFA pairs. MediaPipe is transformed to 3DDFA with the measured equation shown below; raw samples remain in <code>{{{CsvFileName}}}</code>.</p></section><section class="panel"><table><tr><th>Axis</th><th>Pairs</th><th>Motion range MP / 3DDFA</th><th>Measured transform</th><th>Correlation</th><th>Error mean / p95</th><th>Decision</th></tr>{{{axisRows}}}</table></section><section class="panel"><h2>Recent Exact-Frame Pairs</h2><table><tr><th>Time</th><th>MediaPipe raw A/B/C</th><th>MediaPipe calibrated A/B/C</th><th>3DDFA A/B/C</th><th>Absolute error A/B/C</th></tr>{{{sampleRows}}}</table></section></main></body></html>
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="refresh" content="5"><title>A/B/C Alignment Audit</title><style>:root{color-scheme:dark;--bg:#050b10;--panel:#0b141c;--line:#28435b;--text:#e7f6ff;--muted:#9db7c9;--good:#80e0a4;--warn:#ffd27a}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.45 Segoe UI,Arial,sans-serif}main{max-width:1300px;margin:auto;padding:18px}.panel{border:1px solid var(--line);background:var(--panel);padding:14px;margin:0 0 14px;border-radius:6px}.good{color:var(--good)}.warn{color:var(--warn)}.muted{color:var(--muted)}h1{margin:0 0 6px;font-size:24px}table{width:100%;border-collapse:collapse}td,th{border-bottom:1px solid #1c3042;padding:7px 5px;text-align:left;vertical-align:top}th{color:var(--muted)}code{color:#b9d7ef}</style></head><body><main><section class="panel"><h1>A/B/C Alignment Audit</h1><p class="{{{(summary.ReadyForComparison ? "good" : "warn")}}}"><strong>{{{H(summary.Status)}}}</strong></p><p>{{{H(summary.Guidance)}}}</p><p class="muted">Pose convention v{{{summary.PoseConventionVersion}}} | {{{summary.SampleCount}}} exact-frame MediaPipe/3DDFA pairs. MediaPipe is transformed to 3DDFA with the measured equation shown below; raw samples remain in <code>{{{CsvFileName}}}</code>.</p></section><section class="panel"><table><tr><th>Axis</th><th>Pairs</th><th>Motion range MP / 3DDFA</th><th>Measured transform</th><th>Correlation</th><th>Error mean / p95</th><th>Decision</th></tr>{{{axisRows}}}</table></section><section class="panel"><h2>Recent Exact-Frame Pairs</h2><table><tr><th>Time</th><th>MediaPipe raw A/B/C</th><th>MediaPipe calibrated A/B/C</th><th>3DDFA A/B/C</th><th>Absolute error A/B/C</th></tr>{{{sampleRows}}}</table></section></main></body></html>
 """;
     }
 
@@ -364,6 +391,7 @@ public sealed record PoseAngles(double A, double B, double C)
 public sealed class PoseAlignmentSample
 {
     public DateTime CapturedAtUtc { get; init; }
+    public int PoseConventionVersion { get; init; } = PoseAlignmentAuditor.CurrentPoseConventionVersion;
     public double MediaPipeA { get; init; }
     public double MediaPipeB { get; init; }
     public double MediaPipeC { get; init; }
@@ -376,6 +404,7 @@ public sealed class PoseAlignmentSummary
 {
     public static PoseAlignmentSummary Waiting { get; } = new();
     public DateTime UpdatedAtUtc { get; init; } = DateTime.UtcNow;
+    public int PoseConventionVersion { get; init; } = PoseAlignmentAuditor.CurrentPoseConventionVersion;
     public int SampleCount { get; init; }
     public bool ReadyForComparison { get; init; }
     public string Status { get; init; } = "waiting for exact-frame A/B/C pairs";

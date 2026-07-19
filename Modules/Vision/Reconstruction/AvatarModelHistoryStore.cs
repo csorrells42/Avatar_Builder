@@ -35,10 +35,10 @@ public sealed class AvatarModelHistoryStore
     public AvatarModelHistoryReport RecordAndWrite(
         string folder,
         AvatarModelObservationSet observationSet,
-        AvatarModel currentModel)
+        AvatarModel currentModel,
+        AvatarModel? previousModel)
     {
         Directory.CreateDirectory(folder);
-        var previousModel = ReadModel(AvatarModelStore.GetJsonPath(folder));
         var previousEntry = ReadLatest(GetLatestJsonPath(folder));
         var entry = BuildEntry(observationSet, currentModel, previousModel, previousEntry);
 
@@ -301,7 +301,8 @@ public sealed class AvatarModelHistoryStore
         var highest = 0d;
         foreach (var observation in observations)
         {
-            if (observation.IdentityWeightPercent <= 0.001d || observation.Vertices.Count == 0)
+            if (observation.IdentityWeightPercent <= 0.001d
+                || (observation.CanonicalIdentityVertices.Count == 0 && observation.Vertices.Count == 0))
             {
                 continue;
             }
@@ -499,20 +500,6 @@ public sealed class AvatarModelHistoryStore
             .ToList();
         var contents = retained.Count == 0 ? "" : string.Join(Environment.NewLine, retained) + Environment.NewLine;
         AtomicTextFileWriter.WriteAllText(path, contents, Utf8WithoutBom);
-    }
-
-    private static AvatarModel? ReadModel(string path)
-    {
-        try
-        {
-            return File.Exists(path)
-                ? JsonSerializer.Deserialize<AvatarModel>(File.ReadAllText(path), JsonOptions)
-                : null;
-        }
-        catch
-        {
-            return null;
-        }
     }
 
     private static AvatarModelHistoryEntry? ReadLatest(string path)
