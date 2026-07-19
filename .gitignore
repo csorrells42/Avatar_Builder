@@ -6,6 +6,7 @@ obj/
 .venv/
 .nuget-scratch/
 .appdata/
+desktop-runtime/
 *.user
 *.suo
 *.log

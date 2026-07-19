@@ -11,6 +11,8 @@
     <Product>Avatar Builder</Product>
     <AssemblyTitle>Avatar Builder</AssemblyTitle>
     <Description>Standalone camera-based 3D avatar capture and reconstruction application.</Description>
+    <DesktopRuntimeDirectory>$(MSBuildProjectDirectory)\desktop-runtime</DesktopRuntimeDirectory>
+    <DesktopRuntimeManifest>$(DesktopRuntimeDirectory)\.build-manifest.txt</DesktopRuntimeManifest>
   </PropertyGroup>
 
   <ItemGroup>
@@ -51,5 +53,26 @@
     <PackageReference Include="Vortice.D3DCompiler" Version="3.8.3" />
     <PackageReference Include="Vortice.Direct3D12" Version="3.8.3" />
   </ItemGroup>
+
+  <Target Name="UpdateDesktopRuntime" AfterTargets="Build" Condition="'$(DesignTimeBuild)' != 'true'">
+    <ReadLinesFromFile File="$(DesktopRuntimeManifest)" Condition="Exists('$(DesktopRuntimeManifest)')">
+      <Output TaskParameter="Lines" ItemName="PreviousDesktopRuntimeFile" />
+    </ReadLinesFromFile>
+    <Delete Files="@(PreviousDesktopRuntimeFile)" Condition="'@(PreviousDesktopRuntimeFile)' != ''" />
+    <ItemGroup>
+      <CurrentDesktopRuntimeFile
+        Include="$(TargetDir)**\*"
+        Exclude="$(TargetDir)AvatarBuilderOutputFolder.txt;$(TargetDir)AvatarBuilder-startup.log;$(TargetDir)AvatarBuilderSessions\**\*;$(TargetDir)output\**\*" />
+    </ItemGroup>
+    <MakeDir Directories="$(DesktopRuntimeDirectory)" />
+    <Copy
+      SourceFiles="@(CurrentDesktopRuntimeFile)"
+      DestinationFiles="@(CurrentDesktopRuntimeFile->'$(DesktopRuntimeDirectory)\%(RecursiveDir)%(Filename)%(Extension)')" />
+    <WriteLinesToFile
+      File="$(DesktopRuntimeManifest)"
+      Lines="@(CurrentDesktopRuntimeFile->'$(DesktopRuntimeDirectory)\%(RecursiveDir)%(Filename)%(Extension)')"
+      Overwrite="true" />
+    <Message Importance="high" Text="Avatar Builder desktop runtime updated: $(DesktopRuntimeDirectory)" />
+  </Target>
 
 </Project>

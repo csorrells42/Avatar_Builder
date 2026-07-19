@@ -2,7 +2,7 @@
 setlocal
 
 set "ROOT=%~dp0"
-set "EXE=%ROOT%bin\Debug\net10.0-windows\AvatarBuilder.exe"
+set "EXE=%ROOT%desktop-runtime\AvatarBuilder.exe"
 
 if not exist "%EXE%" (
     pushd "%ROOT%" >nul
