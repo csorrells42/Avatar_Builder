@@ -13,6 +13,7 @@ Backend-neutral contracts and data shapes:
 - `FaceFeatureDetectionExtensions.cs`: conversion from region detections to landmark frames.
 - `FaceLandmarkFrame.cs`: face, eye, brow, nose, lip, jaw, dense mesh, blendshape, and transform evidence.
 - `FaceLandmarkTrackingResult.cs`: one backend result plus status and availability.
+- `FaceBoxSystem.cs`: selectable live face-box backend identity (`MediaPipe` or `3DDFA-V2`) used to isolate queued results during a backend switch.
 - `FaceLandmarkCropMapper.cs`: maps cropped inference coordinates back to the source frame.
 - `IFaceLandmarkTracker.cs`, `IStatefulFaceLandmarkTracker.cs`, `IFaceLandmarkCropRefiner.cs`: backend contracts.
 
@@ -47,19 +48,23 @@ Keep OpenCvSharp types inside this folder where practical.
 
 ## MediaPipe
 
-The fast dense landmark lane. The local Python sidecar returns a 478-point face mesh, blendshapes, and facial transformation matrices. C# maps those results into the shared eye, brow, nose, lip, jaw, cheek, forehead, contour, and quality models.
+The fast dense landmark lane. The local Python sidecar runs Face Landmarker in temporal video mode and returns a 478-point face mesh, blendshapes, facial transformation matrices, and decode/inference timings. C# applies a bounded analysis size and maps strong results directly into the shared eye, brow, nose, lip, jaw, cheek, forehead, contour, and quality models without invoking fallback trackers on the same good frame.
 
-MediaPipe owns live feature lock and measurements. It does not own the persistent avatar pose or identity mesh.
+MediaPipe is the default live feature-lock and measurement system. It does not own the persistent avatar pose or identity mesh.
 
 ## ONNX
 
-The 3DDFA_V2 dense reconstruction lane. The C# client communicates with the local Python `TDDFA_ONNX` sidecar and receives dense vertices, topology, sparse landmarks, A/B/C pose, face/ROI data, and shape/expression coefficients.
+The 3DDFA_V2 dense reconstruction lane. The C# client communicates with the local Python `TDDFA_ONNX` sidecar and receives observed dense vertices, expression-free canonical identity vertices, topology, sparse landmarks, A/B/C pose, face/ROI data, and shape/expression coefficients. When selected as the live Face Box System, its FaceBoxes detector and 68 sparse landmarks also populate the common tracking contracts.
 
-3DDFA runs asynchronously from the camera and fast landmark lanes.
+3DDFA runs asynchronously from the camera with explicit face-box-only, tracking, preview, and full modes. FaceBoxes acquisition runs on a bounded 640-pixel input; between periodic reacquisitions, sparse 3DDFA landmarks provide a temporal box. In MediaPipe mode its caller box bypasses FaceBoxes. Full dense reconstruction is reserved for accepted model observations.
+
+## Diagnostics
+
+`VisionPipelineDiagnostics.cs` is the common stage-timing contract. `VisionBenchmarkRecorder.cs` batches live samples to the selected output folder without writing on the UI thread. `PoseAlignmentAuditor.cs` compares MediaPipe and 3DDFA A/B/C from the exact same frozen frame as bounded diagnostic evidence. It does not gate dense learning because 3DDFA owns persistent avatar pose and depth.
 
 ## Pipeline
 
-`CompositeFaceLandmarkTracker.cs` owns backend ordering and fusion. Strong MediaPipe geometry is preserved; OpenCV can fill weak or unavailable eye/mouth regions through the same common contracts.
+`CompositeFaceLandmarkTracker.cs` owns MediaPipe-mode backend ordering and fusion. Strong MediaPipe geometry is preserved; OpenCV can fill weak or unavailable eye/mouth regions through the same common contracts. The File > Face Box System selector creates this pipeline only for MediaPipe mode and fully disposes it when 3DDFA-V2 is selected.
 
 ## Personalization
 
@@ -71,6 +76,6 @@ This folder does not own the camera, UI controls, or reconstruction worker.
 
 ## Reconstruction
 
-Owns 3DDFA work/result contracts, bounded observation persistence, pose-normalized model building, model history/regression audits, capture guidance, the Avatar System dashboard, and the 3DDFA Last 5 review page. MediaPipe remains a live tracking and measurement lane without a stored Last 5 cache.
+Owns 3DDFA work/result contracts, bounded observation persistence, canonical identity model building, model history/regression audits, capture guidance, the Avatar System dashboard, and the 3DDFA Last 5 review page. The selected face-box system remains a live tracking and measurement lane without a stored Last 5 cache.
 
 The base model and expression range remain separate. Never accept observations without an active login for the selected user.

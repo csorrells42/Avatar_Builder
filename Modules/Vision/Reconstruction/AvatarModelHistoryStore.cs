@@ -23,6 +23,7 @@ public sealed class AvatarModelHistoryStore
     private const double RegionMovementWarningPercent = 3d;
     private const double SingleSampleMovementWarningPercent = 1.5d;
     private const double ObservationOutlierWarningPercent = 10d;
+    private const double ShapeCoefficientMovementWarningPercent = 5d;
 
     private static readonly Encoding Utf8WithoutBom = new UTF8Encoding(false);
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
@@ -74,6 +75,16 @@ public sealed class AvatarModelHistoryStore
         return report;
     }
 
+    public AvatarModelHistoryReport ReadReport(string folder)
+    {
+        return new AvatarModelHistoryReport
+        {
+            CreatedAtUtc = DateTime.UtcNow,
+            Latest = ReadLatest(GetLatestJsonPath(folder)) ?? new AvatarModelHistoryEntry(),
+            RecentEntries = ReadRecent(GetRecentJsonPath(folder))
+        };
+    }
+
     public static string GetJsonLinesPath(string folder)
     {
         return Path.Combine(folder, JsonLinesFileName);
@@ -119,7 +130,7 @@ public sealed class AvatarModelHistoryStore
             : CalculateRegionMovement(current.Identity.MeanDenseVertices, previous.Identity.MeanDenseVertices);
         var shapeCoefficientDelta = previous is null
             ? 0d
-            : CalculateCoefficientRms(current.Identity.MeanShapeCoefficients, previous.Identity.MeanShapeCoefficients);
+            : CalculateCoefficientRelativeRmsPercent(current.Identity.MeanShapeCoefficients, previous.Identity.MeanShapeCoefficients);
         var expressionRange = MeanExpressionRange(current);
         var expressionRangeDelta = previous is null ? 0d : expressionRange - MeanExpressionRange(previous);
         var regionConfidence = CalculateRegionConfidenceDeltas(current, previous);
@@ -172,7 +183,7 @@ public sealed class AvatarModelHistoryStore
             ShapeStabilityDeltaPoints = Round(stabilityDelta),
             DenseVertexCount = current.Identity.DenseVertexCount,
             OverallVertexRmsFaceSpanPercent = Round(overallMovement),
-            ShapeCoefficientRmsDelta = Round(shapeCoefficientDelta),
+            ShapeCoefficientRelativeRmsPercent = Round(shapeCoefficientDelta),
             MeanExpressionRange = Round(expressionRange),
             MeanExpressionRangeDelta = Round(expressionRangeDelta),
             WarningBearingObservationCount = warningBearingCount,
@@ -222,7 +233,7 @@ public sealed class AvatarModelHistoryStore
         var mature = current.Identity.SampleCount >= MatureModelSampleCount;
         if (mature && overallMovement > ModelMovementWarningPercent)
         {
-            warnings.Add($"The pose-neutral mean face moved {overallMovement:0.###}% of face span in one rebuild.");
+            warnings.Add($"The canonical mean face moved {overallMovement:0.###}% of face span in one rebuild.");
         }
 
         foreach (var region in regionMovement.Where(static region => region.RmsFaceSpanPercent > RegionMovementWarningPercent))
@@ -240,9 +251,9 @@ public sealed class AvatarModelHistoryStore
             warnings.Add("The model geometry changed without a new stored observation; this indicates a nondeterministic rebuild or data mismatch.");
         }
 
-        if (shapeCoefficientDelta > 0.15d && newObservationCount <= 1)
+        if (shapeCoefficientDelta > ShapeCoefficientMovementWarningPercent && newObservationCount <= 1)
         {
-            warnings.Add($"Shape coefficients shifted {shapeCoefficientDelta:0.###} RMS units from one rebuild.");
+            warnings.Add($"Shape coefficients shifted {shapeCoefficientDelta:0.###}% relative RMS in one rebuild.");
         }
 
         if (outlierAudit.Count > 0)
@@ -295,7 +306,7 @@ public sealed class AvatarModelHistoryStore
                 continue;
             }
 
-            var normalized = AvatarModelBuilder.NormalizeIdentityVerticesForAudit(observation);
+            var normalized = AvatarModelBuilder.NormalizeIdentityVerticesForAudit(observation, meanVertices);
             var rms = CalculateVertexRmsPercent(normalized, meanVertices);
             highest = Math.Max(highest, rms);
             if (rms > ObservationOutlierWarningPercent)
@@ -429,7 +440,7 @@ public sealed class AvatarModelHistoryStore
         return dx * dx + dy * dy + dz * dz;
     }
 
-    private static double CalculateCoefficientRms(IReadOnlyList<double> current, IReadOnlyList<double> previous)
+    private static double CalculateCoefficientRelativeRmsPercent(IReadOnlyList<double> current, IReadOnlyList<double> previous)
     {
         var count = Math.Min(current.Count, previous.Count);
         if (count == 0)
@@ -437,14 +448,21 @@ public sealed class AvatarModelHistoryStore
             return 0d;
         }
 
-        var squared = 0d;
+        var deltaSquared = 0d;
+        var currentSquared = 0d;
+        var previousSquared = 0d;
         for (var index = 0; index < count; index++)
         {
             var delta = current[index] - previous[index];
-            squared += delta * delta;
+            deltaSquared += delta * delta;
+            currentSquared += current[index] * current[index];
+            previousSquared += previous[index] * previous[index];
         }
 
-        return Math.Sqrt(squared / count);
+        var scale = Math.Max(Math.Sqrt(currentSquared / count), Math.Sqrt(previousSquared / count));
+        return scale <= double.Epsilon
+            ? 0d
+            : Math.Sqrt(deltaSquared / count) / scale * 100d;
     }
 
     private static double MeanExpressionRange(AvatarModel model)
@@ -585,7 +603,7 @@ public sealed class AvatarModelHistoryStore
       <div class="metric"><div class="label">Pose coverage</div><div class="value">{{{latest.PoseCoveragePercent.ToString("0.#", CultureInfo.InvariantCulture)}}}%</div><div class="muted">{{{Signed(latest.PoseCoverageDeltaPoints)}}} pp</div></div>
       <div class="metric"><div class="label">Shape stability</div><div class="value">{{{latest.ShapeStabilityPercent.ToString("0.#", CultureInfo.InvariantCulture)}}}%</div><div class="muted">{{{Signed(latest.ShapeStabilityDeltaPoints)}}} pp</div></div>
       <div class="metric"><div class="label">Mean-face movement</div><div class="value">{{{latest.OverallVertexRmsFaceSpanPercent.ToString("0.###", CultureInfo.InvariantCulture)}}}%</div><div class="muted">of face span</div></div>
-      <div class="metric"><div class="label">Shape coefficient drift</div><div class="value">{{{latest.ShapeCoefficientRmsDelta.ToString("0.###", CultureInfo.InvariantCulture)}}}</div><div class="muted">RMS model units</div></div>
+      <div class="metric"><div class="label">Shape coefficient change</div><div class="value">{{{latest.ShapeCoefficientRelativeRmsPercent.ToString("0.###", CultureInfo.InvariantCulture)}}}%</div><div class="muted">relative RMS</div></div>
       <div class="metric"><div class="label">Outlier candidates</div><div class="value">{{{latest.GeometryOutlierCandidateCount}}}</div><div class="muted">highest {{{latest.HighestObservationRmsFaceSpanPercent.ToString("0.###", CultureInfo.InvariantCulture)}}}%</div></div>
       <div class="metric"><div class="label">Expression range</div><div class="value">{{{latest.MeanExpressionRange.ToString("0.###", CultureInfo.InvariantCulture)}}}</div><div class="muted">delta {{{Signed(latest.MeanExpressionRangeDelta)}}}</div></div>
     </div>
@@ -601,7 +619,7 @@ public sealed class AvatarModelHistoryStore
   </div>
   <section class="panel"><h2>Current Warnings</h2><ul>{{{warningItems}}}</ul><p class="muted">Downweighted identity observations: {{{latest.DownweightedIdentityObservationCount}}}. Excluded identity observations: {{{latest.ExcludedIdentityObservationCount}}}. Observations carrying backend warnings: {{{latest.WarningBearingObservationCount}}}.</p></section>
   <section class="panel scroll"><h2>Recent Rebuild Ledger</h2><table><tr><th>#</th><th>Time</th><th>Status</th><th>Samples</th><th>Confidence</th><th>Coverage</th><th>Mean movement</th><th>Warnings</th></tr>{{{rebuildRows}}}</table></section>
-  <section class="panel"><h2>How To Read This</h2><p>{{{H(report.MeasurementPolicy)}}}</p><p>{{{H(report.RetentionPolicy)}}}</p><p class="muted">Source: <code>{{{H(report.HistoryFileName)}}}</code>, generated from the accepted 3DDFA observation store and the derived pose-neutral avatar model. Increasing coverage and confidence are positive. A large one-rebuild geometry jump, falling confidence, or movement without a new observation is a regression warning. Early models are allowed to move while proportions are still settling.</p></section>
+  <section class="panel"><h2>How To Read This</h2><p>{{{H(report.MeasurementPolicy)}}}</p><p>{{{H(report.RetentionPolicy)}}}</p><p class="muted">Source: <code>{{{H(report.HistoryFileName)}}}</code>, generated from the accepted 3DDFA observation store and the derived canonical identity model. Increasing coverage and confidence are positive. A large one-rebuild geometry jump, falling confidence, or movement without a new observation is a regression warning. Early models are allowed to move while proportions are still settling.</p></section>
 </main>
 <script type="application/json" id="historyJson">{{{historyJson}}}</script>
 <script>

@@ -9,19 +9,23 @@ Coordinate rule: points and learned surface-profile samples carry X/Y/Z position
 Files:
 
 - `FaceReconstructionBackendIds.cs`: stable backend identifiers for fast tracking comparison and the 3DDFA_V2 ONNX reconstruction lane.
-- `FaceReconstructionLaneStatus.cs`: two-lane status DTO that explains what the fast MediaPipe/OpenCV tracking lane is doing, what the 3DDFA/ONNX avatar reconstruction lane is doing, whether dense reconstruction is available, and how much downstream avatar consumers should trust the current result.
+- `FaceReconstructionLaneStatus.cs`: two-lane status DTO that explains what the selected live face-box tracker is doing, what the 3DDFA/ONNX avatar reconstruction lane is doing, whether dense reconstruction is available, and how much downstream avatar consumers should trust the current result.
 - `AvatarCaptureGuidanceInput.cs`, `AvatarCaptureGuidanceState.cs`, `AvatarCaptureGuidanceAdvisor.cs`: backend-neutral capture guidance. It combines avatar-user login, camera/face-lock state, and capture quality into one plain-language status for the WPF panel. Start/stop behavior lives only on the main Avatar Capture button.
-- `AvatarModelObservationSet.cs`, `AvatarModelObservationStore.cs`: bounded per-user 3DDFA observation store. It merges new accepted full-resolution 3DDFA samples into `avatar_model_observations.json`, keeps only the newest capped observation set, and stores measurement-only vertices/coefficients instead of webcam video or raw frame images.
-- `AvatarModel.cs`, `AvatarModelBuilder.cs`, `AvatarModelStore.cs`: persistent avatar model path. The builder pose-normalizes accepted 3DDFA vertices, builds a weighted base identity mesh from shape/geometry evidence, tracks expression coefficients separately, scores pose/depth coverage, and writes `avatar_model.json` plus the interactive `avatar_model_progress.html` viewer.
+- `AvatarModelObservationSet.cs`, `AvatarModelObservationStore.cs`: bounded per-user 3DDFA observation store. It merges new accepted full-resolution samples into compact `avatar_model_observations.json.gz`, migrates legacy uncompressed JSON after a successful write, reports whether the set changed, and stores both observed review geometry and expression-free canonical identity geometry instead of webcam video or raw frame images.
+- `AvatarModel.cs`, `AvatarModelBuilder.cs`, `AvatarModelStore.cs`: persistent avatar model path. The builder averages canonical 3DDFA BFM identity vertices, uses rigid generalized Procrustes only for legacy camera-space observations, tracks expression coefficients separately, scores pose/depth coverage, and writes `avatar_model.json` plus the interactive `avatar_model_progress.html` viewer. The viewer includes every identity vertex and samples only topology edges.
+- `DenseMeshRigidAligner.cs`: reflection-safe Kabsch rigid alignment for legacy complete meshes. It may rotate and translate a scan but never deform it.
 - `ThreeDdfaReconstructionSnapshot.cs`, `MeshTopologyEdge.cs`: reusable full-resolution 3DDFA snapshot and mesh-topology contracts shared by review and persistent model storage.
 - `LastGoodThreeDdfaReport.cs`, `LastGoodThreeDdfaStore.cs`: write `last_5_3ddfa_reconstructions.json` and `last_5_3ddfa_reconstructions.html` as the dense 3DDFA Last 5 audit page. It carries full-resolution vertices/topology, A/B/C pose, confidence, trust status, and warnings.
 Rules:
 
 - Never learn without an explicit login for the person in front of the camera.
+- Accept full dense observations from the 3DDFA-owned pose/depth lane when login, capture, camera, face-lock, quality, and storage gates pass. Keep the exact-frame MediaPipe/3DDFA A/B/C audit advisory; it must never veto 3DDFA reconstruction.
+- Rebuild large model and Last 5 artifacts only when observations change; lightweight dashboards may refresh independently.
 - Keep raw continuous webcam video out of passive avatar collection.
 - Keep identity and expression separate: sleepy/jaw-droop/speech/blink frames can improve expression range, but expression-heavy frames are downweighted for the base identity mesh.
+- Treat canonical 3DDFA identity vertices as the learning source of truth. Preserve observed camera-space vertices for review, and never feed them through a homegrown inverse-pose transform.
 - Use explicit training images or deliberate training clips only when photoreal 3D reconstruction needs pixels.
 - Keep worker-specific dependencies out of the WPF app. A sidecar can be Python, ONNX Runtime, WSL, or Linux-only as long as the contract is JSON and the app can inspect the result.
-- Treat MediaPipe/OpenCV and 3DDFA/ONNX as different lanes. MediaPipe is the fast live feature/overlay tracker. 3DDFA is the slower avatar reconstruction lane and should be used for dense head/face depth, coefficients, and trust comparison.
+- Treat live face-box tracking and persistent avatar reconstruction as separate responsibilities. MediaPipe is the default fast live feature/overlay tracker. 3DDFA-V2 can own live FaceBoxes and sparse features for comparison, but 3DDFA remains the authority for dense head/face depth, coefficients, and avatar trust.
 
-The active Avatar System dashboard is a lightweight live report: user login, capture state, capture quality, fast MediaPipe/OpenCV cue status, 3DDFA_V2 ONNX reconstruction status, current face-frame geometry, model confidence/coverage, Avatar Model Progress link, and 3DDFA Last 5 link.
+The active Avatar System dashboard is a lightweight live report: user login, capture state, capture quality, selected face-box tracker status, 3DDFA_V2 ONNX reconstruction status, current face-frame geometry, model confidence/coverage, Avatar Model Progress link, and 3DDFA Last 5 link.

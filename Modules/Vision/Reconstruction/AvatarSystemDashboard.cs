@@ -30,7 +30,7 @@ public sealed class AvatarSystemDashboard
     public FaceReconstructionLaneStatus ReconstructionLane { get; set; } = FaceReconstructionLaneStatus.Waiting;
 
     public string FastTrackingSummary { get; set; } =
-        "MediaPipe/OpenCV eye, jaw, brow, mouth, and face tracking remains live for overlays and capture measurements.";
+        "The selected face-box system supplies live eye, jaw, brow, mouth, face, overlay, and capture measurements.";
 
     public string AvatarReconstructionSummary { get; set; } =
         "3DDFA/ONNX is the active avatar reconstruction lane for dense face geometry, pose, and depth.";

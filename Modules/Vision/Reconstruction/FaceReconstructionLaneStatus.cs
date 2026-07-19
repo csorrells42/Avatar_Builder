@@ -6,7 +6,7 @@ public sealed class FaceReconstructionLaneStatus
 
     public DateTime CreatedAtUtc { get; set; } = DateTime.UtcNow;
 
-    public string FastTrackingLaneName { get; set; } = "MediaPipe fast tracking lane";
+    public string FastTrackingLaneName { get; set; } = "Selected face-box tracking lane";
 
     public string FastTrackingPurpose { get; set; } =
         "Live face, eye, mouth, brow, overlay, and capture-measurement tracking.";
@@ -45,7 +45,7 @@ public sealed class FaceReconstructionLaneStatus
     public string TrustLevel { get; set; } = "measurement-only";
 
     public string TrustDecision { get; set; } =
-        "Avatar capture waits for validated 3DDFA_V2 ONNX dense reconstruction; MediaPipe/OpenCV remains the fast tracking lane.";
+        "Avatar capture waits for validated 3DDFA_V2 ONNX dense reconstruction while the selected live face-box tracker remains independent.";
 
     public string LearningImpact { get; set; } =
         "Does not block live feature tracking. Avatar fitting should trust dense depth/head-shape output only after the 3DDFA_V2 ONNX lane is ready.";

@@ -35,6 +35,8 @@ public sealed class ThreeDdfaReconstructionSnapshot
 
     public List<FaceMeshLandmarkPoint> Vertices { get; init; } = [];
 
+    public List<FaceMeshLandmarkPoint> CanonicalIdentityVertices { get; init; } = [];
+
     public List<MeshTopologyEdge> TopologyEdges { get; init; } = [];
 
     public List<FaceMeshLandmarkPoint> SparseLandmarks { get; init; } = [];

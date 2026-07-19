@@ -472,7 +472,7 @@ public sealed class FaceFrameGeometryEstimator
         var fillLabel = faceBounds is { } bounds
             ? $" | center X/Y/Z {bounds.CenterX * 100d:0.#}%, {bounds.CenterY * 100d:0.#}%, {apparentDistanceUnits?.ToString("0.##") ?? "--"} | fill {bounds.Width * 100d:0.#}% x {bounds.Height * 100d:0.#}%"
             : "";
-        return $"Face frame: {distanceLabel}{relativeLabel}{fillLabel} | MediaPipe A around X {pose.PitchDegrees:0.#} deg | B around Y {pose.YawDegrees:0.#} deg | C around Z {pose.RollDegrees:0.#} deg | frame q {confidence:0}% | Z q {zConfidence:0}%";
+        return $"Face frame: {distanceLabel}{relativeLabel}{fillLabel} | tracker A around X {pose.PitchDegrees:0.#} deg | B around Y {pose.YawDegrees:0.#} deg | C around Z {pose.RollDegrees:0.#} deg | frame q {confidence:0}% | Z q {zConfidence:0}%";
     }
 
     private static FaceBounds? EstimateFaceBounds(FaceLandmarkFrame frame)

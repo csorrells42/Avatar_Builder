@@ -4,7 +4,9 @@ namespace AvatarBuilder.Modules.Vision.Reconstruction;
 
 public sealed class AvatarModel
 {
-    public string SchemaVersion { get; init; } = "avatar-model-v1";
+    public const string CurrentSchemaVersion = "avatar-model-v2-canonical-3ddfa";
+
+    public string SchemaVersion { get; init; } = CurrentSchemaVersion;
 
     public DateTime CreatedAtUtc { get; init; } = DateTime.UtcNow;
 
@@ -33,7 +35,7 @@ public sealed class AvatarModel
 public sealed class AvatarIdentityModel
 {
     public string CoordinateSpace { get; init; } =
-        "Pose-neutral 3DDFA face space: vertices are centered, scaled, and inverse-rotated from each accepted observation before averaging.";
+        "Canonical 3DDFA identity space: expression-free BFM vertices are centered, scaled, rigidly aligned without deformation, and weighted across accepted observations. Legacy image-space scans use rigid Procrustes alignment only.";
 
     public int SampleCount { get; init; }
 

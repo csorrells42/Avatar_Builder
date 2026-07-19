@@ -1,5 +1,7 @@
 namespace AvatarBuilder.Modules.Vision.Common;
 
+using AvatarBuilder.Modules.Vision.Diagnostics;
+
 public sealed class FaceLandmarkTrackingResult
 {
     public static FaceLandmarkTrackingResult None { get; } = new();
@@ -13,4 +15,6 @@ public sealed class FaceLandmarkTrackingResult
     public FaceFeatureDetection FeatureDetection { get; init; } = FaceFeatureDetection.None;
 
     public FaceLandmarkFrame LandmarkFrame { get; init; } = FaceLandmarkFrame.None;
+
+    public VisionPipelineDiagnostics Diagnostics { get; init; } = VisionPipelineDiagnostics.None;
 }

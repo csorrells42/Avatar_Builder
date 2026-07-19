@@ -12,10 +12,7 @@ public sealed class LastGoodThreeDdfaStore
     public const string JsonFileName = "last_5_3ddfa_reconstructions.json";
     public const string HtmlFileName = "last_5_3ddfa_reconstructions.html";
 
-    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
-    {
-        WriteIndented = true
-    };
+    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
     public LastGoodThreeDdfaFiles Write(string folder, LastGoodThreeDdfaReport report)
     {
@@ -33,6 +30,11 @@ public sealed class LastGoodThreeDdfaStore
     public static string GetHtmlPath(string folder)
     {
         return Path.Combine(folder, HtmlFileName);
+    }
+
+    public static string GetJsonPath(string folder)
+    {
+        return Path.Combine(folder, JsonFileName);
     }
 
     private static LastGoodThreeDdfaReport PrepareReport(LastGoodThreeDdfaReport report)

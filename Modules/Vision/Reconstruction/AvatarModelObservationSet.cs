@@ -4,7 +4,9 @@ namespace AvatarBuilder.Modules.Vision.Reconstruction;
 
 public sealed class AvatarModelObservationSet
 {
-    public string SchemaVersion { get; init; } = "avatar-model-observations-v1";
+    public const string CurrentSchemaVersion = "avatar-model-observations-v2";
+
+    public string SchemaVersion { get; init; } = CurrentSchemaVersion;
 
     public DateTime UpdatedAtUtc { get; init; } = DateTime.UtcNow;
 
@@ -65,6 +67,10 @@ public sealed class AvatarModelObservation
     public string TrustDecision { get; init; } = "";
 
     public List<FaceMeshLandmarkPoint> Vertices { get; init; } = [];
+
+    public List<FaceMeshLandmarkPoint> CanonicalIdentityVertices { get; init; } = [];
+
+    public string IdentityGeometrySource { get; init; } = "legacy image-space 3DDFA vertices";
 
     public List<double> CameraMatrixCoefficients { get; init; } = [];
 

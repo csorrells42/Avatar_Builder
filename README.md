@@ -6,13 +6,13 @@ Avatar Builder was split from Episode Monitor after the shared camera and vision
 
 ## Runtime lanes
 
-Avatar Builder deliberately runs three asynchronous lanes:
+Avatar Builder deliberately runs independent camera, tracking, and reconstruction lanes:
 
 1. The webcam lane displays the newest camera frame as quickly as the selected capture mode and renderer allow.
-2. The MediaPipe/OpenCV lane consumes the newest available frame for fast face lock, eye, brow, nose, lip, mouth, and jaw measurements. It may skip stale frames when analysis is busy.
-3. The 3DDFA_V2 ONNX lane consumes frames only during an explicit logged-in capture session for dense vertices, A/B/C head pose, shape coefficients, expression coefficients, and persistent avatar observations.
+2. The selected **File > Face Box System** consumes the newest available analysis frame. MediaPipe is the default and runs its temporal video model; a strong dense result returns immediately without spending the same frame on fallback models. 3DDFA-V2 uses its own FaceBoxes detector plus 68 sparse landmarks for live face, eye, brow, lip, mouth, jaw, and pose measurements.
+3. The 3DDFA_V2 ONNX lane has explicit face-box-only, sparse tracking, sampled preview, and full dense modes. 3DDFA owns persistent avatar pose and depth. A logged-in, active capture session with a camera/face/quality lock requests a full 38,365-vertex reconstruction at most once every 10 seconds.
 
-The analysis lanes never own the camera frame rate. Slow inference drops stale analysis work instead of building a queue that freezes preview or the WPF UI.
+The analysis lanes never own the camera frame rate. Slow inference replaces stale analysis work with the newest frame instead of building a queue that freezes preview or the WPF UI. Switching face-box systems invalidates queued results and disposes the inactive tracker.
 
 ## Avatar capture
 
@@ -34,9 +34,9 @@ User-facing pose follows XYZABC:
 - B: rotation around Y.
 - C: rotation around Z.
 
-3DDFA_V2 is the authority for avatar pose and dense geometry. MediaPipe is the fast feature-tracking and measurement lane.
+3DDFA_V2 is the authority for persistent avatar pose and dense geometry. MediaPipe is the default live feature tracker; 3DDFA-V2 can be selected as the complete live face-box and sparse-feature tracker for measured performance comparison.
 
-The **View** menu owns preview presentation and tracking workload. **DX12 Preview Viewport** and **Show Live Wireframe** are independent checkmark settings. Hover over **Tracking Fidelity** to open the mutually exclusive 4K, HD, and Safe Preview choices.
+The **File** menu owns login, storage, and the hover-open **Face Box System** selector. The **View** menu owns preview presentation and tracking workload. **DX12 Preview Viewport** and **Show Live Wireframe** are independent checkmark settings; the live wireframe is MediaPipe-specific and is disabled while 3DDFA-V2 owns tracking. Hover over **Tracking Fidelity** to open the mutually exclusive 4K, HD, and Safe Preview choices.
 
 ## Stored data
 
@@ -44,8 +44,8 @@ The **View** menu owns preview presentation and tracking workload. **DX12 Previe
 
 All user-generated avatar data belongs under that selected folder. The app stores bounded, measurement-oriented data rather than continuous webcam video:
 
-- `avatar_model_observations.json`: accepted 3DDFA observations.
-- `avatar_model.json`: current pose-normalized avatar model.
+- `avatar_model_observations.json.gz`: bounded accepted 3DDFA observations in the current compact format. Each new full sample keeps the observed camera-space scan for review and a separate expression-free canonical 3DDFA identity mesh for learning. A legacy uncompressed JSON file is migrated after a successful compressed write.
+- `avatar_model.json`: current canonical 3DDFA identity model.
 - `avatar_model_history.jsonl`: compact improvement and regression history.
 - `avatar_model_progress.html`: interactive current-model viewer.
 - `avatar_model_regression.html`: model-change audit.
@@ -56,7 +56,11 @@ No passive continuous video, room imagery, medical-event database, event clips, 
 
 ## Model and review flow
 
-Accepted 3DDFA samples are bounded and rebuilt into the current avatar model every 30 seconds while capture is active. The builder pose-normalizes dense vertices, uses shape and geometry evidence for base identity, tracks expression ranges separately, and records confidence, coverage, stability, regional RMS movement, and outlier candidates. Review flags do not silently delete observations.
+Full 3DDFA samples are requested at most once every 10 seconds while capture is active. Accepted samples are bounded, and the current avatar model is considered for rebuild every 30 seconds. The large model and Last 5 files are rebuilt only when the observation set actually changes. New samples use 3DDFA's own expression-free canonical BFM geometry for the persistent identity; observed camera-space vertices remain available for Last 5 review. Legacy observations are aligned with rigid Procrustes rotation and translation only, never non-rigidly warped. The viewer embeds all 38,365 identity points while sampling topology edges to keep the page responsive. Expression ranges remain separate, and model history records confidence, coverage, scale-independent shape stability, regional RMS movement, and outlier candidates. Review flags do not silently delete observations.
+
+`tools\AuditAvatarModelData.py <profile-folder>` independently checks observation provenance, vertex counts, reproducibility, current normalization error, optimal rigid alignment error, coefficient variation, and model-history movement. Use it whenever the accumulated face looks distorted or unexpectedly sparse.
+
+**View > A/B/C Alignment Audit** opens a live five-second diagnostic report built from exact-frame MediaPipe and 3DDFA pose pairs. It shows raw and calibrated MediaPipe A/B/C, 3DDFA A/B/C, the measured scale/offset transform, correlation, motion range, mean error, p95 error, and a per-axis readiness decision. This comparison never blocks 3DDFA capture or learning; it exists to expose disagreement between the two systems before their outputs are combined downstream.
 
 **Open Avatar System** writes and opens the local dashboard. **Open 3DDFA Last 5** shows the latest dense reconstruction samples, while the live camera-relative MediaPipe wireframe reads directly from the current tracking frame without storing a second review cache. Report writing runs in the background from immutable snapshots.
 
@@ -64,7 +68,7 @@ Accepted 3DDFA samples are bounded and rebuilt into the current avatar model eve
 
 Runtime code lives under `Modules`:
 
-- `Modules\Webcam`: camera discovery, controls, capture, DX11 bridge, and DX12 viewport.
+- `Modules\Webcam`: camera discovery, controls, capture, DX11 device management, and the DX12 viewport.
 - `Modules\Vision\Common`: backend-neutral face and landmark contracts.
 - `Modules\Vision\Analysis`: reusable landmark measurements, temporal repair, face geometry, and lock stability.
 - `Modules\Vision\OpenCv`: YuNet, LBF, and aperture fallback implementations.
@@ -73,6 +77,7 @@ Runtime code lives under `Modules`:
 - `Modules\Vision\Pipeline`: backend composition and fusion.
 - `Modules\Vision\Personalization`: avatar profiles, user login session, and capture quality.
 - `Modules\Vision\Reconstruction`: observation stores, model building, audit history, dashboards, and review pages.
+- `Modules\Vision\Diagnostics`: common timing records, batched live benchmark CSV output, and exact-frame A/B/C alignment auditing.
 - `Modules\Infrastructure`: small shared runtime helpers.
 See `Modules\README.md` and each module README before changing a backend.
 
@@ -103,6 +108,12 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\SetupThreeDdfaOnnxSi
 ```
 
 The official 3DDFA_V2 repository and `mb1_120x120` checkpoint or converted ONNX weight belong under `dependencies\vision\3ddfa-onnx\3DDFA_V2` according to the bundled manifest.
+
+Live timing samples are batched off the UI thread into `Benchmarks\vision-pipeline-YYYYMMDD.csv` under the selected output folder. For a repeatable offline comparison across saved clips, run:
+
+```powershell
+.\.venv\Scripts\python.exe .\tools\BenchmarkVisionPipelines.py <video1> <video2> <video3> --sampling sequential --frames-per-video 24 --warmup-frames 3 --full-frames-per-video 1 --output <benchmark-folder>
+```
 
 ## Safety and identity
 

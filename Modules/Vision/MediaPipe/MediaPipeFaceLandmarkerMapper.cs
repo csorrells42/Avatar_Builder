@@ -139,7 +139,8 @@ internal static class MediaPipeFaceLandmarkerMapper
                 ? "MediaPipe dense landmark lock"
                 : response.Status,
             FeatureDetection = feature,
-            LandmarkFrame = frame
+            LandmarkFrame = frame,
+            Diagnostics = response.Diagnostics
         };
     }
 

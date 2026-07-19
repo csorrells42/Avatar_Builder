@@ -67,7 +67,7 @@ public sealed class AvatarSystemDashboardStore
         html.AppendLine(Metric("Model audit", dashboard.AvatarModelAuditStatus));
         html.AppendLine(Metric("Z apparent", pose.HasFace && pose.ApparentDistanceUnits is { } apparent ? $"{apparent:0.###} {pose.ApparentDistanceUnitName}" : "waiting"));
         html.AppendLine(Metric("Z source", string.IsNullOrWhiteSpace(pose.DistanceSource) ? "waiting" : pose.DistanceSource));
-        html.AppendLine(Metric("MediaPipe A/B/C", pose.HasFace ? $"{pose.ARotationAroundXDegrees:0.#} / {pose.BRotationAroundYDegrees:0.#} / {pose.CRotationAroundZDegrees:0.#} deg" : "waiting"));
+        html.AppendLine(Metric("Selected tracker A/B/C", pose.HasFace ? $"{pose.ARotationAroundXDegrees:0.#} / {pose.BRotationAroundYDegrees:0.#} / {pose.CRotationAroundZDegrees:0.#} deg" : "waiting"));
         html.AppendLine("</div>");
         html.AppendLine("</section>");
 

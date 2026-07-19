@@ -10,7 +10,7 @@ Prefer backend-neutral DTOs and latest-frame asynchronous workers. Reusable modu
 
 ## App shell
 
-`MainWindow.xaml` defines the visible workflow. `MainWindow.xaml.cs` coordinates camera state, fast tracking, avatar-user login, 3DDFA capture, immutable report snapshots, and UI status. `AvatarDataFolderDialog.xaml` owns the File-menu storage dialog and pending folder selection. New backend algorithms do not belong in the app shell.
+`MainWindow.xaml` defines the visible workflow. `MainWindow.xaml.cs` coordinates camera state, selectable face-box backend lifetime, avatar-user login, 3DDFA capture, immutable report snapshots, and UI status. `AvatarDataFolderDialog.xaml` owns the File-menu storage dialog and pending folder selection. New backend algorithms do not belong in the app shell.
 
 ## Webcam
 
@@ -36,10 +36,11 @@ Owns face localization, landmarks, feature measurements, capture quality, recons
 - `Analysis`: contour measurements, temporal repair, camera-space face geometry, and face-lock stability.
 - `OpenCv`: YuNet, LBF, and aperture fallback implementations.
 - `MediaPipe`: Face Landmarker model discovery, Python sidecar, and dense-result mapping.
-- `Onnx`: 3DDFA_V2 model discovery, Python sidecar client, and dense reconstruction protocol.
+- `Onnx`: 3DDFA_V2 model discovery, Python sidecar client, dense reconstruction protocol, and FaceBoxes/68-point common-tracking mapper.
 - `Pipeline`: tracker ordering and fusion rules.
 - `Personalization`: profile registry, explicit user login session, and avatar capture-quality scoring.
 - `Reconstruction`: persistent 3DDFA observations, model builder, regression history, dashboard, and dense reconstruction review page.
+- `Diagnostics`: backend-neutral stage timings, batched benchmark CSV output, and exact-frame MediaPipe/3DDFA A/B/C agreement auditing.
 
 ## Infrastructure
 

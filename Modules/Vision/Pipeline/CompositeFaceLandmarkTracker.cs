@@ -75,6 +75,21 @@ public sealed class CompositeFaceLandmarkTracker : IStatefulFaceLandmarkTracker
             if (result.HasFace)
             {
                 statuses.Add($"{result.BackendName}: {result.BackendStatus}");
+                if (HasMediaPipeDenseLock(result) && HasUsableFaceCueGeometry(result))
+                {
+                    _lastBackendStatus = string.Join(" | ", statuses);
+                    _lastFusedFace = GetFaceBounds(result) ?? _lastFusedFace;
+                    _lastFusedFaceCapturedAtUtc = capturedAtUtc;
+                    return new FaceLandmarkTrackingResult
+                    {
+                        BackendName = result.BackendName,
+                        BackendStatus = _lastBackendStatus,
+                        FeatureDetection = result.FeatureDetection,
+                        LandmarkFrame = result.LandmarkFrame,
+                        Diagnostics = result.Diagnostics
+                    };
+                }
+
                 fused = fused is null ? result : FuseResults(fused, result, capturedAtUtc, _lastFusedFace);
                 continue;
             }
@@ -96,7 +111,8 @@ public sealed class CompositeFaceLandmarkTracker : IStatefulFaceLandmarkTracker
                 BackendName = fused.BackendName,
                 BackendStatus = _lastBackendStatus,
                 FeatureDetection = fused.FeatureDetection,
-                LandmarkFrame = fused.LandmarkFrame
+                LandmarkFrame = fused.LandmarkFrame,
+                Diagnostics = fused.Diagnostics
             };
         }
 
@@ -111,7 +127,8 @@ public sealed class CompositeFaceLandmarkTracker : IStatefulFaceLandmarkTracker
                 BackendName = recovered.BackendName,
                 BackendStatus = _lastBackendStatus,
                 FeatureDetection = recovered.FeatureDetection,
-                LandmarkFrame = recovered.LandmarkFrame
+                LandmarkFrame = recovered.LandmarkFrame,
+                Diagnostics = recovered.Diagnostics
             };
         }
 

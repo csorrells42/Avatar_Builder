@@ -43,16 +43,6 @@ internal sealed class Direct3D11DeviceManager : ITextureNativeDeviceManager
 
     public IntPtr DuplicateNativeD3D12Device() => IntPtr.Zero;
 
-    public Direct3D11SharedTextureBridge CreateSharedTextureBridge(int width, int height)
-    {
-        if (_device == IntPtr.Zero || _context == IntPtr.Zero)
-        {
-            throw new ObjectDisposedException(nameof(Direct3D11DeviceManager));
-        }
-
-        return new Direct3D11SharedTextureBridge(_device, _context, width, height);
-    }
-
     public static Direct3D11DeviceManager Create()
     {
         var featureLevels = new[] { D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0 };

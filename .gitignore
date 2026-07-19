@@ -15,3 +15,6 @@ output/
 **/output/
 tmp/
 dependencies/vision/3ddfa-onnx/3DDFA_V2/
+**/__pycache__/
+*.pyc
+benchmark-results/

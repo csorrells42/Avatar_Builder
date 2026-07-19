@@ -23,9 +23,7 @@ public sealed class Dx12Camera : IDisposable
     private readonly string _fallbackDescription;
     private TextureNativeCameraStream? _stream;
     private Direct3D12PreviewHost? _previewHost;
-    private TextureNativeFrameLease? _pendingPreviewFrame;
     private WriteableBitmap? _fallbackPreviewBitmap;
-    private int _previewRenderQueued;
     private long _fallbackFrameNumber;
     private bool _textureFrameLeaseActive;
     private bool _denoiseEnabled;
@@ -621,6 +619,11 @@ public sealed class Dx12Camera : IDisposable
         _lastPreviewRenderFrameUtc = DateTime.MinValue;
     }
 
+    public void UpdateTrackingOverlay(PreviewTrackingOverlay? overlay)
+    {
+        _previewHost?.UpdateTrackingOverlay(overlay);
+    }
+
     public void UpdateRenderSettings(
         bool denoiseEnabled,
         double denoiseStrength,
@@ -964,45 +967,7 @@ public sealed class Dx12Camera : IDisposable
             return;
         }
 
-        var pendingFrame = frame.Duplicate();
-        if (pendingFrame is null)
-        {
-            return;
-        }
-
-        Interlocked.Exchange(ref _pendingPreviewFrame, pendingFrame)?.Dispose();
-        if (Interlocked.Exchange(ref _previewRenderQueued, 1) != 0)
-        {
-            return;
-        }
-
-        _dispatcher.BeginInvoke((Action)ProcessPendingPreviewFrame, DispatcherPriority.Background);
-    }
-
-    private void ProcessPendingPreviewFrame()
-    {
-        var frame = Interlocked.Exchange(ref _pendingPreviewFrame, null);
-        if (frame is not null)
-        {
-            try
-            {
-                if (!_disposed)
-                {
-                    _previewHost?.RenderTextureFrame(frame, _denoiseEnabled, _denoiseStrength, _colorSettings);
-                }
-            }
-            finally
-            {
-                frame.Dispose();
-            }
-        }
-
-        Volatile.Write(ref _previewRenderQueued, 0);
-        if (Volatile.Read(ref _pendingPreviewFrame) is not null
-            && Interlocked.Exchange(ref _previewRenderQueued, 1) == 0)
-        {
-            _dispatcher.BeginInvoke((Action)ProcessPendingPreviewFrame, DispatcherPriority.Background);
-        }
+        _previewHost?.RenderTextureFrame(frame, _denoiseEnabled, _denoiseStrength, _colorSettings);
     }
 
     private bool ShouldAcceptPreviewRenderFrame()
@@ -1096,9 +1061,7 @@ public sealed class Dx12Camera : IDisposable
             }
         }
 
-        Interlocked.Exchange(ref _pendingPreviewFrame, null)?.Dispose();
         _textureFrameLeaseActive = false;
-        Volatile.Write(ref _previewRenderQueued, 0);
 
         if (disposing && _dispatcher.CheckAccess())
         {

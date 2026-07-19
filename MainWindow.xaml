@@ -246,6 +246,19 @@
             <MenuItem Header="_File">
                 <MenuItem x:Name="LoginLogoutMenuItem" Header="_Login..." Click="LoginLogoutClicked" />
                 <MenuItem Header="_Choose Data Folder..." Click="OpenDataFolderClicked" />
+                <MenuItem Header="_Face Box System">
+                    <MenuItem x:Name="MediaPipeFaceBoxSystemMenuItem"
+                              Header="_MediaPipe"
+                              IsCheckable="True"
+                              IsChecked="True"
+                              Tag="MediaPipe"
+                              Click="FaceBoxSystemMenuItemClicked" />
+                    <MenuItem x:Name="ThreeDdfaFaceBoxSystemMenuItem"
+                              Header="_3DDFA-V2"
+                              IsCheckable="True"
+                              Tag="ThreeDdfaV2"
+                              Click="FaceBoxSystemMenuItemClicked" />
+                </MenuItem>
                 <MenuItem Header="E_xit" Click="CloseClicked" />
             </MenuItem>
             <MenuItem Header="_View">
@@ -259,6 +272,9 @@
                           IsCheckable="True"
                           ToolTip="Hides the webcam image and shows the current camera-relative MediaPipe face mesh while analysis keeps running."
                           Click="LiveWireframeMenuItemClicked" />
+                <MenuItem Header="A/B/C _Alignment Audit"
+                          ToolTip="Opens the exact-frame MediaPipe versus 3DDFA pose agreement report."
+                          Click="OpenPoseAlignmentAuditClicked" />
                 <MenuItem Header="_Tracking Fidelity">
                     <MenuItem x:Name="TrackingFidelity4KMenuItem"
                               Header="_4K - 3840 camera / 1920 analysis / 15 fps"
@@ -371,7 +387,7 @@
 
                                 <Separator Margin="0,18,0,14" Background="#243545" />
 
-                                <Expander Header="Face Tracking Field" IsExpanded="False">
+                                <Expander x:Name="FaceTrackingFieldExpander" Header="Face Box Options (MediaPipe)" IsExpanded="False">
                                     <StackPanel Margin="0,10,0,0">
                                         <Grid>
                                             <Grid.ColumnDefinitions>

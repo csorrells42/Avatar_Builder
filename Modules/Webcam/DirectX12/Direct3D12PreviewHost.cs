@@ -25,6 +25,7 @@ public sealed class Direct3D12PreviewHost : WebcamDirectX12ViewportHost, ICamera
     private Direct3D12SwapChainRenderer? _renderer;
     private Thread? _renderThread;
     private QueuedCameraFrame? _pendingCameraFrame;
+    private QueuedTextureFrame? _pendingTextureFrame;
     private string _previewPathDescription = "DX12 preview path pending";
     private readonly object _diagnosticsLock = new();
     private Direct3D12PreviewDiagnostics _diagnostics = Direct3D12PreviewDiagnostics.Empty;
@@ -35,6 +36,7 @@ public sealed class Direct3D12PreviewHost : WebcamDirectX12ViewportHost, ICamera
     private long _droppedFrames;
     private double _renderFramesPerSecond;
     private string _recordingMode = "not recording";
+    private PreviewTrackingOverlay _trackingOverlay = PreviewTrackingOverlay.Empty;
     private DateTime _lastAcceptedRenderFrameUtc = DateTime.MinValue;
     private double _maxRenderFramesPerSecond;
     private bool _renderWorkerStopping;
@@ -163,66 +165,103 @@ public sealed class Direct3D12PreviewHost : WebcamDirectX12ViewportHost, ICamera
         VideoFrameColorSettings colorSettings = default)
     {
         RecordSubmittedFrame();
-        if (_renderer is null)
+        if (_disposed || !ShouldAcceptRenderFrame())
         {
             RecordDroppedFrame();
             return;
         }
 
+        var frameLease = frame.Duplicate();
+        if (frameLease is null)
+        {
+            RecordDroppedFrame();
+            return;
+        }
+
+        lock (_renderWorkerLock)
+        {
+            if (_renderWorkerStopping)
+            {
+                frameLease.Dispose();
+                RecordDroppedFrame();
+                return;
+            }
+
+            if (_pendingTextureFrame is not null)
+            {
+                _pendingTextureFrame.Dispose();
+                RecordDroppedFrame();
+            }
+
+            _pendingTextureFrame = new QueuedTextureFrame(
+                frameLease,
+                colorSettings,
+                denoiseEnabled,
+                denoiseStrength);
+        }
+
+        _renderFrameReady.Set();
+    }
+
+    public void UpdateTrackingOverlay(PreviewTrackingOverlay? overlay)
+    {
+        Volatile.Write(ref _trackingOverlay, overlay ?? PreviewTrackingOverlay.Empty);
+    }
+
+    private void RenderTextureFrameCore(QueuedTextureFrame queuedFrame)
+    {
+        var frame = queuedFrame.Frame;
         try
         {
             lock (_rendererLock)
             {
+                if (_renderer is null)
+                {
+                    RecordDroppedFrame();
+                    return;
+                }
+
                 string? directTextureFailureReason = null;
                 if (frame.IsValid
                     && string.Equals(frame.DeviceMode, "D3D12", StringComparison.OrdinalIgnoreCase)
-                    && _renderer.RenderNativeTextureFrame(frame, colorSettings, denoiseEnabled, denoiseStrength, out directTextureFailureReason))
+                    && _renderer.RenderNativeTextureFrame(
+                        frame,
+                        queuedFrame.ColorSettings,
+                        queuedFrame.DenoiseEnabled,
+                        queuedFrame.DenoiseStrength,
+                        Volatile.Read(ref _trackingOverlay),
+                        out directTextureFailureReason))
                 {
                     ReportPreviewPath("direct DX12 texture");
-                    RecordRenderedFrame("direct DX12 texture", frame.MediaSubtype, frame.Width, frame.Height, frame.FramesPerSecond, denoiseEnabled, denoiseStrength, colorSettings, RecordingMode, null, frame.FrameNumber);
-                    return;
-                }
-
-                string? sharedBridgeFailureReason = null;
-                if (frame.D3D12SharedTextureHandle != IntPtr.Zero
-                    && _renderer.RenderSharedD3D11BridgeFrame(frame, colorSettings, denoiseEnabled, denoiseStrength, out sharedBridgeFailureReason))
-                {
-                    ReportPreviewPath("DX12 D3D11 bridge texture preview");
-                    RecordRenderedFrame("DX12 D3D11 bridge texture preview", frame.MediaSubtype, frame.Width, frame.Height, frame.FramesPerSecond, denoiseEnabled, denoiseStrength, colorSettings, RecordingMode, directTextureFailureReason, frame.FrameNumber);
-                    return;
-                }
-                else if (frame.D3D12SharedTextureHandle == IntPtr.Zero
-                    && !string.Equals(frame.DeviceMode, "D3D12", StringComparison.OrdinalIgnoreCase))
-                {
-                    sharedBridgeFailureReason = "D3D11 bridge shared texture handle missing";
-                }
-
-                var textureFailureReason = CombineTextureFailureReasons(directTextureFailureReason, sharedBridgeFailureReason);
-                if (TryRenderNv12UploadFallback(_renderer, frame, textureFailureReason, colorSettings, denoiseEnabled, denoiseStrength))
-                {
-                    return;
-                }
-
-                if (frame.BgraPreviewBytes is not null && frame.BgraPreviewStride > 0)
-                {
-                    _renderer.RenderBgraFrame(
-                        frame.BgraPreviewBytes,
+                    RecordRenderedFrame(
+                        "direct DX12 texture",
+                        frame.MediaSubtype,
                         frame.Width,
                         frame.Height,
-                        frame.BgraPreviewStride,
-                        frame.FrameNumber,
-                        colorSettings,
-                        denoiseEnabled: denoiseEnabled,
-                        denoiseStrength: denoiseStrength);
-                    var path = FormatUploadFallbackPath("DX12 BGRA upload fallback", textureFailureReason);
-                    ReportPreviewPath(path);
-                    RecordRenderedFrame(path, "BGRA upload fallback", frame.Width, frame.Height, frame.FramesPerSecond, denoiseEnabled, denoiseStrength, colorSettings, RecordingMode, textureFailureReason, frame.FrameNumber);
+                        frame.FramesPerSecond,
+                        queuedFrame.DenoiseEnabled,
+                        queuedFrame.DenoiseStrength,
+                        queuedFrame.ColorSettings,
+                        RecordingMode,
+                        null,
+                        frame.FrameNumber);
+                    return;
+                }
+
+                if (TryRenderNv12TextureUpload(
+                    _renderer,
+                    frame,
+                    directTextureFailureReason,
+                    queuedFrame.ColorSettings,
+                    queuedFrame.DenoiseEnabled,
+                    queuedFrame.DenoiseStrength,
+                    Volatile.Read(ref _trackingOverlay)))
+                {
                     return;
                 }
 
                 _renderer.RenderProofFrame(frame.FrameNumber);
-                var proofPath = FormatUploadFallbackPath("DX12 proof-frame fallback", textureFailureReason);
-                ReportPreviewPath(proofPath);
+                ReportPreviewPath(FormatUploadFallbackPath("DX12 proof-frame fallback", directTextureFailureReason));
                 RecordDroppedFrame();
             }
         }
@@ -254,6 +293,7 @@ public sealed class Direct3D12PreviewHost : WebcamDirectX12ViewportHost, ICamera
 
                 while (true)
                 {
+                    QueuedTextureFrame? textureFrame;
                     QueuedCameraFrame? frame;
                     lock (_renderWorkerLock)
                     {
@@ -262,8 +302,23 @@ public sealed class Direct3D12PreviewHost : WebcamDirectX12ViewportHost, ICamera
                             return;
                         }
 
-                        frame = _pendingCameraFrame;
-                        _pendingCameraFrame = null;
+                        textureFrame = _pendingTextureFrame;
+                        _pendingTextureFrame = null;
+                        frame = textureFrame is null ? _pendingCameraFrame : null;
+                        if (textureFrame is null)
+                        {
+                            _pendingCameraFrame = null;
+                        }
+                    }
+
+                    if (textureFrame is not null)
+                    {
+                        using (textureFrame)
+                        {
+                            RenderTextureFrameCore(textureFrame);
+                        }
+
+                        continue;
                     }
 
                     if (frame is null)
@@ -290,7 +345,8 @@ public sealed class Direct3D12PreviewHost : WebcamDirectX12ViewportHost, ICamera
                                     frame.FrameNumber,
                                     frame.ColorSettings,
                                     frame.DenoiseEnabled,
-                                    frame.DenoiseStrength))
+                                    frame.DenoiseStrength,
+                                    Volatile.Read(ref _trackingOverlay)))
                                 {
                                     ReportPreviewPath("DX12 NV12 upload preview");
                                     RecordRenderedFrame(
@@ -364,6 +420,8 @@ public sealed class Direct3D12PreviewHost : WebcamDirectX12ViewportHost, ICamera
         {
             _renderWorkerStopping = true;
             _pendingCameraFrame = null;
+            _pendingTextureFrame?.Dispose();
+            _pendingTextureFrame = null;
         }
 
         _renderFrameReady.Set();
@@ -385,6 +443,18 @@ public sealed class Direct3D12PreviewHost : WebcamDirectX12ViewportHost, ICamera
         bool DenoiseEnabled,
         double DenoiseStrength,
         long FrameNumber);
+
+    private sealed record QueuedTextureFrame(
+        TextureNativeFrameLease Frame,
+        VideoFrameColorSettings ColorSettings,
+        bool DenoiseEnabled,
+        double DenoiseStrength) : IDisposable
+    {
+        public void Dispose()
+        {
+            Frame.Dispose();
+        }
+    }
 
     private void RecordSubmittedFrame()
     {
@@ -485,30 +555,14 @@ public sealed class Direct3D12PreviewHost : WebcamDirectX12ViewportHost, ICamera
         return $"{path}; texture unavailable: {reason}";
     }
 
-    private static string? CombineTextureFailureReasons(string? directTextureFailureReason, string? sharedBridgeFailureReason)
-    {
-        var direct = string.IsNullOrWhiteSpace(directTextureFailureReason)
-            ? null
-            : $"direct: {directTextureFailureReason.Trim()}";
-        var bridge = string.IsNullOrWhiteSpace(sharedBridgeFailureReason)
-            ? null
-            : $"bridge: {sharedBridgeFailureReason.Trim()}";
-        return (direct, bridge) switch
-        {
-            (not null, not null) => $"{direct}; {bridge}",
-            (not null, null) => direct,
-            (null, not null) => bridge,
-            _ => null
-        };
-    }
-
-    private bool TryRenderNv12UploadFallback(
+    private bool TryRenderNv12TextureUpload(
         Direct3D12SwapChainRenderer renderer,
         TextureNativeFrameLease frame,
         string? textureFailureReason,
         VideoFrameColorSettings colorSettings,
         bool denoiseEnabled,
-        double denoiseStrength)
+        double denoiseStrength,
+        PreviewTrackingOverlay trackingOverlay)
     {
         if (frame.Nv12PreviewBytes is not { Length: > 0 } nv12Bytes || frame.Nv12PreviewStride <= 0)
         {
@@ -523,16 +577,17 @@ public sealed class Direct3D12PreviewHost : WebcamDirectX12ViewportHost, ICamera
             frame.FrameNumber,
             colorSettings,
             denoiseEnabled,
-            denoiseStrength))
+            denoiseStrength,
+            trackingOverlay))
         {
             return false;
         }
 
-        var path = FormatUploadFallbackPath("DX12 NV12 upload fallback", textureFailureReason);
+        var path = FormatUploadFallbackPath("DX12 NV12 texture upload", textureFailureReason);
         ReportPreviewPath(path);
         RecordRenderedFrame(
             path,
-            "NV12 upload fallback",
+            "NV12 texture upload",
             frame.Width,
             frame.Height,
             frame.FramesPerSecond,
@@ -653,6 +708,7 @@ public sealed class Direct3D12PreviewHost : WebcamDirectX12ViewportHost, ICamera
 
     private sealed class Direct3D12SwapChainRenderer : IDisposable
     {
+        private readonly RawRect[] _overlayBorders = new RawRect[4];
         private const int FrameCount = 3;
         private const int D3D12DefaultShader4ComponentMappingValue = 5768;
         private const int BgraColorSettingsDescriptorStart = 3;
@@ -697,8 +753,6 @@ public sealed class Direct3D12PreviewHost : WebcamDirectX12ViewportHost, ICamera
         private string? _nv12PreviewFailureReason;
         private bool _nativeTexturePreviewUnavailable;
         private string? _nativeTexturePreviewFailureReason;
-        private bool _sharedD3D11BridgePreviewUnavailable;
-        private string? _sharedD3D11BridgePreviewFailureReason;
         private readonly bool _usesSharedCaptureDevice;
 
         public Direct3D12SwapChainRenderer(IntPtr hwnd, int width, int height, IntPtr nativeD3D12Device = default)
@@ -853,7 +907,8 @@ public sealed class Direct3D12PreviewHost : WebcamDirectX12ViewportHost, ICamera
             long frameNumber,
             VideoFrameColorSettings colorSettings,
             bool denoiseEnabled,
-            double denoiseStrength)
+            double denoiseStrength,
+            PreviewTrackingOverlay trackingOverlay)
         {
             var uvHeight = (height + 1) / 2;
             if (_disposed || stride < width || nv12Bytes.Length < stride * height + stride * uvHeight)
@@ -869,7 +924,15 @@ public sealed class Direct3D12PreviewHost : WebcamDirectX12ViewportHost, ICamera
                 Resize(width, height);
             }
 
-            var rendered = TryRenderNv12FrameWithShader(nv12Bytes, width, height, stride, colorSettings, denoiseEnabled, denoiseStrength);
+            var rendered = TryRenderNv12FrameWithShader(
+                nv12Bytes,
+                width,
+                height,
+                stride,
+                colorSettings,
+                denoiseEnabled,
+                denoiseStrength,
+                trackingOverlay);
             if (rendered)
             {
                 _nv12PreviewFailureReason = null;
@@ -883,6 +946,7 @@ public sealed class Direct3D12PreviewHost : WebcamDirectX12ViewportHost, ICamera
             VideoFrameColorSettings colorSettings,
             bool denoiseEnabled,
             double denoiseStrength,
+            PreviewTrackingOverlay trackingOverlay,
             out string? failureReason)
         {
             failureReason = null;
@@ -931,7 +995,14 @@ public sealed class Direct3D12PreviewHost : WebcamDirectX12ViewportHost, ICamera
             {
                 Marshal.AddRef(frame.Resource);
                 using var nativeResource = new ID3D12Resource(frame.Resource);
-                RenderNativeNv12Resource(nativeResource, frame.Width, frame.Height, colorSettings, denoiseEnabled, denoiseStrength);
+                RenderNativeNv12Resource(
+                    nativeResource,
+                    frame.Width,
+                    frame.Height,
+                    colorSettings,
+                    denoiseEnabled,
+                    denoiseStrength,
+                    trackingOverlay);
                 _nativeTexturePreviewFailureReason = null;
                 return true;
             }
@@ -944,73 +1015,14 @@ public sealed class Direct3D12PreviewHost : WebcamDirectX12ViewportHost, ICamera
             }
         }
 
-        public bool RenderSharedD3D11BridgeFrame(
-            TextureNativeFrameLease frame,
-            VideoFrameColorSettings colorSettings,
-            bool denoiseEnabled,
-            double denoiseStrength,
-            out string? failureReason)
-        {
-            failureReason = null;
-            if (_disposed)
-            {
-                failureReason = "renderer disposed";
-                return false;
-            }
-
-            if (_sharedD3D11BridgePreviewUnavailable)
-            {
-                failureReason = _sharedD3D11BridgePreviewFailureReason ?? "D3D11 bridge texture rendering disabled after an earlier failure";
-                return false;
-            }
-
-            if (_nv12PreviewRootSignature is null || _nv12PreviewPipelineState is null)
-            {
-                failureReason = "NV12 shader pipeline unavailable";
-                return false;
-            }
-
-            if (frame.D3D12SharedTextureHandle == IntPtr.Zero)
-            {
-                failureReason = "D3D11 bridge shared texture handle is missing";
-                return false;
-            }
-
-            if (!frame.MediaSubtype.Contains("NV12", StringComparison.OrdinalIgnoreCase))
-            {
-                failureReason = $"media subtype {frame.MediaSubtype} is not NV12";
-                return false;
-            }
-
-            if (frame.Width != _width || frame.Height != _height)
-            {
-                Resize(frame.Width, frame.Height);
-            }
-
-            try
-            {
-                using var sharedResource = _device.OpenSharedHandle<ID3D12Resource>(frame.D3D12SharedTextureHandle);
-                RenderNativeNv12Resource(sharedResource, frame.Width, frame.Height, colorSettings, denoiseEnabled, denoiseStrength);
-                WaitForGpu();
-                _sharedD3D11BridgePreviewFailureReason = null;
-                return true;
-            }
-            catch (Exception ex)
-            {
-                _sharedD3D11BridgePreviewUnavailable = true;
-                _sharedD3D11BridgePreviewFailureReason = ex.Message;
-                failureReason = ex.Message;
-                return false;
-            }
-        }
-
         private void RenderNativeNv12Resource(
             ID3D12Resource cameraResource,
             int width,
             int height,
             VideoFrameColorSettings colorSettings,
             bool denoiseEnabled,
-            double denoiseStrength)
+            double denoiseStrength,
+            PreviewTrackingOverlay trackingOverlay)
         {
             var ySrvDescription = new ShaderResourceViewDescription
             {
@@ -1063,6 +1075,7 @@ public sealed class Direct3D12PreviewHost : WebcamDirectX12ViewportHost, ICamera
             _commandList.OMSetRenderTargets(rtvHandle, null);
             _commandList.IASetPrimitiveTopology(PrimitiveTopology.TriangleList);
             _commandList.DrawInstanced(3, 1, 0, 0);
+            DrawTrackingOverlay(rtvHandle, trackingOverlay);
 
             var toPresent = ResourceBarrier.BarrierTransition(
                 renderTarget,
@@ -1083,7 +1096,8 @@ public sealed class Direct3D12PreviewHost : WebcamDirectX12ViewportHost, ICamera
             int stride,
             VideoFrameColorSettings colorSettings,
             bool denoiseEnabled,
-            double denoiseStrength)
+            double denoiseStrength,
+            PreviewTrackingOverlay trackingOverlay)
         {
             if (_nv12PreviewUnavailable || _nv12PreviewRootSignature is null || _nv12PreviewPipelineState is null)
             {
@@ -1176,6 +1190,7 @@ public sealed class Direct3D12PreviewHost : WebcamDirectX12ViewportHost, ICamera
                 _commandList.OMSetRenderTargets(rtvHandle, null);
                 _commandList.IASetPrimitiveTopology(PrimitiveTopology.TriangleList);
                 _commandList.DrawInstanced(3, 1, 0, 0);
+                DrawTrackingOverlay(rtvHandle, trackingOverlay);
 
                 var toPresent = ResourceBarrier.BarrierTransition(
                     renderTarget,
@@ -1191,6 +1206,44 @@ public sealed class Direct3D12PreviewHost : WebcamDirectX12ViewportHost, ICamera
                 _nv12PreviewFailureReason = ex.Message;
                 return false;
             }
+        }
+
+        private void DrawTrackingOverlay(CpuDescriptorHandle renderTarget, PreviewTrackingOverlay overlay)
+        {
+            if (!overlay.HasRegions)
+            {
+                return;
+            }
+
+            DrawOverlayRectangle(renderTarget, overlay.FaceBox, new Color4(0.96f, 0.83f, 0.37f, 1f), 4);
+            DrawOverlayRectangle(renderTarget, overlay.LeftEyeBox, new Color4(0.40f, 0.91f, 0.78f, 1f), 3);
+            DrawOverlayRectangle(renderTarget, overlay.RightEyeBox, new Color4(0.40f, 0.91f, 0.78f, 1f), 3);
+            DrawOverlayRectangle(renderTarget, overlay.MouthBox, new Color4(0.96f, 0.52f, 0.69f, 1f), 3);
+        }
+
+        private void DrawOverlayRectangle(
+            CpuDescriptorHandle renderTarget,
+            PreviewOverlayRect? region,
+            Color4 color,
+            int thickness)
+        {
+            if (region is not PreviewOverlayRect source)
+            {
+                return;
+            }
+
+            var normalized = source.Clamp();
+            var left = Math.Clamp((int)Math.Round(normalized.Left * _width), 0, Math.Max(0, _width - 1));
+            var top = Math.Clamp((int)Math.Round(normalized.Top * _height), 0, Math.Max(0, _height - 1));
+            var right = Math.Clamp((int)Math.Round(normalized.Right * _width), left + 1, _width);
+            var bottom = Math.Clamp((int)Math.Round(normalized.Bottom * _height), top + 1, _height);
+            var lineWidth = Math.Clamp(thickness, 1, Math.Max(1, Math.Min(right - left, bottom - top) / 2));
+
+            _overlayBorders[0] = new RawRect(left, top, right, Math.Min(bottom, top + lineWidth));
+            _overlayBorders[1] = new RawRect(left, Math.Max(top, bottom - lineWidth), right, bottom);
+            _overlayBorders[2] = new RawRect(left, top, Math.Min(right, left + lineWidth), bottom);
+            _overlayBorders[3] = new RawRect(Math.Max(left, right - lineWidth), top, right, bottom);
+            _commandList.ClearRenderTargetView(renderTarget, color, (uint)_overlayBorders.Length, _overlayBorders);
         }
 
         private unsafe bool TryRenderBgraFrameWithShader(

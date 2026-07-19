@@ -40,7 +40,8 @@ public sealed class MediaPipeFaceLandmarkerSidecarTracker : IStatefulFaceLandmar
         }
 
         _client ??= new MediaPipeFaceLandmarkerSidecarClient(_environment.Value);
-        var response = _client.Analyze(bitmap, capturedAtUtc);
+        var input = ResizeForDetection(bitmap, MaxDetectionDimension);
+        var response = _client.Analyze(input, capturedAtUtc, bitmap.PixelWidth, bitmap.PixelHeight);
         _lastStatus = string.IsNullOrWhiteSpace(response.Status)
             ? _client.Status
             : response.Status;
@@ -71,7 +72,8 @@ public sealed class MediaPipeFaceLandmarkerSidecarTracker : IStatefulFaceLandmar
         }
 
         _client ??= new MediaPipeFaceLandmarkerSidecarClient(_environment.Value);
-        var response = _client.Analyze(cropBitmap, capturedAtUtc);
+        var input = ResizeForDetection(cropBitmap, MaxDetectionDimension);
+        var response = _client.Analyze(input, capturedAtUtc, cropBitmap.PixelWidth, cropBitmap.PixelHeight);
         _lastStatus = string.IsNullOrWhiteSpace(response.Status)
             ? _client.Status
             : response.Status;
@@ -92,6 +94,24 @@ public sealed class MediaPipeFaceLandmarkerSidecarTracker : IStatefulFaceLandmar
     {
         _client?.Dispose();
         _client = null;
+    }
+
+    private static BitmapSource ResizeForDetection(BitmapSource bitmap, int maximumDimension)
+    {
+        var largestDimension = Math.Max(bitmap.PixelWidth, bitmap.PixelHeight);
+        if (maximumDimension <= 0 || largestDimension <= maximumDimension)
+        {
+            return bitmap;
+        }
+
+        var scale = maximumDimension / (double)largestDimension;
+        BitmapSource resized = new TransformedBitmap(bitmap, new ScaleTransform(scale, scale));
+        if (resized.CanFreeze)
+        {
+            resized.Freeze();
+        }
+
+        return resized;
     }
 
     private static bool TryCreateFaceCrop(

@@ -12,10 +12,7 @@ public sealed class AvatarModelStore
     public const string JsonFileName = "avatar_model.json";
     public const string HtmlFileName = "avatar_model_progress.html";
 
-    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
-    {
-        WriteIndented = true
-    };
+    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
     public string Write(string folder, AvatarModel model)
     {
@@ -24,6 +21,24 @@ public sealed class AvatarModelStore
         AtomicTextFileWriter.WriteAllText(jsonPath, JsonSerializer.Serialize(model, JsonOptions), Encoding.UTF8);
         AtomicTextFileWriter.WriteAllText(GetHtmlPath(folder), BuildHtml(model), Encoding.UTF8);
         return jsonPath;
+    }
+
+    public AvatarModel? Read(string folder)
+    {
+        var path = GetJsonPath(folder);
+        if (!File.Exists(path))
+        {
+            return null;
+        }
+
+        try
+        {
+            return JsonSerializer.Deserialize<AvatarModel>(File.ReadAllText(path), JsonOptions);
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     public static string GetJsonPath(string folder)
@@ -38,7 +53,7 @@ public sealed class AvatarModelStore
 
     private static string BuildHtml(AvatarModel model)
     {
-        var sceneJson = JsonSerializer.Serialize(model, JsonOptions);
+        var sceneJson = JsonSerializer.Serialize(CreateViewerModel(model), JsonOptions);
         var findings = model.Findings.Count == 0
             ? "<li>No model findings yet.</li>"
             : string.Concat(model.Findings.Select(finding => $"<li>{H(finding)}</li>"));
@@ -220,7 +235,9 @@ public sealed class AvatarModelStore
     if (view.edges) drawEdges(edges, byIndex, rect);
     if (view.points) drawPoints(normalized, rect);
     if (overlay) {
-      overlay.innerHTML = `<strong>${escape(model.subjectDisplayName || model.SubjectDisplayName || 'Avatar model')}</strong><br>${escape(model.status || model.Status || 'waiting')}<br>${points.length.toLocaleString()} averaged vertices | ${edges.length.toLocaleString()} topology edges<br>identity confidence ${format(identity.confidencePercent ?? identity.ConfidencePercent)}% | samples ${identity.sampleCount ?? identity.SampleCount ?? 0}<br>${escape((model.poseCoverage || model.PoseCoverage || {}).summary || (model.poseCoverage || model.PoseCoverage || {}).Summary || 'coverage waiting')}`;
+      const fullVertexCount = identity.fullDenseVertexCount ?? identity.FullDenseVertexCount ?? points.length;
+      const fullEdgeCount = identity.fullTopologyEdgeCount ?? identity.FullTopologyEdgeCount ?? edges.length;
+      overlay.innerHTML = `<strong>${escape(model.subjectDisplayName || model.SubjectDisplayName || 'Avatar model')}</strong><br>${escape(model.status || model.Status || 'waiting')}<br>${Number(fullVertexCount).toLocaleString()} averaged vertices | ${Number(fullEdgeCount).toLocaleString()} topology edges<br>${points.length.toLocaleString()} display points | ${edges.length.toLocaleString()} display edges<br>identity confidence ${format(identity.confidencePercent ?? identity.ConfidencePercent)}% | samples ${identity.sampleCount ?? identity.SampleCount ?? 0}<br>${escape((model.poseCoverage || model.PoseCoverage || {}).summary || (model.poseCoverage || model.PoseCoverage || {}).Summary || 'coverage waiting')}`;
     }
   }
 
@@ -327,6 +344,30 @@ public sealed class AvatarModelStore
 </body>
 </html>
 """;
+    }
+
+    private static object CreateViewerModel(AvatarModel model)
+    {
+        const int edgeStride = 16;
+        var sampledEdges = model.Identity.TopologyEdges
+            .Where((_, index) => index % edgeStride == 0)
+            .ToList();
+        var sampledVertices = model.Identity.MeanDenseVertices.ToList();
+        return new
+        {
+            model.SubjectDisplayName,
+            model.Status,
+            model.PoseCoverage,
+            Identity = new
+            {
+                model.Identity.ConfidencePercent,
+                model.Identity.SampleCount,
+                MeanDenseVertices = sampledVertices,
+                TopologyEdges = sampledEdges,
+                FullDenseVertexCount = model.Identity.MeanDenseVertices.Count,
+                FullTopologyEdgeCount = model.Identity.TopologyEdges.Count
+            }
+        };
     }
 
     private static string H(string? value)

@@ -1,4 +1,5 @@
 using System.Text.Json.Serialization;
+using AvatarBuilder.Modules.Vision.Diagnostics;
 
 namespace AvatarBuilder.Modules.Vision.MediaPipe;
 
@@ -12,6 +13,9 @@ internal sealed class MediaPipeSidecarRequest
 
     [JsonPropertyName("capturedAtUtc")]
     public string CapturedAtUtc { get; init; } = "";
+
+    [JsonPropertyName("timestampMilliseconds")]
+    public long TimestampMilliseconds { get; init; }
 }
 
 internal sealed class MediaPipeSidecarResponse
@@ -36,6 +40,13 @@ internal sealed class MediaPipeSidecarResponse
 
     [JsonPropertyName("facialTransformationMatrix")]
     public IReadOnlyList<double> FacialTransformationMatrix { get; init; } = [];
+
+    [JsonPropertyName("timingsMilliseconds")]
+    public IReadOnlyDictionary<string, double> TimingsMilliseconds { get; init; }
+        = new Dictionary<string, double>(StringComparer.OrdinalIgnoreCase);
+
+    [JsonIgnore]
+    public VisionPipelineDiagnostics Diagnostics { get; set; } = VisionPipelineDiagnostics.None;
 }
 
 internal sealed class MediaPipeSidecarLandmark

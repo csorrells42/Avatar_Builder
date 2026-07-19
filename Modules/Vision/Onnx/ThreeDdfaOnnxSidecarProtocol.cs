@@ -1,6 +1,15 @@
 using System.Text.Json.Serialization;
+using AvatarBuilder.Modules.Vision.Diagnostics;
 
 namespace AvatarBuilder.Modules.Vision.Onnx;
+
+public enum ThreeDdfaOnnxRequestMode
+{
+    FaceBoxOnly,
+    Tracking,
+    Preview,
+    Full
+}
 
 internal sealed class ThreeDdfaOnnxSidecarRequest
 {
@@ -16,8 +25,8 @@ internal sealed class ThreeDdfaOnnxSidecarRequest
     [JsonPropertyName("faceBox")]
     public ThreeDdfaOnnxSidecarFaceBox? FaceBox { get; init; }
 
-    [JsonPropertyName("returnDenseVertices")]
-    public bool ReturnDenseVertices { get; init; }
+    [JsonPropertyName("mode")]
+    public string Mode { get; init; } = "tracking";
 
     [JsonPropertyName("denseSampleStride")]
     public int DenseSampleStride { get; init; } = 24;
@@ -72,10 +81,22 @@ public sealed class ThreeDdfaOnnxSidecarResponse
     public int DenseSampleStride { get; init; }
 
     [JsonPropertyName("denseVertices")]
-    public IReadOnlyList<ThreeDdfaOnnxSidecarVertex> DenseVertices { get; init; } = [];
+    public IReadOnlyList<ThreeDdfaOnnxSidecarVertex> DenseVertices { get; set; } = [];
+
+    [JsonPropertyName("canonicalIdentityVertices")]
+    public IReadOnlyList<ThreeDdfaOnnxSidecarVertex> CanonicalIdentityVertices { get; set; } = [];
 
     [JsonPropertyName("denseEdges")]
-    public IReadOnlyList<ThreeDdfaOnnxSidecarEdge> DenseEdges { get; init; } = [];
+    public IReadOnlyList<ThreeDdfaOnnxSidecarEdge> DenseEdges { get; set; } = [];
+
+    [JsonPropertyName("denseVertexCoordinates")]
+    public IReadOnlyList<double> DenseVertexCoordinates { get; set; } = [];
+
+    [JsonPropertyName("canonicalIdentityCoordinates")]
+    public IReadOnlyList<double> CanonicalIdentityCoordinates { get; set; } = [];
+
+    [JsonPropertyName("denseEdgeIndices")]
+    public IReadOnlyList<int> DenseEdgeIndices { get; set; } = [];
 
     [JsonPropertyName("sparseLandmarks")]
     public IReadOnlyList<ThreeDdfaOnnxSidecarVertex> SparseLandmarks { get; init; } = [];
@@ -91,6 +112,65 @@ public sealed class ThreeDdfaOnnxSidecarResponse
 
     [JsonPropertyName("warnings")]
     public IReadOnlyList<string> Warnings { get; init; } = [];
+
+    [JsonPropertyName("mode")]
+    public string Mode { get; init; } = "";
+
+    [JsonPropertyName("timingsMilliseconds")]
+    public IReadOnlyDictionary<string, double> TimingsMilliseconds { get; init; }
+        = new Dictionary<string, double>(StringComparer.OrdinalIgnoreCase);
+
+    [JsonIgnore]
+    public VisionPipelineDiagnostics Diagnostics { get; set; } = VisionPipelineDiagnostics.None;
+
+    public void ExpandCompactMeshData()
+    {
+        if (DenseVertices.Count == 0 && DenseVertexCoordinates.Count >= 3)
+        {
+            DenseVertices = ExpandVertices(DenseVertexCoordinates);
+        }
+
+        if (CanonicalIdentityVertices.Count == 0 && CanonicalIdentityCoordinates.Count >= 3)
+        {
+            CanonicalIdentityVertices = ExpandVertices(CanonicalIdentityCoordinates);
+        }
+
+        if (DenseEdges.Count == 0 && DenseEdgeIndices.Count >= 2)
+        {
+            var edges = new List<ThreeDdfaOnnxSidecarEdge>(DenseEdgeIndices.Count / 2);
+            for (var index = 0; index + 1 < DenseEdgeIndices.Count; index += 2)
+            {
+                edges.Add(new ThreeDdfaOnnxSidecarEdge
+                {
+                    FromIndex = DenseEdgeIndices[index],
+                    ToIndex = DenseEdgeIndices[index + 1]
+                });
+            }
+
+            DenseEdges = edges;
+        }
+
+        DenseVertexCoordinates = [];
+        CanonicalIdentityCoordinates = [];
+        DenseEdgeIndices = [];
+    }
+
+    private static List<ThreeDdfaOnnxSidecarVertex> ExpandVertices(IReadOnlyList<double> coordinates)
+    {
+        var vertices = new List<ThreeDdfaOnnxSidecarVertex>(coordinates.Count / 3);
+        for (var coordinateIndex = 0; coordinateIndex + 2 < coordinates.Count; coordinateIndex += 3)
+        {
+            vertices.Add(new ThreeDdfaOnnxSidecarVertex
+            {
+                Index = coordinateIndex / 3,
+                X = coordinates[coordinateIndex],
+                Y = coordinates[coordinateIndex + 1],
+                Z = coordinates[coordinateIndex + 2]
+            });
+        }
+
+        return vertices;
+    }
 }
 
 public sealed class ThreeDdfaOnnxSidecarFaceBox

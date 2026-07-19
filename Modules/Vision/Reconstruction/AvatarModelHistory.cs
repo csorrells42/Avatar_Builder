@@ -2,7 +2,7 @@ namespace AvatarBuilder.Modules.Vision.Reconstruction;
 
 public sealed class AvatarModelHistoryEntry
 {
-    public string SchemaVersion { get; init; } = "avatar-model-history-v1";
+    public string SchemaVersion { get; init; } = "avatar-model-history-v2";
 
     public long RebuildNumber { get; init; }
 
@@ -40,7 +40,7 @@ public sealed class AvatarModelHistoryEntry
 
     public double OverallVertexRmsFaceSpanPercent { get; init; }
 
-    public double ShapeCoefficientRmsDelta { get; init; }
+    public double ShapeCoefficientRelativeRmsPercent { get; init; }
 
     public double MeanExpressionRange { get; init; }
 
@@ -83,7 +83,7 @@ public sealed class AvatarModelRegionConfidenceDelta
 
 public sealed class AvatarModelHistoryReport
 {
-    public string SchemaVersion { get; init; } = "avatar-model-history-report-v1";
+    public string SchemaVersion { get; init; } = "avatar-model-history-report-v2";
 
     public DateTime CreatedAtUtc { get; init; } = DateTime.UtcNow;
 
@@ -93,7 +93,7 @@ public sealed class AvatarModelHistoryReport
         "Keeps up to 30 days or 86,400 rebuild records. Recent-page data is bounded to the latest 240 rebuilds.";
 
     public string MeasurementPolicy { get; init; } =
-        "Geometry movement is RMS displacement in pose-neutral 3DDFA space, expressed as a percentage of the current face span. Outlier candidates are review flags and are not silently deleted.";
+        "Geometry movement is RMS displacement in canonical 3DDFA identity space, expressed as a percentage of the current face span. Shape-coefficient movement is scale-independent relative RMS percent. Outlier candidates are review flags and are not silently deleted.";
 
     public AvatarModelHistoryEntry Latest { get; init; } = new();
 

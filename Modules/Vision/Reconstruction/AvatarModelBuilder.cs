@@ -61,16 +61,17 @@ public static class AvatarModelBuilder
         var totalWeight = 0d;
         var confidenceWeight = 0d;
 
-        foreach (var observation in observations)
+        var identityGeometries = observations
+            .Select(observation => new WeightedIdentityGeometry(
+                observation,
+                Math.Clamp(observation.IdentityWeightPercent, 0d, 100d) / 100d,
+                NormalizeIdentityVertices(observation)))
+            .Where(static geometry => geometry.Weight > 0.001d && geometry.Vertices.Count > 0)
+            .ToList();
+        var alignedGeometries = AlignIdentityGeometries(identityGeometries);
+        foreach (var geometry in alignedGeometries)
         {
-            var weight = Math.Clamp(observation.IdentityWeightPercent, 0d, 100d) / 100d;
-            if (weight <= 0.001d)
-            {
-                continue;
-            }
-
-            var normalized = NormalizeIdentityVertices(observation);
-            foreach (var point in normalized)
+            foreach (var point in geometry.Vertices)
             {
                 if (!vertexAccumulators.TryGetValue(point.Index, out var accumulator))
                 {
@@ -78,12 +79,12 @@ public static class AvatarModelBuilder
                     vertexAccumulators[point.Index] = accumulator;
                 }
 
-                accumulator.Add(point, weight);
+                accumulator.Add(point, geometry.Weight);
             }
 
-            AddCoefficients(shapeAccumulators, observation.ShapeCoefficients, weight);
-            totalWeight += weight;
-            confidenceWeight += observation.ReconstructionConfidencePercent * weight;
+            AddCoefficients(shapeAccumulators, geometry.Observation.ShapeCoefficients, geometry.Weight);
+            totalWeight += geometry.Weight;
+            confidenceWeight += geometry.Observation.ReconstructionConfidencePercent * geometry.Weight;
         }
 
         var meanVertices = vertexAccumulators.Values
@@ -211,36 +212,88 @@ public static class AvatarModelBuilder
         };
     }
 
-    internal static IReadOnlyList<FaceMeshLandmarkPoint> NormalizeIdentityVerticesForAudit(AvatarModelObservation observation)
+    internal static IReadOnlyList<FaceMeshLandmarkPoint> NormalizeIdentityVerticesForAudit(
+        AvatarModelObservation observation,
+        IReadOnlyList<FaceMeshLandmarkPoint> target)
     {
-        return NormalizeIdentityVertices(observation);
+        var normalized = NormalizeIdentityVertices(observation);
+        return target.Count == 0 ? normalized : DenseMeshRigidAligner.Align(normalized, target);
     }
 
     private static IReadOnlyList<FaceMeshLandmarkPoint> NormalizeIdentityVertices(AvatarModelObservation observation)
     {
-        var bounds = Bounds.From(observation.Vertices);
+        var source = observation.CanonicalIdentityVertices.Count == observation.Vertices.Count
+            && observation.CanonicalIdentityVertices.Count > 0
+            ? observation.CanonicalIdentityVertices
+            : observation.Vertices;
+        var bounds = Bounds.From(source);
         var centerX = (bounds.MinX + bounds.MaxX) * 0.5d;
         var centerY = (bounds.MinY + bounds.MaxY) * 0.5d;
         var centerZ = (bounds.MinZ + bounds.MaxZ) * 0.5d;
         var scale = Math.Max(0.0001d, Math.Max(bounds.MaxX - bounds.MinX, bounds.MaxY - bounds.MinY));
-        var normalized = new List<FaceMeshLandmarkPoint>(observation.Vertices.Count);
-        foreach (var vertex in observation.Vertices)
+        var normalized = new List<FaceMeshLandmarkPoint>(source.Count);
+        foreach (var vertex in source)
         {
-            var point = new ModelPoint(
-                (vertex.X - centerX) / scale,
-                (vertex.Y - centerY) / scale,
-                (vertex.Z - centerZ) / scale);
-            point = Rotate(point, -observation.ARotationAroundXDegrees, -observation.BRotationAroundYDegrees, -observation.CRotationAroundZDegrees);
             normalized.Add(new FaceMeshLandmarkPoint
             {
                 Index = vertex.Index,
-                X = Round(point.X),
-                Y = Round(point.Y),
-                Z = Round(point.Z)
+                X = Round((vertex.X - centerX) / scale),
+                Y = Round((vertex.Y - centerY) / scale),
+                Z = Round((vertex.Z - centerZ) / scale)
             });
         }
 
         return normalized;
+    }
+
+    private static List<WeightedIdentityGeometry> AlignIdentityGeometries(
+        IReadOnlyList<WeightedIdentityGeometry> geometries)
+    {
+        if (geometries.Count <= 1)
+        {
+            return geometries.ToList();
+        }
+
+        IReadOnlyList<FaceMeshLandmarkPoint> mean = geometries
+            .FirstOrDefault(static geometry => geometry.Observation.CanonicalIdentityVertices.Count > 0)?.Vertices
+            ?? geometries[0].Vertices;
+        var aligned = geometries.ToList();
+        for (var iteration = 0; iteration < 4; iteration++)
+        {
+            aligned = geometries
+                .Select(geometry => geometry with
+                {
+                    Vertices = DenseMeshRigidAligner.Align(geometry.Vertices, mean)
+                })
+                .ToList();
+            mean = CalculateWeightedMean(aligned);
+        }
+
+        return aligned;
+    }
+
+    private static IReadOnlyList<FaceMeshLandmarkPoint> CalculateWeightedMean(
+        IReadOnlyList<WeightedIdentityGeometry> geometries)
+    {
+        var accumulators = new Dictionary<int, WeightedPointAccumulator>();
+        foreach (var geometry in geometries)
+        {
+            foreach (var point in geometry.Vertices)
+            {
+                if (!accumulators.TryGetValue(point.Index, out var accumulator))
+                {
+                    accumulator = new WeightedPointAccumulator(point.Index);
+                    accumulators[point.Index] = accumulator;
+                }
+
+                accumulator.Add(point, geometry.Weight);
+            }
+        }
+
+        return accumulators.Values
+            .OrderBy(static accumulator => accumulator.Index)
+            .Select(static accumulator => accumulator.ToPoint())
+            .ToList();
     }
 
     private static List<WeightedCoefficientAccumulator> CreateCoefficientAccumulators(int count)
@@ -268,24 +321,24 @@ public static class AvatarModelBuilder
             return 0d;
         }
 
-        var averageRange = accumulators.Select(static accumulator => accumulator.Range).DefaultIfEmpty(0d).Average();
-        return Math.Clamp(100d - averageRange * 45d, 0d, 100d);
+        var signalRms = Math.Sqrt(accumulators.Select(static accumulator => accumulator.Mean * accumulator.Mean).DefaultIfEmpty(0d).Average());
+        var noiseRms = Math.Sqrt(accumulators.Select(static accumulator => accumulator.StandardDeviation * accumulator.StandardDeviation).DefaultIfEmpty(0d).Average());
+        return signalRms + noiseRms <= 0.000001d
+            ? 0d
+            : Math.Clamp(signalRms / (signalRms + noiseRms) * 100d, 0d, 100d);
     }
 
     private static List<AvatarRegionConfidence> BuildRegionConfidence(
         IReadOnlyList<AvatarModelObservation> observations,
         double identityConfidencePercent)
     {
-        var averageEye = observations.Average(static observation => observation.EyeQualityPercent);
-        var averageMouth = observations.Average(static observation => observation.MouthQualityPercent);
-        var averageBrow = observations.Average(static observation => observation.BrowQualityPercent);
         var averageReconstruction = observations.Average(static observation => observation.ReconstructionConfidencePercent);
         return
         [
             new AvatarRegionConfidence { Region = "Face surface", ConfidencePercent = Round(Blend(identityConfidencePercent, averageReconstruction)), Basis = "3DDFA reconstruction confidence plus identity sample weight" },
-            new AvatarRegionConfidence { Region = "Eyes", ConfidencePercent = Round(Blend(identityConfidencePercent, averageEye)), Basis = "MediaPipe eye evidence plus 3DDFA surface identity" },
-            new AvatarRegionConfidence { Region = "Mouth and jaw", ConfidencePercent = Round(Blend(identityConfidencePercent, averageMouth)), Basis = "MediaPipe mouth/jaw evidence plus expression separation" },
-            new AvatarRegionConfidence { Region = "Eyebrows", ConfidencePercent = Round(Blend(identityConfidencePercent, averageBrow)), Basis = "MediaPipe brow quality plus retained 3DDFA geometry" },
+            new AvatarRegionConfidence { Region = "Eyes", ConfidencePercent = Round(averageReconstruction), Basis = "3DDFA canonical expression-free BFM geometry" },
+            new AvatarRegionConfidence { Region = "Mouth and jaw", ConfidencePercent = Round(averageReconstruction), Basis = "3DDFA canonical identity geometry; expression coefficients are modeled separately" },
+            new AvatarRegionConfidence { Region = "Eyebrows", ConfidencePercent = Round(averageReconstruction), Basis = "3DDFA canonical expression-free BFM geometry" },
             new AvatarRegionConfidence { Region = "Nose, cheeks, forehead", ConfidencePercent = Round(averageReconstruction), Basis = "3DDFA dense model topology" }
         ];
     }
@@ -333,7 +386,7 @@ public static class AvatarModelBuilder
     {
         var findings = new List<string>
         {
-            $"Stored {observations.Count} bounded 3DDFA observation(s); identity model uses pose-neutral weighted averaging and expression model stays separate.",
+            $"Stored {observations.Count} bounded 3DDFA observation(s); identity uses canonical expression-free geometry with rigid, non-deforming alignment and the expression model stays separate.",
             $"Current dense identity preview has {identity.DenseVertexCount:n0} averaged vertices and {identity.DenseTopologyEdgeCount:n0} topology edges."
         };
         if (observations.Count < 12)
@@ -410,30 +463,6 @@ public static class AvatarModelBuilder
         return first * 0.55d + second * 0.45d;
     }
 
-    private static ModelPoint Rotate(ModelPoint point, double aDegrees, double bDegrees, double cDegrees)
-    {
-        var a = ToRadians(aDegrees);
-        var b = ToRadians(bDegrees);
-        var c = ToRadians(cDegrees);
-        var y = point.Y * Math.Cos(a) - point.Z * Math.Sin(a);
-        var z = point.Y * Math.Sin(a) + point.Z * Math.Cos(a);
-        var x = point.X;
-
-        var nextX = x * Math.Cos(b) + z * Math.Sin(b);
-        var nextZ = -x * Math.Sin(b) + z * Math.Cos(b);
-        x = nextX;
-        z = nextZ;
-
-        nextX = x * Math.Cos(c) - y * Math.Sin(c);
-        var nextY = x * Math.Sin(c) + y * Math.Cos(c);
-        return new ModelPoint(nextX, nextY, nextZ);
-    }
-
-    private static double ToRadians(double degrees)
-    {
-        return degrees * Math.PI / 180d;
-    }
-
     private static double Round(double value)
     {
         return double.IsFinite(value)
@@ -486,7 +515,13 @@ public static class AvatarModelBuilder
 
         public double Range => double.IsFinite(Minimum) && double.IsFinite(Maximum) ? Maximum - Minimum : 0d;
 
+        public double StandardDeviation => Weight <= 0d
+            ? 0d
+            : Math.Sqrt(Math.Max(0d, SumSquares / Weight - Mean * Mean));
+
         private double Sum { get; set; }
+
+        private double SumSquares { get; set; }
 
         public void Add(double value, double weight)
         {
@@ -497,12 +532,16 @@ public static class AvatarModelBuilder
 
             Weight += weight;
             Sum += value * weight;
+            SumSquares += value * value * weight;
             Minimum = Math.Min(Minimum, value);
             Maximum = Math.Max(Maximum, value);
         }
     }
 
-    private readonly record struct ModelPoint(double X, double Y, double Z);
+    private sealed record WeightedIdentityGeometry(
+        AvatarModelObservation Observation,
+        double Weight,
+        IReadOnlyList<FaceMeshLandmarkPoint> Vertices);
 
     private readonly record struct Bounds(double MinX, double MaxX, double MinY, double MaxY, double MinZ, double MaxZ)
     {

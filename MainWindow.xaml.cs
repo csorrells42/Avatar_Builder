@@ -11,6 +11,7 @@ using System.Windows.Threading;
 using AvatarBuilder.Modules.Infrastructure;
 using AvatarBuilder.Modules.Vision.Analysis;
 using AvatarBuilder.Modules.Vision.Common;
+using AvatarBuilder.Modules.Vision.Diagnostics;
 using AvatarBuilder.Modules.Vision.MediaPipe;
 using AvatarBuilder.Modules.Vision.Onnx;
 using AvatarBuilder.Modules.Vision.Personalization;
@@ -39,13 +40,13 @@ public partial class MainWindow : Window
     private const string OutputFolderPointerFileName = "AvatarBuilderOutputFolder.txt";
     private const string AvatarLearningStartButtonText = "Start Avatar Capture";
     private const string AvatarLearningStopButtonText = "Stop Avatar Capture";
-    private const string AvatarCaptureStatusReason = "3DDFA avatar capture active; MediaPipe feature tracking remains live";
     private const double AvatarReportSaveIntervalSeconds = 30d;
+    private const double ThreeDdfaDenseSampleIntervalMilliseconds = 10000d;
     private const int LastGoodThreeDdfaRetainedSampleCount = 5;
     private const double Insta360Link2ProHorizontalFovDegrees = 71.4d;
     private const string AvatarArchiveFolderName = "AvatarArchive";
     private static readonly TimeSpan TrackingOverlayRefreshInterval = TimeSpan.FromMilliseconds(250);
-    private static readonly TimeSpan FaceFeatureDetectionTargetInterval = TimeSpan.FromMilliseconds(120);
+    private static readonly TimeSpan FaceFeatureDetectionTargetInterval = TimeSpan.FromMilliseconds(15);
     private static readonly SolidColorBrush StartActionButtonBackground = CreateFrozenBrush(0x1f, 0x7a, 0x43);
     private static readonly SolidColorBrush StartActionButtonBorder = CreateFrozenBrush(0x52, 0xc4, 0x7b);
     private static readonly SolidColorBrush StopActionButtonBackground = CreateFrozenBrush(0x9d, 0x2f, 0x2f);
@@ -70,20 +71,24 @@ public partial class MainWindow : Window
     private readonly FfmpegCameraModeService _cameraModeService = new();
     private readonly DirectShowCameraControlService _cameraControlService = new();
     private readonly CameraPreviewService _previewService = new();
-    private readonly CompositeFaceLandmarkTracker _faceLandmarkTracker = new();
+    private CompositeFaceLandmarkTracker? _faceLandmarkTracker = new();
     private readonly FaceLandmarkTemporalReconstructor _faceLandmarkReconstructor = new();
     private readonly FaceLandmarkMetricCalculator _faceLandmarkMetricCalculator = new();
     private readonly FaceLockStabilityAnalyzer _faceLockStabilityAnalyzer = new();
     private readonly FaceFrameGeometryEstimator _faceFrameGeometryEstimator = new();
     private readonly ThreeDdfaOnnxModelInfo _threeDdfaOnnxModelInfo;
     private readonly ThreeDdfaOnnxSidecarEnvironment _threeDdfaOnnxEnvironment;
-    private readonly ThreeDdfaOnnxReconstructionClient _threeDdfaOnnxClient;
+    private ThreeDdfaOnnxReconstructionClient? _threeDdfaAvatarClient;
+    private ThreeDdfaOnnxReconstructionClient? _threeDdfaFaceBoxClient;
     private readonly AvatarBuilderStartupOptions _startupOptions;
     private readonly AvatarProfileStore _avatarProfileStore = new();
     private readonly AvatarUserSession _avatarUserSession = new();
     private readonly AvatarCaptureQualityAnalyzer _avatarCaptureQualityAnalyzer = new();
     private readonly LastGoodThreeDdfaStore _lastGoodThreeDdfaStore = new();
+    private readonly VisionBenchmarkRecorder _visionBenchmarkRecorder = new();
+    private readonly PoseAlignmentAuditor _poseAlignmentAuditor = new();
     private readonly object _faceLandmarkTrackerLock = new();
+    private readonly object _threeDdfaClientLock = new();
     private readonly object _previewFramePumpLock = new();
     private readonly object _directX12PreviewLock = new();
     private readonly object _directX12AnalysisFrameLock = new();
@@ -100,6 +105,7 @@ public partial class MainWindow : Window
     private FaceLockStabilityAnalysis _currentFaceLockStabilityAnalysis = FaceLockStabilityAnalysis.Waiting;
     private FaceFrameGeometry _currentFaceFrameGeometry = FaceFrameGeometry.None;
     private ThreeDdfaOnnxSidecarResponse _currentThreeDdfaOnnxResponse = ThreeDdfaOnnxSidecarResponse.Waiting;
+    private ThreeDdfaOnnxSidecarFaceBox? _threeDdfaTrackingFaceBox;
     private AvatarCaptureQualityAssessment _currentAvatarCaptureQuality = AvatarCaptureQualityAssessment.Waiting;
     private AvatarProfileRegistry _avatarProfileRegistry = new();
     private AvatarProfile _currentAvatarProfile = new()
@@ -114,6 +120,8 @@ public partial class MainWindow : Window
     private string _lastGoodThreeDdfaHtmlPath = "";
     private BitmapSource? _pendingPreviewFrame;
     private BitmapSource? _pendingFaceFeatureDetectionFrame;
+    private FaceBoxSystem _pendingFaceBoxSystem = FaceBoxSystem.MediaPipe;
+    private int _pendingFaceBoxSystemGeneration;
     private TextureNativeFrameLease? _pendingDirectX12AnalysisFrame;
     private AvatarReportSnapshot? _pendingAvatarReportSnapshot;
     private Task? _avatarReportWriterTask;
@@ -130,11 +138,15 @@ public partial class MainWindow : Window
     private string _lastTrackingOverlayTrigger = "";
     private string _lastTrackingOverlayAccentColor = "";
     private string _avatarCaptureGateReason = "waiting for face landmarks";
+    private string _lastFaceBoxBackendStatus = "waiting";
     private SolidColorBrush? _lastTrackingOverlayAccentBrush;
     private double _directX12PreviewMaxRenderFramesPerSecond;
+    private double _lastFaceBoxInferenceMilliseconds;
+    private double _faceBoxResultsPerSecond;
     private TimeSpan _directX12AnalysisFrameInterval = TimeSpan.FromSeconds(1d / 5d);
     private int _directX12AnalysisMaxOutputWidth = 3840;
     private int _previewFramesReplacedSinceWarning;
+    private int _faceBoxResultsInRateWindow;
     private int _uiFramePending;
     private int _previewWarningPending;
     private int _faceFeatureDetectionPending;
@@ -155,12 +167,16 @@ public partial class MainWindow : Window
     private bool _isClosing;
     private bool _startupOptionsApplied;
     private int _selectedTrackingFidelityIndex = 2;
+    private int _faceBoxSystemGeneration;
+    private FaceBoxSystem _selectedFaceBoxSystem = FaceBoxSystem.MediaPipe;
     private FaceCueGuideLayout? _activeFaceCueLayout;
     private DateTime _lastFaceAutoFollowAt = DateTime.MinValue;
     private DateTime _lastFaceFeatureDetectionAt = DateTime.MinValue;
     private DateTime _pendingFaceFeatureDetectionCapturedAtUtc = DateTime.MinValue;
     private DateTime _lastFaceFeatureLockAt = DateTime.MinValue;
     private DateTime _lastThreeDdfaOnnxRequestAtUtc = DateTime.MinValue;
+    private DateTime _lastThreeDdfaFaceBoxesAtUtc = DateTime.MinValue;
+    private DateTime _faceBoxRateWindowStartedAtUtc = DateTime.MinValue;
 
     private static readonly IReadOnlyList<TrackingFidelityOption> TrackingFidelityOptions =
     [
@@ -193,9 +209,10 @@ public partial class MainWindow : Window
         _startupOptions = startupOptions ?? AvatarBuilderStartupOptions.Default;
         _threeDdfaOnnxModelInfo = ThreeDdfaOnnxModelInfo.Load();
         _threeDdfaOnnxEnvironment = ThreeDdfaOnnxSidecarEnvironment.Detect(_threeDdfaOnnxModelInfo);
-        _threeDdfaOnnxClient = new ThreeDdfaOnnxReconstructionClient(_threeDdfaOnnxEnvironment);
+        _threeDdfaAvatarClient = new ThreeDdfaOnnxReconstructionClient(_threeDdfaOnnxEnvironment);
         InitializeComponent();
         _outputFolder = ResolveInitialOutputFolder(_startupOptions.OutputFolder);
+        _visionBenchmarkRecorder.SetOutputRoot(_outputFolder);
         ResetAvatarCaptureGate("waiting for face landmarks");
         _previewService.FrameAvailable += PreviewFrameAvailable;
         _previewService.CameraFrameAvailable += PreviewCameraFrameAvailable;
@@ -207,6 +224,9 @@ public partial class MainWindow : Window
         DarkWindowFrame.Apply(this);
         EnsureOutputFolderConfiguredForLaunch();
         InitializeAvatarProfiles(promptForStartupUser: true);
+        _poseAlignmentAuditor.SetOutputRoot(GetAvatarDataFolder());
+        UpdateFaceBoxSystemMenuChecks();
+        UpdateFaceBoxOptionsUi();
         UpdateTrackingFidelityMenuChecks();
         ApplyTrackingFidelity();
         UpdateSettingLabels();
@@ -429,6 +449,7 @@ public partial class MainWindow : Window
 
         _currentAvatarProfile = profile;
         _avatarLearningRequested = false;
+        _poseAlignmentAuditor.SetOutputRoot(GetAvatarDataFolder());
 
         _avatarProfileStore.SelectProfile(_outputFolder, _avatarProfileRegistry, profile.Id);
         if (loadModel)
@@ -553,11 +574,25 @@ public partial class MainWindow : Window
         _previewService.FrameAvailable -= PreviewFrameAvailable;
         _previewService.CameraFrameAvailable -= PreviewCameraFrameAvailable;
         _previewService.StatusChanged -= PreviewStatusChanged;
+        CompositeFaceLandmarkTracker? tracker;
         lock (_faceLandmarkTrackerLock)
         {
-            _faceLandmarkTracker.Dispose();
+            tracker = _faceLandmarkTracker;
+            _faceLandmarkTracker = null;
         }
-        _threeDdfaOnnxClient.Dispose();
+        tracker?.Dispose();
+        ThreeDdfaOnnxReconstructionClient? avatarClient;
+        ThreeDdfaOnnxReconstructionClient? faceBoxClient;
+        lock (_threeDdfaClientLock)
+        {
+            avatarClient = _threeDdfaAvatarClient;
+            faceBoxClient = _threeDdfaFaceBoxClient;
+            _threeDdfaAvatarClient = null;
+            _threeDdfaFaceBoxClient = null;
+        }
+        avatarClient?.Dispose();
+        faceBoxClient?.Dispose();
+        _visionBenchmarkRecorder.Dispose();
         DisposeDirectX12PreviewHost();
         _previewService.Dispose();
     }
@@ -938,6 +973,138 @@ public partial class MainWindow : Window
         }
     }
 
+    private void FaceBoxSystemMenuItemClicked(object sender, RoutedEventArgs e)
+    {
+        if (sender is not MenuItem menuItem
+            || !Enum.TryParse(menuItem.Tag?.ToString(), out FaceBoxSystem selectedSystem))
+        {
+            UpdateFaceBoxSystemMenuChecks();
+            return;
+        }
+
+        if (selectedSystem == _selectedFaceBoxSystem)
+        {
+            UpdateFaceBoxSystemMenuChecks();
+            return;
+        }
+
+        SwitchFaceBoxSystem(selectedSystem);
+    }
+
+    private void SwitchFaceBoxSystem(FaceBoxSystem selectedSystem)
+    {
+        _selectedFaceBoxSystem = selectedSystem;
+        Interlocked.Increment(ref _faceBoxSystemGeneration);
+        ResetFaceFeatureDetectionFramePump();
+        ResetFaceBoxPerformanceMetrics();
+        _currentFaceFeatureDetection = FaceFeatureDetection.None;
+        _lastFaceFeatureLockAt = DateTime.MinValue;
+        _activeFaceCueLayout = null;
+        _threeDdfaTrackingFaceBox = null;
+        _lastThreeDdfaFaceBoxesAtUtc = DateTime.MinValue;
+
+        CompositeFaceLandmarkTracker? previousTracker;
+        lock (_faceLandmarkTrackerLock)
+        {
+            previousTracker = _faceLandmarkTracker;
+            _faceLandmarkTracker = selectedSystem == FaceBoxSystem.MediaPipe
+                ? new CompositeFaceLandmarkTracker()
+                : null;
+            if (_faceLandmarkTracker is not null)
+            {
+                _faceLandmarkTracker.MaxDetectionDimension = GetFaceLandmarkDetectionDimension();
+            }
+        }
+
+        ResetLandmarkTracking();
+        if (previousTracker is not null)
+        {
+            previousTracker.Dispose();
+        }
+
+        ThreeDdfaOnnxReconstructionClient? previousAvatarClient;
+        ThreeDdfaOnnxReconstructionClient? previousFaceBoxClient;
+        lock (_threeDdfaClientLock)
+        {
+            previousAvatarClient = _threeDdfaAvatarClient;
+            previousFaceBoxClient = _threeDdfaFaceBoxClient;
+            _threeDdfaAvatarClient = selectedSystem == FaceBoxSystem.MediaPipe
+                ? new ThreeDdfaOnnxReconstructionClient(_threeDdfaOnnxEnvironment)
+                : null;
+            _threeDdfaFaceBoxClient = selectedSystem == FaceBoxSystem.ThreeDdfaV2
+                ? new ThreeDdfaOnnxReconstructionClient(_threeDdfaOnnxEnvironment)
+                : null;
+        }
+        previousAvatarClient?.Dispose();
+        previousFaceBoxClient?.Dispose();
+
+        if (selectedSystem == FaceBoxSystem.ThreeDdfaV2 && _showLiveWireframePreview)
+        {
+            _showLiveWireframePreview = false;
+            LiveWireframeMenuItem.IsChecked = false;
+            SetPreviewState("Camera active", _latestFrame);
+        }
+
+        UpdateFaceBoxSystemMenuChecks();
+        UpdateFaceBoxOptionsUi();
+        UpdateAvatarLearningStatusUi();
+        SetStatus($"Face Box System changed to {GetFaceBoxSystemDisplayName()}. The previous tracking backend has been stopped.");
+        UpdateFaceCueGuideOverlay(_latestFrame);
+    }
+
+    private void UpdateFaceBoxSystemMenuChecks()
+    {
+        MediaPipeFaceBoxSystemMenuItem.IsChecked = _selectedFaceBoxSystem == FaceBoxSystem.MediaPipe;
+        ThreeDdfaFaceBoxSystemMenuItem.IsChecked = _selectedFaceBoxSystem == FaceBoxSystem.ThreeDdfaV2;
+    }
+
+    private void UpdateFaceBoxOptionsUi()
+    {
+        var mediaPipeSelected = _selectedFaceBoxSystem == FaceBoxSystem.MediaPipe;
+        FaceTrackingFieldExpander.Header = $"Face Box Options ({GetFaceBoxSystemDisplayName()})";
+        LiveWireframeMenuItem.IsEnabled = mediaPipeSelected;
+        LiveWireframeMenuItem.ToolTip = mediaPipeSelected
+            ? "Hides the webcam image and shows the current camera-relative MediaPipe face mesh while analysis keeps running."
+            : "Live wireframe is MediaPipe-specific and is unavailable while 3DDFA-V2 owns the face box.";
+    }
+
+    private string GetFaceBoxSystemDisplayName()
+    {
+        return _selectedFaceBoxSystem == FaceBoxSystem.ThreeDdfaV2
+            ? "3DDFA-V2"
+            : "MediaPipe";
+    }
+
+    private bool IsSelectedFaceBoxSystemAvailable()
+    {
+        if (_selectedFaceBoxSystem == FaceBoxSystem.ThreeDdfaV2)
+        {
+            return _threeDdfaOnnxEnvironment.IsReady;
+        }
+
+        lock (_faceLandmarkTrackerLock)
+        {
+            return _faceLandmarkTracker?.IsAvailable == true;
+        }
+    }
+
+    private int GetFaceLandmarkDetectionDimension()
+    {
+        var option = GetSelectedTrackingFidelityOption();
+        return option.MaxOutputWidth >= 3840
+            ? 1920
+            : Math.Clamp(option.MaxOutputWidth, 640, 960);
+    }
+
+    private void ResetFaceBoxPerformanceMetrics()
+    {
+        _lastFaceBoxBackendStatus = "waiting";
+        _lastFaceBoxInferenceMilliseconds = 0d;
+        _faceBoxResultsPerSecond = 0d;
+        _faceBoxResultsInRateWindow = 0;
+        _faceBoxRateWindowStartedAtUtc = DateTime.MinValue;
+    }
+
     private void TrackingFidelityMenuItemClicked(object sender, RoutedEventArgs e)
     {
         if (sender is not MenuItem menuItem
@@ -975,7 +1142,13 @@ public partial class MainWindow : Window
         _previewService.MaxOutputFramesPerSecond = option.MaxFramesPerSecond;
         _directX12AnalysisMaxOutputWidth = analysisOutputWidth;
         _directX12AnalysisFrameInterval = TimeSpan.FromSeconds(1d / Math.Clamp(option.MaxFramesPerSecond, 1d, 60d));
-        _faceLandmarkTracker.MaxDetectionDimension = option.MaxOutputWidth >= 3840 ? 1920 : Math.Clamp(option.MaxOutputWidth, 640, 960);
+        lock (_faceLandmarkTrackerLock)
+        {
+            if (_faceLandmarkTracker is not null)
+            {
+                _faceLandmarkTracker.MaxDetectionDimension = GetFaceLandmarkDetectionDimension();
+            }
+        }
     }
 
     private static int GetTrackingAnalysisOutputWidth(TrackingFidelityOption option)
@@ -1376,12 +1549,11 @@ public partial class MainWindow : Window
         bitmap = BitmapSource.Create(1, 1, 96, 96, PixelFormats.Bgra32, null, new byte[] { 0, 0, 0, 255 }, 4);
 
         var maximumWidth = Math.Clamp(_directX12AnalysisMaxOutputWidth, 320, 3840);
-        var bgraBytes = frame.BgraPreviewBytes;
-        var bgraStride = frame.BgraPreviewStride;
+        byte[]? bgraBytes = null;
+        var bgraStride = 0;
         var bitmapWidth = frame.Width;
         var bitmapHeight = frame.Height;
-        if ((bgraBytes is null || bgraBytes.Length == 0 || bgraStride <= 0)
-            && frame.Nv12PreviewBytes is { Length: > 0 } nv12Bytes
+        if (frame.Nv12PreviewBytes is { Length: > 0 } nv12Bytes
             && frame.Nv12PreviewStride > 0)
         {
             bgraBytes = Nv12FrameConverter.ConvertToBgra(
@@ -1617,9 +1789,20 @@ public partial class MainWindow : Window
             {
                 _lastPreviewFrameAcceptedAt = DateTime.UtcNow;
                 _latestFrame = frame;
-                SetPreviewState("Camera active", frame);
+                if (!_showLiveWireframePreview && !IsNativeDirectX12PreviewActive())
+                {
+                    SetPreviewState("Camera active", frame);
+                }
+                else if (!string.Equals(PreviewStateText.Text, "Camera active", StringComparison.Ordinal))
+                {
+                    PreviewStateText.Text = "Camera active";
+                }
+
                 ProcessFrame(frame);
-                UpdateFaceCueGuideOverlay(frame);
+                if (FaceAutoFollowCheckBox.IsChecked != true || !IsSelectedFaceBoxSystemAvailable())
+                {
+                    UpdateFaceCueGuideOverlay(frame);
+                }
             }
         }
         finally
@@ -1670,6 +1853,8 @@ public partial class MainWindow : Window
         {
             _pendingFaceFeatureDetectionFrame = null;
             _pendingFaceFeatureDetectionCapturedAtUtc = DateTime.MinValue;
+            _pendingFaceBoxSystem = _selectedFaceBoxSystem;
+            _pendingFaceBoxSystemGeneration = _faceBoxSystemGeneration;
         }
 
         _lastFaceFeatureDetectionAt = DateTime.MinValue;
@@ -1754,21 +1939,10 @@ public partial class MainWindow : Window
 
         if (directX12Enabled && _directX12NativeCamera is not null)
         {
-            if (ShouldUseWpfTrackingPreview(frame))
-            {
-                DirectX12PreviewLayer.Visibility = Visibility.Collapsed;
-                PreviewImage.Source = frame;
-                PreviewImage.Visibility = Visibility.Visible;
-            }
-            else
-            {
-                DirectX12PreviewLayer.Visibility = Visibility.Visible;
-                PreviewImage.Source = null;
-                PreviewImage.Visibility = Visibility.Collapsed;
-            }
-
+            DirectX12PreviewLayer.Visibility = Visibility.Visible;
+            PreviewImage.Source = null;
+            PreviewImage.Visibility = Visibility.Collapsed;
             PreviewPlaceholder.Visibility = Visibility.Collapsed;
-            UpdateFaceCueGuideOverlay(frame as BitmapSource);
             return;
         }
 
@@ -1789,9 +1963,9 @@ public partial class MainWindow : Window
         UpdateFaceCueGuideOverlay(frame as BitmapSource);
     }
 
-    private bool ShouldUseWpfTrackingPreview(ImageSource frame)
+    private bool IsNativeDirectX12PreviewActive()
     {
-        return frame is BitmapSource
+        return IsDirectX12PreviewEnabled()
             && _directX12NativeCamera is not null;
     }
 
@@ -1910,7 +2084,7 @@ public partial class MainWindow : Window
         _avatarLearningRequested = !_avatarLearningRequested;
         UpdateAvatarLearningStatusUi();
         SetStatus(_avatarLearningRequested
-            ? "Avatar capture started. 3DDFA owns dense avatar reconstruction; MediaPipe eye/jaw/brow tracking stays live for overlays and capture measurements."
+            ? $"Avatar capture started. 3DDFA owns dense avatar reconstruction; {GetFaceBoxSystemDisplayName()} face tracking stays live for overlays and capture measurements."
             : "Avatar capture stopped.");
     }
 
@@ -1955,21 +2129,22 @@ public partial class MainWindow : Window
                 ? "3DDFA/ONNX reconstructing latest avatar frame"
                 : !string.IsNullOrWhiteSpace(response.Status) ? response.Status : "3DDFA/ONNX ready; waiting for avatar frame"
             : _threeDdfaOnnxEnvironment.Status;
-        var fastStatus = _faceLandmarkTracker.IsAvailable
-            ? _faceLandmarkTracker.LastBackendStatus
-            : "fast tracking lane unavailable";
+        var fastTrackingAvailable = IsSelectedFaceBoxSystemAvailable();
+        var fastStatus = fastTrackingAvailable
+            ? _lastFaceBoxBackendStatus
+            : $"{GetFaceBoxSystemDisplayName()} tracking unavailable";
         var trustLevel = !IsAvatarUserLoggedIn
             ? "logged-out"
             : response.Ok && response.HasFace
             ? "cross-checked"
             : canRun ? "3DDFA-ready" : "measurement-only";
         var trustDecision = !IsAvatarUserLoggedIn
-            ? "Avatar reconstruction: logged out; capture stopped. MediaPipe preview tracking remains live."
+            ? $"Avatar reconstruction: logged out; capture stopped. {GetFaceBoxSystemDisplayName()} preview tracking remains live."
             : response.Ok && response.HasFace
             ? $"Avatar reconstruction: 3DDFA lock {response.ReconstructionConfidencePercent:0}% | A/B/C {response.Pose.ARotationAroundXDegrees:0.#}/{response.Pose.BRotationAroundYDegrees:0.#}/{response.Pose.CRotationAroundZDegrees:0.#} deg | dense {response.DenseVertexCount} vertices."
             : canRun
-                ? $"Avatar reconstruction: {reconstructionStatus}. MediaPipe remains live tracking."
-                : $"Avatar reconstruction: waiting for 3DDFA/ONNX install. MediaPipe remains live tracking. {_threeDdfaOnnxEnvironment.Status}";
+                ? $"Avatar reconstruction: {reconstructionStatus}. {GetFaceBoxSystemDisplayName()} remains live tracking."
+                : $"Avatar reconstruction: waiting for 3DDFA/ONNX install. {GetFaceBoxSystemDisplayName()} tracking status: {_threeDdfaOnnxEnvironment.Status}";
 
         var warnings = new List<string>();
         if (!canRun)
@@ -1981,7 +2156,8 @@ public partial class MainWindow : Window
         return new FaceReconstructionLaneStatus
         {
             CreatedAtUtc = DateTime.UtcNow,
-            FastTrackingAvailable = _faceLandmarkTracker.IsAvailable,
+            FastTrackingLaneName = $"{GetFaceBoxSystemDisplayName()} face-box tracking lane",
+            FastTrackingAvailable = fastTrackingAvailable,
             FastTrackingHasDenseFace = _currentFaceLandmarkFrame.HasDenseMesh,
             FastTrackingStatus = string.IsNullOrWhiteSpace(fastStatus) ? "fast tracking waiting" : fastStatus,
             AvatarReconstructionManifestPresent = _threeDdfaOnnxModelInfo.ManifestExists,
@@ -1998,8 +2174,10 @@ public partial class MainWindow : Window
             LearningImpact = !IsAvatarUserLoggedIn
                 ? "No avatar observations are accepted until a user logs in and starts capture."
                 : canRun
-                ? "3DDFA/ONNX runs asynchronously for avatar reconstruction trust and does not block live MediaPipe tracking."
-                : "Live MediaPipe/OpenCV tracking remains available while avatar reconstruction waits for the 3DDFA/ONNX bundle.",
+                ? _selectedFaceBoxSystem == FaceBoxSystem.ThreeDdfaV2
+                    ? "The selected 3DDFA-V2 pass owns both live face-box tracking and avatar reconstruction evidence."
+                    : "3DDFA/ONNX runs asynchronously for avatar reconstruction trust and does not block live MediaPipe tracking."
+                : $"Live {GetFaceBoxSystemDisplayName()} tracking remains available while avatar reconstruction waits for the 3DDFA/ONNX bundle.",
             Warnings = warnings
         };
     }
@@ -2105,7 +2283,7 @@ public partial class MainWindow : Window
             return new AvatarLearningState(
                 _threeDdfaOnnxEnvironment.IsReady,
                 _threeDdfaOnnxEnvironment.IsReady ? "Capturing 3D avatar data" : "Avatar capture waiting",
-                $"{reconstruction} MediaPipe eye/jaw/brow tracking stays live for overlays and capture measurements.",
+                $"{reconstruction} {GetFaceBoxSystemDisplayName()} eye/jaw/brow tracking stays live for overlays and capture measurements.",
                 _threeDdfaOnnxEnvironment.IsReady ? Color.FromRgb(74, 163, 107) : Color.FromRgb(215, 165, 58));
         }
 
@@ -2124,20 +2302,28 @@ public partial class MainWindow : Window
         if (!IsAvatarUserLoggedIn)
         {
             return new AvatarTrackingSanityState(
-                "Tracking sanity: avatar capture is logged out. MediaPipe preview tracking remains live, but 3DDFA avatar observations are not being collected.",
+                $"Tracking sanity: avatar capture is logged out. {GetFaceBoxSystemDisplayName()} preview tracking remains live, but 3DDFA avatar observations are not being collected.",
                 Color.FromRgb(185, 215, 239));
+        }
+
+        var alignment = _poseAlignmentAuditor.CurrentSummary;
+        if (!alignment.ReadyForComparison)
+        {
+            return new AvatarTrackingSanityState(
+                $"Tracking sanity: 3DDFA_V2 ONNX owns avatar A/B/C pose and depth. The MediaPipe comparison is diagnostic only and has {alignment.SampleCount} exact-frame pair(s). {alignment.Guidance}",
+                Color.FromRgb(255, 210, 122));
         }
 
         if (HasStrongThreeDdfaPoseLock())
         {
             return new AvatarTrackingSanityState(
-                $"Tracking sanity: 3DDFA_V2 ONNX owns avatar pose/depth. MediaPipe eye/jaw/brow tracking remains active for overlays and capture measurements. {FormatThreeDdfaPoseCrossCheck()}",
+                $"Tracking sanity: 3DDFA_V2 ONNX owns avatar pose/depth. {GetFaceBoxSystemDisplayName()} eye/jaw/brow tracking remains active for overlays and capture measurements. {FormatThreeDdfaPoseCrossCheck()}",
                 Color.FromRgb(128, 224, 164));
         }
 
         var detail = _threeDdfaOnnxEnvironment.IsReady
-            ? "Tracking sanity: MediaPipe eye/jaw/brow tracking is live; waiting for a strong 3DDFA_V2 ONNX pose lock before trusting avatar pose/depth."
-            : $"Tracking sanity: MediaPipe eye/jaw/brow tracking is live; 3DDFA_V2 ONNX avatar reconstruction is waiting. {_threeDdfaOnnxEnvironment.Status}";
+            ? $"Tracking sanity: {GetFaceBoxSystemDisplayName()} eye/jaw/brow tracking is live; waiting for a strong 3DDFA_V2 ONNX pose lock before trusting avatar pose/depth."
+            : $"Tracking sanity: {GetFaceBoxSystemDisplayName()} face tracking is selected; 3DDFA_V2 ONNX avatar reconstruction is waiting. {_threeDdfaOnnxEnvironment.Status}";
         return new AvatarTrackingSanityState(detail, Color.FromRgb(185, 215, 239));
     }
 
@@ -2414,7 +2600,7 @@ public partial class MainWindow : Window
     private void QueueFaceFeatureDetection(BitmapSource bitmap, DateTime now)
     {
         if (_isClosing
-            || !_faceLandmarkTracker.IsAvailable
+            || !IsSelectedFaceBoxSystemAvailable()
             || FaceAutoFollowCheckBox.IsChecked != true
             || now - _lastFaceFeatureDetectionAt < FaceFeatureDetectionTargetInterval)
         {
@@ -2426,6 +2612,8 @@ public partial class MainWindow : Window
         {
             _pendingFaceFeatureDetectionFrame = bitmap;
             _pendingFaceFeatureDetectionCapturedAtUtc = now;
+            _pendingFaceBoxSystem = _selectedFaceBoxSystem;
+            _pendingFaceBoxSystemGeneration = _faceBoxSystemGeneration;
         }
 
         if (Interlocked.Exchange(ref _faceFeatureDetectionPending, 1) == 0)
@@ -2440,10 +2628,14 @@ public partial class MainWindow : Window
         {
             BitmapSource? bitmap;
             DateTime capturedAtUtc;
+            FaceBoxSystem faceBoxSystem;
+            int faceBoxSystemGeneration;
             lock (_faceFeatureDetectionFrameLock)
             {
                 bitmap = _pendingFaceFeatureDetectionFrame;
                 capturedAtUtc = _pendingFaceFeatureDetectionCapturedAtUtc;
+                faceBoxSystem = _pendingFaceBoxSystem;
+                faceBoxSystemGeneration = _pendingFaceBoxSystemGeneration;
                 _pendingFaceFeatureDetectionFrame = null;
                 _pendingFaceFeatureDetectionCapturedAtUtc = DateTime.MinValue;
             }
@@ -2453,17 +2645,20 @@ public partial class MainWindow : Window
                 break;
             }
 
-            var result = FaceLandmarkTrackingResult.None;
             try
             {
-                lock (_faceLandmarkTrackerLock)
+                if (faceBoxSystemGeneration != _faceBoxSystemGeneration
+                    || faceBoxSystem != _selectedFaceBoxSystem)
                 {
-                    result = _isClosing
-                        ? FaceLandmarkTrackingResult.None
-                        : _faceLandmarkTracker.Detect(bitmap, capturedAtUtc == DateTime.MinValue ? DateTime.UtcNow : capturedAtUtc);
+                    continue;
                 }
 
-                await ApplyFaceFeatureDetectionResultAsync(result);
+                var trackingResult = DetectFaceBox(
+                    bitmap,
+                    capturedAtUtc == DateTime.MinValue ? DateTime.UtcNow : capturedAtUtc,
+                    faceBoxSystem,
+                    faceBoxSystemGeneration);
+                await ApplyFaceFeatureDetectionResultAsync(trackingResult);
             }
             catch (Exception ex)
             {
@@ -2482,16 +2677,177 @@ public partial class MainWindow : Window
         }
     }
 
-    private Task ApplyFaceFeatureDetectionResultAsync(FaceLandmarkTrackingResult result)
+    private FaceBoxTrackingFrameResult DetectFaceBox(
+        BitmapSource bitmap,
+        DateTime capturedAtUtc,
+        FaceBoxSystem faceBoxSystem,
+        int faceBoxSystemGeneration)
+    {
+        var stopwatch = Stopwatch.StartNew();
+        if (faceBoxSystem == FaceBoxSystem.MediaPipe)
+        {
+            FaceLandmarkTrackingResult result;
+            lock (_faceLandmarkTrackerLock)
+            {
+                result = _isClosing || _faceLandmarkTracker is null
+                    ? FaceLandmarkTrackingResult.None
+                    : _faceLandmarkTracker.Detect(bitmap, capturedAtUtc);
+            }
+
+            stopwatch.Stop();
+            return new FaceBoxTrackingFrameResult(
+                faceBoxSystem,
+                faceBoxSystemGeneration,
+                result,
+                null,
+                null,
+                "",
+                0L,
+                capturedAtUtc,
+                bitmap,
+                stopwatch.Elapsed.TotalMilliseconds);
+        }
+
+        ThreeDdfaOnnxReconstructionClient? client;
+        lock (_threeDdfaClientLock)
+        {
+            client = _threeDdfaFaceBoxClient;
+        }
+
+        ThreeDdfaOnnxSidecarResponse response;
+        ThreeDdfaReconstructionSnapshot? snapshot = null;
+        var profileId = CurrentAvatarProfileId;
+        var sessionGeneration = _avatarUserSession.Generation;
+        var requestDenseAvatarSample = IsAvatarUserLoggedIn
+            && _avatarLearningRequested
+            && _avatarCaptureGateAccepted
+            && (capturedAtUtc - _lastThreeDdfaOnnxRequestAtUtc).TotalMilliseconds >= ThreeDdfaDenseSampleIntervalMilliseconds;
+        if (requestDenseAvatarSample)
+        {
+            _lastThreeDdfaOnnxRequestAtUtc = capturedAtUtc;
+        }
+
+        Interlocked.Exchange(ref _threeDdfaOnnxReconstructionPending, 1);
+        try
+        {
+            var refreshFaceBoxes = _threeDdfaTrackingFaceBox is null
+                || (capturedAtUtc - _lastThreeDdfaFaceBoxesAtUtc).TotalMilliseconds >= 1000d;
+            var trackingFaceBox = requestDenseAvatarSample || !refreshFaceBoxes
+                ? _threeDdfaTrackingFaceBox
+                : null;
+            if (trackingFaceBox is null)
+            {
+                _lastThreeDdfaFaceBoxesAtUtc = capturedAtUtc;
+            }
+
+            response = client is null
+                ? new ThreeDdfaOnnxSidecarResponse
+                {
+                    Ok = false,
+                    Status = "3DDFA-V2 face-box client stopped",
+                    TrustDecision = "The selected 3DDFA-V2 tracking session is no longer active."
+                }
+                : client.Reconstruct(
+                    bitmap,
+                    capturedAtUtc,
+                    faceBox: trackingFaceBox,
+                    mode: requestDenseAvatarSample
+                        ? ThreeDdfaOnnxRequestMode.Full
+                        : ThreeDdfaOnnxRequestMode.Tracking,
+                    denseSampleStride: requestDenseAvatarSample ? 1 : 200);
+            if (response.Ok && response.HasFace)
+            {
+                _threeDdfaTrackingFaceBox = CreateThreeDdfaTrackingFaceBox(
+                    response,
+                    bitmap.PixelWidth,
+                    bitmap.PixelHeight);
+            }
+            else if (client is not null && trackingFaceBox is not null)
+            {
+                _visionBenchmarkRecorder.Record(response.Diagnostics);
+                _lastThreeDdfaFaceBoxesAtUtc = capturedAtUtc;
+                response = client.Reconstruct(
+                    bitmap,
+                    capturedAtUtc,
+                    faceBox: null,
+                    mode: ThreeDdfaOnnxRequestMode.Tracking,
+                    denseSampleStride: 200);
+                if (response.Ok && response.HasFace)
+                {
+                    _threeDdfaTrackingFaceBox = CreateThreeDdfaTrackingFaceBox(
+                        response,
+                        bitmap.PixelWidth,
+                        bitmap.PixelHeight);
+                }
+            }
+
+            if (requestDenseAvatarSample)
+            {
+                snapshot = CreateThreeDdfaLastGoodSnapshot(response, capturedAtUtc);
+            }
+        }
+        catch (Exception ex)
+        {
+            response = new ThreeDdfaOnnxSidecarResponse
+            {
+                Ok = false,
+                Status = $"3DDFA-V2 face tracking failed: {ex.Message}",
+                TrustDecision = "3DDFA-V2 face tracking failed for this frame."
+            };
+        }
+        finally
+        {
+            Interlocked.Exchange(ref _threeDdfaOnnxReconstructionPending, 0);
+            if (faceBoxSystemGeneration != _faceBoxSystemGeneration
+                || faceBoxSystem != _selectedFaceBoxSystem)
+            {
+                client?.Dispose();
+            }
+        }
+
+        stopwatch.Stop();
+        var tracking = ThreeDdfaOnnxFaceTrackingMapper.ToTrackingResult(
+            response,
+            bitmap.PixelWidth,
+            bitmap.PixelHeight,
+            capturedAtUtc);
+        return new FaceBoxTrackingFrameResult(
+            faceBoxSystem,
+            faceBoxSystemGeneration,
+            tracking,
+            response,
+            snapshot,
+            profileId,
+            sessionGeneration,
+            capturedAtUtc,
+            bitmap,
+            stopwatch.Elapsed.TotalMilliseconds);
+    }
+
+    private Task ApplyFaceFeatureDetectionResultAsync(FaceBoxTrackingFrameResult trackingResult)
     {
         return Dispatcher.InvokeAsync(() =>
         {
-            if (_isClosing)
+            if (_isClosing
+                || trackingResult.FaceBoxSystemGeneration != _faceBoxSystemGeneration
+                || trackingResult.FaceBoxSystem != _selectedFaceBoxSystem)
             {
                 return;
             }
 
             var now = DateTime.UtcNow;
+            TrackFaceBoxPerformance(trackingResult, now);
+            if (trackingResult.ThreeDdfaResponse is not null)
+            {
+                _currentThreeDdfaOnnxResponse = trackingResult.ThreeDdfaResponse;
+                if (trackingResult.ThreeDdfaSnapshot is not null
+                    && _avatarUserSession.Matches(trackingResult.ProfileId, trackingResult.SessionGeneration))
+                {
+                    TrackLastGoodThreeDdfaSnapshot(trackingResult.ThreeDdfaSnapshot);
+                }
+            }
+
+            var result = trackingResult.TrackingResult;
             var detection = result.FeatureDetection;
             if (detection.HasFace)
             {
@@ -2513,8 +2869,17 @@ public partial class MainWindow : Window
                     _currentFaceFeatureDetection,
                     _currentFaceLandmarkFrame,
                     _currentFaceLandmarkMetrics);
-                QueueThreeDdfaOnnxReconstruction(_latestFrame, now);
                 UpdateAvatarCaptureState(now);
+                if (_selectedFaceBoxSystem == FaceBoxSystem.MediaPipe)
+                {
+                    QueueThreeDdfaOnnxReconstruction(
+                        trackingResult.SourceFrame,
+                        trackingResult.CapturedAtUtc,
+                        new PoseAngles(
+                            _currentFaceLandmarkFrame.HeadPitchDegrees,
+                            _currentFaceLandmarkFrame.HeadYawDegrees,
+                            _currentFaceLandmarkFrame.HeadRollDegrees));
+                }
             }
             else if (!HasUsableFaceFeatureLock(now))
             {
@@ -2531,15 +2896,52 @@ public partial class MainWindow : Window
         }, DispatcherPriority.Background).Task;
     }
 
-    private void QueueThreeDdfaOnnxReconstruction(BitmapSource? bitmap, DateTime capturedAtUtc)
+    private void TrackFaceBoxPerformance(FaceBoxTrackingFrameResult trackingResult, DateTime now)
+    {
+        _visionBenchmarkRecorder.Record(trackingResult.TrackingResult.Diagnostics);
+        _lastFaceBoxInferenceMilliseconds = trackingResult.InferenceMilliseconds;
+        _lastFaceBoxBackendStatus = trackingResult.TrackingResult.BackendStatus;
+        if (_faceBoxRateWindowStartedAtUtc == DateTime.MinValue)
+        {
+            _faceBoxRateWindowStartedAtUtc = now;
+        }
+
+        _faceBoxResultsInRateWindow++;
+        var elapsed = now - _faceBoxRateWindowStartedAtUtc;
+        if (elapsed.TotalSeconds < 2d)
+        {
+            return;
+        }
+
+        _faceBoxResultsPerSecond = _faceBoxResultsInRateWindow / Math.Max(0.001d, elapsed.TotalSeconds);
+        _faceBoxResultsInRateWindow = 0;
+        _faceBoxRateWindowStartedAtUtc = now;
+    }
+
+    private void QueueThreeDdfaOnnxReconstruction(
+        BitmapSource? bitmap,
+        DateTime capturedAtUtc,
+        PoseAngles mediaPipePose)
     {
         if (_isClosing
+            || _selectedFaceBoxSystem != FaceBoxSystem.MediaPipe
             || bitmap is null
             || !_threeDdfaOnnxEnvironment.IsReady
             || !IsAvatarUserLoggedIn
             || !_avatarLearningRequested
+            || !_avatarCaptureGateAccepted
             || !_currentFaceFeatureDetection.HasFace
-            || (capturedAtUtc - _lastThreeDdfaOnnxRequestAtUtc).TotalMilliseconds < 900d)
+            || (capturedAtUtc - _lastThreeDdfaOnnxRequestAtUtc).TotalMilliseconds < ThreeDdfaDenseSampleIntervalMilliseconds)
+        {
+            return;
+        }
+
+        ThreeDdfaOnnxReconstructionClient? client;
+        lock (_threeDdfaClientLock)
+        {
+            client = _threeDdfaAvatarClient;
+        }
+        if (client is null)
         {
             return;
         }
@@ -2559,31 +2961,48 @@ public partial class MainWindow : Window
         var faceBox = CreateThreeDdfaFaceBox(_currentFaceFeatureDetection);
         var profileId = CurrentAvatarProfileId;
         var sessionGeneration = _avatarUserSession.Generation;
+        var faceBoxSystem = _selectedFaceBoxSystem;
+        var faceBoxSystemGeneration = _faceBoxSystemGeneration;
         _ = Task.Run(() => ProcessThreeDdfaOnnxReconstructionAsync(
+            client,
             frame,
             capturedAtUtc,
             faceBox,
             profileId,
-            sessionGeneration));
+            sessionGeneration,
+            faceBoxSystem,
+            faceBoxSystemGeneration,
+            mediaPipePose));
     }
 
     private async Task ProcessThreeDdfaOnnxReconstructionAsync(
+        ThreeDdfaOnnxReconstructionClient client,
         BitmapSource bitmap,
         DateTime capturedAtUtc,
         ThreeDdfaOnnxSidecarFaceBox? faceBox,
         string profileId,
-        long sessionGeneration)
+        long sessionGeneration,
+        FaceBoxSystem faceBoxSystem,
+        int faceBoxSystemGeneration,
+        PoseAngles mediaPipePose)
     {
         ThreeDdfaOnnxSidecarResponse response;
         ThreeDdfaReconstructionSnapshot? snapshot = null;
         try
         {
-            response = _threeDdfaOnnxClient.Reconstruct(
+            response = client.Reconstruct(
                 bitmap,
                 capturedAtUtc,
                 faceBox,
-                returnDenseVertices: true,
+                mode: ThreeDdfaOnnxRequestMode.Full,
                 denseSampleStride: 1);
+            _visionBenchmarkRecorder.Record(response.Diagnostics);
+            var requestStillOwned = faceBoxSystemGeneration == _faceBoxSystemGeneration
+                && faceBoxSystem == _selectedFaceBoxSystem
+                && _avatarUserSession.Matches(profileId, sessionGeneration);
+            var alignment = response.Ok && response.HasFace && requestStillOwned
+                ? _poseAlignmentAuditor.Record(capturedAtUtc, mediaPipePose, response.Pose)
+                : _poseAlignmentAuditor.CurrentSummary;
             snapshot = CreateThreeDdfaLastGoodSnapshot(response, capturedAtUtc);
         }
         catch (Exception ex)
@@ -2598,11 +3017,19 @@ public partial class MainWindow : Window
         finally
         {
             Interlocked.Exchange(ref _threeDdfaOnnxReconstructionPending, 0);
+            if (faceBoxSystemGeneration != _faceBoxSystemGeneration
+                || faceBoxSystem != _selectedFaceBoxSystem)
+            {
+                client.Dispose();
+            }
         }
 
         await Dispatcher.InvokeAsync(() =>
         {
-            if (_isClosing || !_avatarUserSession.Matches(profileId, sessionGeneration))
+            if (_isClosing
+                || !_avatarUserSession.Matches(profileId, sessionGeneration)
+                || faceBoxSystemGeneration != _faceBoxSystemGeneration
+                || faceBoxSystem != _selectedFaceBoxSystem)
             {
                 return;
             }
@@ -2660,6 +3087,38 @@ public partial class MainWindow : Window
 
     }
 
+    private static ThreeDdfaOnnxSidecarFaceBox? CreateThreeDdfaTrackingFaceBox(
+        ThreeDdfaOnnxSidecarResponse response,
+        int frameWidth,
+        int frameHeight)
+    {
+        if (!response.Ok || !response.HasFace || response.SparseLandmarks.Count < 20)
+        {
+            return response.FaceBox;
+        }
+
+        var minX = response.SparseLandmarks.Min(static point => point.X);
+        var maxX = response.SparseLandmarks.Max(static point => point.X);
+        var minY = response.SparseLandmarks.Min(static point => point.Y);
+        var maxY = response.SparseLandmarks.Max(static point => point.Y);
+        var width = maxX - minX;
+        var height = maxY - minY;
+        if (width <= 1d || height <= 1d)
+        {
+            return response.FaceBox;
+        }
+
+        return new ThreeDdfaOnnxSidecarFaceBox
+        {
+            Left = Math.Clamp(minX - width * 0.14d, 0d, Math.Max(0d, frameWidth - 1d)),
+            Top = Math.Clamp(minY - height * 0.30d, 0d, Math.Max(0d, frameHeight - 1d)),
+            Right = Math.Clamp(maxX + width * 0.14d, 1d, Math.Max(1d, frameWidth)),
+            Bottom = Math.Clamp(maxY + height * 0.12d, 1d, Math.Max(1d, frameHeight)),
+            Normalized = false,
+            Confidence = Math.Clamp(response.ReconstructionConfidencePercent / 100d, 0.01d, 1d)
+        };
+    }
+
     private static ThreeDdfaReconstructionSnapshot? CreateThreeDdfaLastGoodSnapshot(
         ThreeDdfaOnnxSidecarResponse response,
         DateTime sampleCapturedAtUtc)
@@ -2696,6 +3155,15 @@ public partial class MainWindow : Window
             PoseSource = response.Pose.Source,
             TrustDecision = response.TrustDecision,
             Vertices = response.DenseVertices
+                .Select(static vertex => new FaceMeshLandmarkPoint
+                {
+                    Index = vertex.Index,
+                    X = RoundThreeDdfaValue(vertex.X),
+                    Y = RoundThreeDdfaValue(vertex.Y),
+                    Z = RoundThreeDdfaValue(vertex.Z)
+                })
+                .ToList(),
+            CanonicalIdentityVertices = response.CanonicalIdentityVertices
                 .Select(static vertex => new FaceMeshLandmarkPoint
                 {
                     Index = vertex.Index,
@@ -2768,7 +3236,10 @@ public partial class MainWindow : Window
         _currentFaceLockStabilityAnalysis = FaceLockStabilityAnalysis.Waiting;
         _currentFaceFrameGeometry = FaceFrameGeometry.None;
         _currentAvatarCaptureQuality = AvatarCaptureQualityAssessment.Waiting;
-        _faceLandmarkTracker.Reset();
+        lock (_faceLandmarkTrackerLock)
+        {
+            _faceLandmarkTracker?.Reset();
+        }
         _faceLandmarkReconstructor.Reset();
         _faceLandmarkMetricCalculator.Reset();
         _faceLockStabilityAnalyzer.Reset();
@@ -2802,7 +3273,9 @@ public partial class MainWindow : Window
             return;
         }
 
-        ResetAvatarCaptureGate(AvatarCaptureStatusReason, accepted: true);
+        ResetAvatarCaptureGate(
+            $"3DDFA avatar capture active; {GetFaceBoxSystemDisplayName()} face tracking remains live",
+            accepted: true);
         _currentAvatarCaptureQuality = preflightCaptureQuality;
         SaveAvatarReportsIfDue(utcNow);
         UpdateAvatarLearningStatusUi();
@@ -2963,27 +3436,54 @@ public partial class MainWindow : Window
         var avatarModelHistoryStore = new AvatarModelHistoryStore();
         var avatarModelStore = new AvatarModelStore();
 
-        var lastGoodThreeDdfaFiles = lastGoodThreeDdfaStore.Write(
-            snapshot.Folder,
-            new LastGoodThreeDdfaReport
-            {
-                SubjectId = snapshot.SubjectId,
-                SubjectDisplayName = snapshot.SubjectDisplayName,
-                AvatarModelProgressHtmlPath = AvatarModelStore.GetHtmlPath(snapshot.Folder),
-                ReconstructionLane = snapshot.ReconstructionLane,
-                Samples = snapshot.LastGoodThreeDdfaSamples
-            });
-        var avatarModelObservations = avatarModelObservationStore.MergeAndWrite(
+        var observationMerge = avatarModelObservationStore.MergeAndWrite(
             snapshot.Folder,
             snapshot.SubjectId,
             snapshot.SubjectDisplayName,
             snapshot.LastGoodThreeDdfaSamples);
-        var avatarModel = AvatarModelBuilder.Build(avatarModelObservations);
-        var avatarModelHistory = avatarModelHistoryStore.RecordAndWrite(
-            snapshot.Folder,
-            avatarModelObservations,
-            avatarModel);
-        var avatarModelJsonPath = avatarModelStore.Write(snapshot.Folder, avatarModel);
+        var avatarModelObservations = observationMerge.ObservationSet;
+        var lastGoodJsonPath = LastGoodThreeDdfaStore.GetJsonPath(snapshot.Folder);
+        var lastGoodHtmlPath = LastGoodThreeDdfaStore.GetHtmlPath(snapshot.Folder);
+        LastGoodThreeDdfaFiles lastGoodThreeDdfaFiles;
+        if (observationMerge.Changed || !File.Exists(lastGoodJsonPath) || !File.Exists(lastGoodHtmlPath))
+        {
+            lastGoodThreeDdfaFiles = lastGoodThreeDdfaStore.Write(
+                snapshot.Folder,
+                new LastGoodThreeDdfaReport
+                {
+                    SubjectId = snapshot.SubjectId,
+                    SubjectDisplayName = snapshot.SubjectDisplayName,
+                    AvatarModelProgressHtmlPath = AvatarModelStore.GetHtmlPath(snapshot.Folder),
+                    ReconstructionLane = snapshot.ReconstructionLane,
+                    Samples = snapshot.LastGoodThreeDdfaSamples
+                });
+        }
+        else
+        {
+            lastGoodThreeDdfaFiles = new LastGoodThreeDdfaFiles(lastGoodJsonPath, lastGoodHtmlPath);
+        }
+
+        var avatarModelJsonPath = AvatarModelStore.GetJsonPath(snapshot.Folder);
+        var avatarModel = avatarModelStore.Read(snapshot.Folder);
+        AvatarModelHistoryReport avatarModelHistory;
+        if (observationMerge.Changed
+            || avatarModel is null
+            || !string.Equals(
+                avatarModel.SchemaVersion,
+                AvatarModel.CurrentSchemaVersion,
+                StringComparison.Ordinal))
+        {
+            avatarModel = AvatarModelBuilder.Build(avatarModelObservations);
+            avatarModelHistory = avatarModelHistoryStore.RecordAndWrite(
+                snapshot.Folder,
+                avatarModelObservations,
+                avatarModel);
+            avatarModelJsonPath = avatarModelStore.Write(snapshot.Folder, avatarModel);
+        }
+        else
+        {
+            avatarModelHistory = avatarModelHistoryStore.ReadReport(snapshot.Folder);
+        }
 
         var dashboard = new AvatarSystemDashboard
         {
@@ -2997,6 +3497,7 @@ public partial class MainWindow : Window
             CurrentCaptureQuality = snapshot.CaptureQuality,
             CurrentFaceFrameGeometry = snapshot.FaceFrameGeometry,
             ReconstructionLane = snapshot.ReconstructionLane,
+            FastTrackingSummary = $"{snapshot.ReconstructionLane.FastTrackingLaneName} supplies live face, eye, jaw, brow, mouth, overlay, and capture measurements.",
             LastGoodThreeDdfaSampleCount = snapshot.LastGoodThreeDdfaSamples.Count,
             LastGoodThreeDdfaHtmlPath = lastGoodThreeDdfaFiles.HtmlPath,
             AvatarModelStatus = avatarModel.Status,
@@ -3111,8 +3612,10 @@ public partial class MainWindow : Window
         }
 
         _outputFolder = selectedFolder;
+        _visionBenchmarkRecorder.SetOutputRoot(_outputFolder);
         SaveOutputFolderPointer(_outputFolder);
         InitializeAvatarProfiles(promptForStartupUser: false);
+        _poseAlignmentAuditor.SetOutputRoot(GetAvatarDataFolder());
         var avatarStatus = PrepareAvatarCaptureFolder(showStatus: false);
         var loginStatus = userWasLoggedIn ? " The previous avatar user was logged out." : "";
         var status = $"Avatar data folder set: {_outputFolder}.{loginStatus} {avatarStatus}".Trim();
@@ -3123,6 +3626,27 @@ public partial class MainWindow : Window
     private void CloseClicked(object sender, RoutedEventArgs e)
     {
         Close();
+    }
+
+    private void OpenPoseAlignmentAuditClicked(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            _poseAlignmentAuditor.EnsureReport();
+            var path = _poseAlignmentAuditor.GetHtmlPath();
+            if (string.IsNullOrWhiteSpace(path))
+            {
+                SetStatus("A/B/C alignment audit is waiting for a configured data folder.");
+                return;
+            }
+
+            OpenLocalFile(path);
+            SetStatus($"Opened A/B/C alignment audit: {path}");
+        }
+        catch (Exception ex)
+        {
+            SetStatus($"Could not open A/B/C alignment audit: {ex.Message}");
+        }
     }
 
     private FaceCueGuideLayout GetFaceCueLayout()
@@ -3377,7 +3901,7 @@ public partial class MainWindow : Window
             UpdateAvatarCaptureQuality();
             UpdateAvatarLearningStatusUi();
 
-            var status = $"Avatar capture folder ready: {folder}. 3DDFA_V2 ONNX stores dense reconstruction review data; MediaPipe eye/jaw/brow tracking remains live.";
+            var status = $"Avatar capture folder ready: {folder}. 3DDFA_V2 ONNX stores dense reconstruction review data; {GetFaceBoxSystemDisplayName()} eye/jaw/brow tracking remains live.";
             if (showStatus)
             {
                 MonitorStatusText.Text = status;
@@ -3688,6 +4212,14 @@ public partial class MainWindow : Window
         FaceCueGuideCanvas.Children.Clear();
         if (_showLiveWireframePreview)
         {
+            _directX12NativeCamera?.UpdateTrackingOverlay(PreviewTrackingOverlay.Empty);
+            FaceCueGuideCanvas.Visibility = Visibility.Collapsed;
+            return;
+        }
+
+        if (IsNativeDirectX12PreviewActive())
+        {
+            _directX12NativeCamera?.UpdateTrackingOverlay(CreateNativePreviewTrackingOverlay());
             FaceCueGuideCanvas.Visibility = Visibility.Collapsed;
             return;
         }
@@ -3749,6 +4281,30 @@ public partial class MainWindow : Window
         {
             AddLandmarkContours(display, _currentFaceLandmarkFrame);
         }
+    }
+
+    private PreviewTrackingOverlay CreateNativePreviewTrackingOverlay()
+    {
+        if (!HasUsableFaceFeatureLock(DateTime.UtcNow))
+        {
+            return PreviewTrackingOverlay.Empty;
+        }
+
+        return new PreviewTrackingOverlay(
+            ToPreviewOverlayRect(_currentFaceFeatureDetection.FaceBox),
+            ToPreviewOverlayRect(_currentFaceFeatureDetection.LeftEyeBox),
+            ToPreviewOverlayRect(_currentFaceFeatureDetection.RightEyeBox),
+            ToPreviewOverlayRect(_currentFaceFeatureDetection.MouthBox));
+    }
+
+    private static PreviewOverlayRect? ToPreviewOverlayRect(Rect? region)
+    {
+        if (region is not Rect rect || rect.IsEmpty || rect.Width <= 0d || rect.Height <= 0d)
+        {
+            return null;
+        }
+
+        return new PreviewOverlayRect(rect.Left, rect.Top, rect.Right, rect.Bottom).Clamp();
     }
 
     private Rect GetPreviewDisplayRect(BitmapSource bitmap)
@@ -3906,15 +4462,15 @@ public partial class MainWindow : Window
     private IReadOnlyList<string> CreateOverlayMetricLines()
     {
         var lines = new List<string>();
-        if (_faceLandmarkTracker.IsAvailable && FaceAutoFollowCheckBox.IsChecked == true)
+        if (IsSelectedFaceBoxSystemAvailable() && FaceAutoFollowCheckBox.IsChecked == true)
         {
             var now = DateTime.UtcNow;
             var detectionLabel = GetFaceFeatureTrackerStatus(now);
-            lines.Add($"Fast face tracking: {detectionLabel}");
+            lines.Add($"Face box tracking: {detectionLabel}");
         }
         else
         {
-            lines.Add("Fast face tracking: manual field");
+            lines.Add($"Face box tracking: {GetFaceBoxSystemDisplayName()} manual field");
         }
 
         lines.Add(FormatCompactFaceSignalLine(_currentFaceLandmarkMetrics));
@@ -3949,7 +4505,7 @@ public partial class MainWindow : Window
         return $"Eyes {FormatRatioPercent(metrics.AverageEyeOpeningRatio)} ({eyeLock} q{metrics.EyeMeasurementQualityPercent:0}%) | brow {FormatRatioPercent(metrics.AverageBrowHeightRatio)} ({browLock} q{metrics.BrowMeasurementQualityPercent:0}%) | mouth {FormatRatioPercent(metrics.MouthOpeningRatio)} ({mouthLock} q{metrics.MouthMeasurementQualityPercent:0}%) | jaw {FormatRatioPercent(metrics.JawDroopRatio)}{blink}{jawOpen}{artifact}";
     }
 
-    private static string FormatCompactFaceFrameGeometryLine(FaceFrameGeometry pose)
+    private string FormatCompactFaceFrameGeometryLine(FaceFrameGeometry pose)
     {
         if (!pose.HasFace)
         {
@@ -3967,7 +4523,7 @@ public partial class MainWindow : Window
         var fill = pose.FaceFillWidthPercent is double width && pose.FaceFillHeightPercent is double height
             ? $" | fill {width:0.#}% x {height:0.#}%"
             : "";
-        return $"Face frame: X {pose.XHorizontalPercent:0.#}% | Y {pose.YVerticalPercent:0.#}% | {distance}{fill} | MP A/X {pose.ARotationAroundXDegrees:0.#} deg | B/Y {pose.BRotationAroundYDegrees:0.#} deg | C/Z {pose.CRotationAroundZDegrees:0.#} deg";
+        return $"Face frame: X {pose.XHorizontalPercent:0.#}% | Y {pose.YVerticalPercent:0.#}% | {distance}{fill} | {GetFaceBoxSystemDisplayName()} A/X {pose.ARotationAroundXDegrees:0.#} deg | B/Y {pose.BRotationAroundYDegrees:0.#} deg | C/Z {pose.CRotationAroundZDegrees:0.#} deg";
     }
 
     private string FormatCompactReconstructionLaneLine()
@@ -4056,32 +4612,36 @@ public partial class MainWindow : Window
 
     private string GetFaceFeatureTrackerStatus(DateTime now)
     {
-        if (!_faceLandmarkTracker.IsAvailable)
+        var backend = GetFaceBoxSystemDisplayName();
+        if (!IsSelectedFaceBoxSystemAvailable())
         {
-            return "landmark tracker unavailable";
+            return $"{backend} unavailable";
         }
 
+        var performance = _lastFaceBoxInferenceMilliseconds > 0d
+            ? $"{_faceBoxResultsPerSecond:0.#} result fps, {_lastFaceBoxInferenceMilliseconds:0} ms"
+            : "warming";
         if (HasFreshFaceFeatureLock(now))
         {
-            return "landmark face lock";
+            return $"{backend} face lock | {performance}";
         }
 
         if (HasUsableFaceFeatureLock(now))
         {
-            return "landmark face hold";
+            return $"{backend} face hold | {performance}";
         }
 
-        var trackerStatus = _faceLandmarkTracker.LastBackendStatus;
+        var trackerStatus = _lastFaceBoxBackendStatus;
         if (!string.IsNullOrWhiteSpace(trackerStatus) && trackerStatus.Contains("dense", StringComparison.OrdinalIgnoreCase))
         {
             return Interlocked.CompareExchange(ref _faceFeatureDetectionPending, 0, 0) == 1
-                ? $"landmark search ({trackerStatus})"
-                : $"landmark waiting ({trackerStatus})";
+                ? $"{backend} search | {performance} ({trackerStatus})"
+                : $"{backend} waiting | {performance} ({trackerStatus})";
         }
 
         return Interlocked.CompareExchange(ref _faceFeatureDetectionPending, 0, 0) == 1
-            ? "landmark search"
-            : "landmark waiting";
+            ? $"{backend} search | {performance}"
+            : $"{backend} waiting | {performance}";
     }
 
     private sealed record CameraControlBinding(
@@ -4094,6 +4654,18 @@ public partial class MainWindow : Window
     private sealed record LiveWireframeProjectedPoint(int Index, double X, double Y, double Z);
 
     private sealed record TrackingFidelityOption(int MaxOutputWidth, double MaxFramesPerSecond);
+
+    private sealed record FaceBoxTrackingFrameResult(
+        FaceBoxSystem FaceBoxSystem,
+        int FaceBoxSystemGeneration,
+        FaceLandmarkTrackingResult TrackingResult,
+        ThreeDdfaOnnxSidecarResponse? ThreeDdfaResponse,
+        ThreeDdfaReconstructionSnapshot? ThreeDdfaSnapshot,
+        string ProfileId,
+        long SessionGeneration,
+        DateTime CapturedAtUtc,
+        BitmapSource SourceFrame,
+        double InferenceMilliseconds);
 
     private sealed record AvatarLearningState(bool Active, string Title, string Detail, Color Accent);
 

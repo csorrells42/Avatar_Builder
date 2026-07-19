@@ -3,6 +3,7 @@ using System.IO;
 using System.Text.Json;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
+using AvatarBuilder.Modules.Vision.Diagnostics;
 
 namespace AvatarBuilder.Modules.Vision.Onnx;
 
@@ -10,11 +11,14 @@ public sealed class ThreeDdfaOnnxReconstructionClient : IDisposable
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
     private readonly ThreeDdfaOnnxSidecarEnvironment _environment;
+    private readonly string _clientSessionId = Guid.NewGuid().ToString("N")[..12];
     private readonly object _sync = new();
     private readonly TimeSpan _timeout;
     private Process? _process;
+    private string _lastStandardError = "";
     private bool _firstResponseAfterStart;
     private int _requestNumber;
+    private int _disposed;
 
     public ThreeDdfaOnnxReconstructionClient(ThreeDdfaOnnxSidecarEnvironment environment)
     {
@@ -28,11 +32,16 @@ public sealed class ThreeDdfaOnnxReconstructionClient : IDisposable
         BitmapSource bitmap,
         DateTime capturedAtUtc,
         ThreeDdfaOnnxSidecarFaceBox? faceBox,
-        bool returnDenseVertices = false,
+        ThreeDdfaOnnxRequestMode mode = ThreeDdfaOnnxRequestMode.Tracking,
         int denseSampleStride = 24)
     {
         lock (_sync)
         {
+            if (Volatile.Read(ref _disposed) != 0)
+            {
+                return Error("3DDFA/ONNX sidecar client is stopped.");
+            }
+
             if (!_environment.IsReady)
             {
                 return Error(_environment.Status);
@@ -45,23 +54,32 @@ public sealed class ThreeDdfaOnnxReconstructionClient : IDisposable
 
             try
             {
+                var totalStopwatch = Stopwatch.StartNew();
+                var prepareStopwatch = Stopwatch.StartNew();
+                var jpeg = EncodeJpeg(bitmap);
                 var request = new ThreeDdfaOnnxSidecarRequest
                 {
-                    RequestId = Interlocked.Increment(ref _requestNumber).ToString("D6"),
+                    RequestId = $"{_clientSessionId}-{Interlocked.Increment(ref _requestNumber):D6}",
                     CapturedAtUtc = capturedAtUtc.ToString("O"),
                     FaceBox = faceBox,
-                    ReturnDenseVertices = returnDenseVertices,
+                    Mode = ToProtocolMode(mode),
                     DenseSampleStride = Math.Clamp(denseSampleStride, 1, 200),
-                    ImageBase64 = Convert.ToBase64String(EncodeJpeg(bitmap))
+                    ImageBase64 = Convert.ToBase64String(jpeg)
                 };
                 var line = JsonSerializer.Serialize(request, JsonOptions);
+                prepareStopwatch.Stop();
+                var roundTripStopwatch = Stopwatch.StartNew();
                 _process!.StandardInput.WriteLine(line);
                 _process.StandardInput.Flush();
 
                 var responseTask = _process.StandardOutput.ReadLineAsync();
-                var responseTimeout = _firstResponseAfterStart
-                    ? TimeSpan.FromMilliseconds(ReadStartupTimeoutMilliseconds())
-                    : _timeout;
+                var responseTimeout = mode == ThreeDdfaOnnxRequestMode.Full
+                    ? _firstResponseAfterStart
+                        ? TimeSpan.FromSeconds(60)
+                        : TimeSpan.FromSeconds(30)
+                    : _firstResponseAfterStart
+                        ? TimeSpan.FromMilliseconds(ReadStartupTimeoutMilliseconds())
+                        : _timeout;
                 if (!responseTask.Wait(responseTimeout))
                 {
                     RestartAfterFailure("3DDFA/ONNX sidecar timed out waiting for a reconstruction response.");
@@ -70,17 +88,22 @@ public sealed class ThreeDdfaOnnxReconstructionClient : IDisposable
                 _firstResponseAfterStart = false;
 
                 var responseLine = responseTask.Result;
+                roundTripStopwatch.Stop();
                 if (string.IsNullOrWhiteSpace(responseLine))
                 {
                     RestartAfterFailure("3DDFA/ONNX sidecar closed its output stream.");
                     return Error(Status);
                 }
 
+                var parseStopwatch = Stopwatch.StartNew();
                 var response = JsonSerializer.Deserialize<ThreeDdfaOnnxSidecarResponse>(responseLine, JsonOptions);
+                parseStopwatch.Stop();
                 if (response is null)
                 {
                     return Error("3DDFA/ONNX sidecar returned an empty response.");
                 }
+
+                response.ExpandCompactMeshData();
 
                 if (!string.Equals(response.RequestId, request.RequestId, StringComparison.Ordinal))
                 {
@@ -88,11 +111,34 @@ public sealed class ThreeDdfaOnnxReconstructionClient : IDisposable
                 }
 
                 Status = response.Status;
+                totalStopwatch.Stop();
+                response.Diagnostics = new VisionPipelineDiagnostics
+                {
+                    CapturedAtUtc = capturedAtUtc,
+                    Backend = "3DDFA-V2 ONNX",
+                    Mode = request.Mode,
+                    SourceWidth = bitmap.PixelWidth,
+                    SourceHeight = bitmap.PixelHeight,
+                    InputWidth = bitmap.PixelWidth,
+                    InputHeight = bitmap.PixelHeight,
+                    EncodedPayloadBytes = jpeg.Length,
+                    HasFace = response.HasFace,
+                    ClientPrepareMilliseconds = prepareStopwatch.Elapsed.TotalMilliseconds,
+                    SidecarRoundTripMilliseconds = roundTripStopwatch.Elapsed.TotalMilliseconds,
+                    ClientParseMilliseconds = parseStopwatch.Elapsed.TotalMilliseconds,
+                    EndToEndMilliseconds = totalStopwatch.Elapsed.TotalMilliseconds,
+                    SidecarStagesMilliseconds = response.TimingsMilliseconds,
+                    Status = response.Status
+                };
                 return response;
             }
             catch (Exception ex)
             {
-                RestartAfterFailure($"3DDFA/ONNX sidecar call failed: {ex.Message}");
+                var sidecarError = Volatile.Read(ref _lastStandardError);
+                var detail = string.IsNullOrWhiteSpace(sidecarError)
+                    ? ex.Message
+                    : $"{ex.Message}. Sidecar: {sidecarError}";
+                RestartAfterFailure($"3DDFA/ONNX sidecar call failed: {detail}");
                 return Error(Status);
             }
         }
@@ -100,11 +146,22 @@ public sealed class ThreeDdfaOnnxReconstructionClient : IDisposable
 
     public void Dispose()
     {
+        if (Interlocked.Exchange(ref _disposed, 1) != 0)
+        {
+            return;
+        }
+
         StopProcess();
     }
 
     private bool EnsureProcess()
     {
+        if (Volatile.Read(ref _disposed) != 0)
+        {
+            Status = "3DDFA/ONNX sidecar client is stopped.";
+            return false;
+        }
+
         if (_process is { HasExited: false })
         {
             return true;
@@ -139,6 +196,7 @@ public sealed class ThreeDdfaOnnxReconstructionClient : IDisposable
 
             _process = process;
             _firstResponseAfterStart = true;
+            Volatile.Write(ref _lastStandardError, "");
             _ = Task.Run(() => ReadErrors(process));
             Status = "3DDFA/ONNX sidecar process started.";
             return true;
@@ -168,8 +226,7 @@ public sealed class ThreeDdfaOnnxReconstructionClient : IDisposable
 
     private void StopProcess()
     {
-        var process = _process;
-        _process = null;
+        var process = Interlocked.Exchange(ref _process, null);
         if (process is null)
         {
             return;
@@ -205,7 +262,9 @@ public sealed class ThreeDdfaOnnxReconstructionClient : IDisposable
 
                 if (!string.IsNullOrWhiteSpace(line))
                 {
-                    Status = line.Trim();
+                    var detail = line.Trim();
+                    Volatile.Write(ref _lastStandardError, detail);
+                    Status = detail;
                 }
             }
         }
@@ -221,6 +280,17 @@ public sealed class ThreeDdfaOnnxReconstructionClient : IDisposable
             Ok = false,
             Status = status,
             TrustDecision = "3DDFA/ONNX reconstruction unavailable for this frame."
+        };
+    }
+
+    private static string ToProtocolMode(ThreeDdfaOnnxRequestMode mode)
+    {
+        return mode switch
+        {
+            ThreeDdfaOnnxRequestMode.FaceBoxOnly => "faceBoxOnly",
+            ThreeDdfaOnnxRequestMode.Preview => "preview",
+            ThreeDdfaOnnxRequestMode.Full => "full",
+            _ => "tracking"
         };
     }
 

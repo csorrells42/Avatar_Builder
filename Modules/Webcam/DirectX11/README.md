@@ -1,12 +1,8 @@
 # Webcam.DirectX11 Module
 
-Owns bridge code for shared D3D11/D3D12 camera texture interop.
+Owns the D3D11 device/context and Media Foundation DXGI device-manager setup used by texture-native capture.
 
 Current entry points:
 - `Direct3D11DeviceManager.cs`
-- `Direct3D11SharedTextureBridge.cs`
 
-Module dependencies:
-- `Webcam/DirectX12` for the texture-native device-manager abstraction.
-
-Keep this module narrow. It should only exist to move compatible texture handles between capture and rendering paths.
+Keep this module narrow. Camera selection, frame ownership, and DX12 presentation belong in their respective webcam modules.

@@ -2,6 +2,7 @@ import argparse
 import base64
 import json
 import sys
+import time
 import traceback
 
 
@@ -15,7 +16,7 @@ def load_runtime(model_path):
     base_options = python.BaseOptions(model_asset_path=model_path)
     options = vision.FaceLandmarkerOptions(
         base_options=base_options,
-        running_mode=vision.RunningMode.IMAGE,
+        running_mode=vision.RunningMode.VIDEO,
         num_faces=1,
         min_face_detection_confidence=0.30,
         min_face_presence_confidence=0.30,
@@ -39,9 +40,15 @@ def image_from_base64(mp, cv2, np, image_base64):
 
 
 def handle_request(mp, cv2, np, landmarker, request):
+    total_started = time.perf_counter()
     request_id = request.get("requestId", "")
+    decode_started = time.perf_counter()
     image = image_from_base64(mp, cv2, np, request.get("imageBase64", ""))
-    result = landmarker.detect(image)
+    decode_ms = elapsed_ms(decode_started)
+    inference_started = time.perf_counter()
+    timestamp_ms = int(request.get("timestampMilliseconds", 0))
+    result = landmarker.detect_for_video(image, timestamp_ms)
+    inference_ms = elapsed_ms(inference_started)
     if not result.face_landmarks:
         return {
             "requestId": request_id,
@@ -49,6 +56,11 @@ def handle_request(mp, cv2, np, landmarker, request):
             "hasFace": False,
             "status": "MediaPipe sidecar searching",
             "landmarks": [],
+            "timingsMilliseconds": {
+                "decode": decode_ms,
+                "inference": inference_ms,
+                "total": elapsed_ms(total_started),
+            },
         }
 
     landmarks = [
@@ -82,7 +94,16 @@ def handle_request(mp, cv2, np, landmarker, request):
         "landmarks": landmarks,
         "blendshapes": blendshapes,
         "facialTransformationMatrix": facial_transformation_matrix,
+        "timingsMilliseconds": {
+            "decode": decode_ms,
+            "inference": inference_ms,
+            "total": elapsed_ms(total_started),
+        },
     }
+
+
+def elapsed_ms(started):
+    return round((time.perf_counter() - started) * 1000.0, 4)
 
 
 def write_response(response):

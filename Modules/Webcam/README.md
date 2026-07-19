@@ -87,31 +87,31 @@ Change this folder when backend ordering, fallback behavior, or shared preview s
 
 Namespace: `AvatarBuilder.Modules.Webcam.DirectX11`
 
-Direct3D 11 bridge code used by the texture-native Media Foundation camera path when a camera stream needs a shared texture handle that the DX12 renderer can consume.
+Direct3D 11 device setup used by the texture-native Media Foundation camera source reader.
 
 Files:
 
 - `Direct3D11DeviceManager.cs`: creates the D3D11 device/context and Media Foundation DXGI device manager used by texture-native source readers.
-- `Direct3D11SharedTextureBridge.cs`: copies NV12 textures into a shared D3D11 texture and duplicates the handle for the DX12 preview bridge.
 
-Change this folder when the D3D11 device-manager setup or shared texture bridge needs work. Keep high-level camera selection in `Pipeline` or `DirectX12`.
+Change this folder when the D3D11 device-manager setup needs work. Keep high-level camera selection in `Pipeline` or `DirectX12`.
 
 ## DirectX12
 
 Namespace: `AvatarBuilder.Modules.Webcam.DirectX12`
 
-Jericho Down-derived Direct3D 12 preview host, native texture camera wrapper, and presenter code. This module owns the native child-window viewport, the BGRA/NV12 upload renderer, the texture-native camera stream, and recording support around that stream. `MainWindow` either starts `Dx12Camera` for the native path or creates `Direct3D12PreviewHost` for the BGRA/NV12 upload fallback.
+Jericho Down-derived Direct3D 12 preview host, native texture camera wrapper, and presenter code. This module owns the native child-window viewport, the BGRA/NV12 upload renderer, the texture-native camera stream, and recording support around that stream. `MainWindow` starts `Dx12Camera`, which presents the newest available camera frame without waiting for face analysis.
 
 Files:
 
 - `WebcamDirectX12ViewportHost.cs`: WPF `HwndHost` wrapper that owns the native child window used by the DX12 swap chain.
-- `Direct3D12PreviewHost.cs`: Direct3D 12 renderer that uploads BGRA/NV12 camera frames, manages the swap chain, reports render diagnostics, and keeps render work off the capture/UI path.
+- `Direct3D12PreviewHost.cs`: Direct3D 12 renderer that uploads BGRA/NV12 camera frames, coalesces render work to the newest frame, draws native tracking overlays, manages the swap chain, and reports render diagnostics.
 - `Direct3D12PreviewDiagnostics.cs`: compact render-path, FPS, frame-count, and fallback status model for overlays/logging.
 - `ICameraPreviewPresenter.cs`: narrow UI-facing presenter contract for a camera preview surface.
 - `Direct3D12DeviceManager.cs`: D3D12-backed Media Foundation device-manager implementation for native texture capture.
 - `Dx12Camera.cs`: high-level texture-native camera wrapper that owns the preview host, native stream, fallback preview, status, diagnostics, and recording controls.
 - `Dx12CameraOptions.cs`: startup options and event hooks for `Dx12Camera`.
 - `TextureNativePreviewPolicy.cs`: remembers short-lived native DX12 camera open failures per camera/mode so fallback can proceed without retry storms.
-- `TextureNativeCameraRecorder.cs`: texture-native stream, frame lease types, NV12 conversion, raw/processed recording sessions, and texture sink writer.
+- `TextureNativeCameraRecorder.cs`: texture-native stream, pooled ref-counted frame leases, NV12 conversion, raw/processed recording sessions, and texture sink writer.
+- `PreviewTrackingOverlay.cs`: immutable normalized face/eye/mouth regions passed from analysis into the native renderer.
 
 Change this folder when GPU preview rendering, swap-chain management, Direct3D shader upload, or texture-native preview/recording needs work. Keep generic camera enumeration in `Common`, Media Foundation source-reader setup in `MediaFoundation`, and high-level backend choice in `Pipeline` or the UI integration layer.

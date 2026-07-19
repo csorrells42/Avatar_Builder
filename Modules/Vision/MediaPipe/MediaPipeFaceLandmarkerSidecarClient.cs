@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Text.Json;
 using System.Windows.Media.Imaging;
+using AvatarBuilder.Modules.Vision.Diagnostics;
 
 namespace AvatarBuilder.Modules.Vision.MediaPipe;
 
@@ -14,6 +15,8 @@ internal sealed class MediaPipeFaceLandmarkerSidecarClient : IDisposable
     private Process? _process;
     private bool _firstResponseAfterStart;
     private int _requestNumber;
+    private long _lastTimestampMilliseconds;
+    private int _disposed;
 
     public MediaPipeFaceLandmarkerSidecarClient(MediaPipeSidecarPythonEnvironment environment)
     {
@@ -23,10 +26,19 @@ internal sealed class MediaPipeFaceLandmarkerSidecarClient : IDisposable
 
     public string Status { get; private set; } = "";
 
-    public MediaPipeSidecarResponse Analyze(BitmapSource bitmap, DateTime capturedAtUtc)
+    public MediaPipeSidecarResponse Analyze(
+        BitmapSource bitmap,
+        DateTime capturedAtUtc,
+        int sourceWidth = 0,
+        int sourceHeight = 0)
     {
         lock (_sync)
         {
+            if (Volatile.Read(ref _disposed) != 0)
+            {
+                return Error("MediaPipe sidecar client is stopped.");
+            }
+
             if (!_environment.IsReady)
             {
                 return Error(_environment.Status);
@@ -39,13 +51,22 @@ internal sealed class MediaPipeFaceLandmarkerSidecarClient : IDisposable
 
             try
             {
+                var totalStopwatch = Stopwatch.StartNew();
+                var prepareStopwatch = Stopwatch.StartNew();
+                var jpeg = EncodeJpeg(bitmap);
+                var capturedTimestamp = new DateTimeOffset(capturedAtUtc).ToUnixTimeMilliseconds();
+                var timestampMilliseconds = Math.Max(capturedTimestamp, _lastTimestampMilliseconds + 1L);
+                _lastTimestampMilliseconds = timestampMilliseconds;
                 var request = new MediaPipeSidecarRequest
                 {
                     RequestId = Interlocked.Increment(ref _requestNumber).ToString("D6"),
                     CapturedAtUtc = capturedAtUtc.ToString("O"),
-                    ImageBase64 = Convert.ToBase64String(EncodeJpeg(bitmap))
+                    TimestampMilliseconds = timestampMilliseconds,
+                    ImageBase64 = Convert.ToBase64String(jpeg)
                 };
                 var line = JsonSerializer.Serialize(request, JsonOptions);
+                prepareStopwatch.Stop();
+                var roundTripStopwatch = Stopwatch.StartNew();
                 _process!.StandardInput.WriteLine(line);
                 _process.StandardInput.Flush();
 
@@ -61,13 +82,16 @@ internal sealed class MediaPipeFaceLandmarkerSidecarClient : IDisposable
                 _firstResponseAfterStart = false;
 
                 var responseLine = responseTask.Result;
+                roundTripStopwatch.Stop();
                 if (string.IsNullOrWhiteSpace(responseLine))
                 {
                     RestartAfterFailure("MediaPipe sidecar closed its output stream.");
                     return Error(Status);
                 }
 
+                var parseStopwatch = Stopwatch.StartNew();
                 var response = JsonSerializer.Deserialize<MediaPipeSidecarResponse>(responseLine, JsonOptions);
+                parseStopwatch.Stop();
                 if (response is null)
                 {
                     return Error("MediaPipe sidecar returned an empty response.");
@@ -79,6 +103,25 @@ internal sealed class MediaPipeFaceLandmarkerSidecarClient : IDisposable
                 }
 
                 Status = response.Status;
+                totalStopwatch.Stop();
+                response.Diagnostics = new VisionPipelineDiagnostics
+                {
+                    CapturedAtUtc = capturedAtUtc,
+                    Backend = "MediaPipe Face Landmarker",
+                    Mode = "video-tracking",
+                    SourceWidth = sourceWidth > 0 ? sourceWidth : bitmap.PixelWidth,
+                    SourceHeight = sourceHeight > 0 ? sourceHeight : bitmap.PixelHeight,
+                    InputWidth = bitmap.PixelWidth,
+                    InputHeight = bitmap.PixelHeight,
+                    EncodedPayloadBytes = jpeg.Length,
+                    HasFace = response.HasFace,
+                    ClientPrepareMilliseconds = prepareStopwatch.Elapsed.TotalMilliseconds,
+                    SidecarRoundTripMilliseconds = roundTripStopwatch.Elapsed.TotalMilliseconds,
+                    ClientParseMilliseconds = parseStopwatch.Elapsed.TotalMilliseconds,
+                    EndToEndMilliseconds = totalStopwatch.Elapsed.TotalMilliseconds,
+                    SidecarStagesMilliseconds = response.TimingsMilliseconds,
+                    Status = response.Status
+                };
                 return response;
             }
             catch (Exception ex)
@@ -91,11 +134,22 @@ internal sealed class MediaPipeFaceLandmarkerSidecarClient : IDisposable
 
     public void Dispose()
     {
+        if (Interlocked.Exchange(ref _disposed, 1) != 0)
+        {
+            return;
+        }
+
         StopProcess();
     }
 
     private bool EnsureProcess()
     {
+        if (Volatile.Read(ref _disposed) != 0)
+        {
+            Status = "MediaPipe sidecar client is stopped.";
+            return false;
+        }
+
         if (_process is { HasExited: false })
         {
             return true;
@@ -128,6 +182,7 @@ internal sealed class MediaPipeFaceLandmarkerSidecarClient : IDisposable
 
             _process = process;
             _firstResponseAfterStart = true;
+            _lastTimestampMilliseconds = 0L;
             _ = Task.Run(() => ReadErrors(process));
             Status = "MediaPipe sidecar process started.";
             return true;
@@ -157,8 +212,7 @@ internal sealed class MediaPipeFaceLandmarkerSidecarClient : IDisposable
 
     private void StopProcess()
     {
-        var process = _process;
-        _process = null;
+        var process = Interlocked.Exchange(ref _process, null);
         if (process is null)
         {
             return;
