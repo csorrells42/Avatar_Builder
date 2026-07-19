@@ -2,7 +2,7 @@
 
 Namespace root: `AvatarBuilder.Modules.Webcam`
 
-This module owns camera input only. It should answer: which camera, which mode, which frames, and which camera controls. It should not decide whether a frame is an episode cue.
+This module owns camera input only. It should answer: which camera, which mode, which frames, and which camera controls. It should not decide whether a frame is suitable for avatar capture.
 
 `WebcamModule.cs` is the root facade copied from the Jericho Down module shape and adapted for Avatar Builder. It exposes camera discovery, preview-service factories, DirectShow controls, and DX12 host/camera creation so the app shell can stay out of backend construction details.
 
@@ -100,7 +100,7 @@ Change this folder when the D3D11 device-manager setup or shared texture bridge 
 
 Namespace: `AvatarBuilder.Modules.Webcam.DirectX12`
 
-Jericho Down-derived Direct3D 12 preview host, native texture camera wrapper, and presenter code. This module owns the native child-window viewport, the BGRA/NV12 upload renderer, the texture-native camera stream, and the recorder/probe support around that stream. `MainWindow` either starts `Dx12Camera` for the native path or creates `Direct3D12PreviewHost` for the BGRA/NV12 upload fallback.
+Jericho Down-derived Direct3D 12 preview host, native texture camera wrapper, and presenter code. This module owns the native child-window viewport, the BGRA/NV12 upload renderer, the texture-native camera stream, and recording support around that stream. `MainWindow` either starts `Dx12Camera` for the native path or creates `Direct3D12PreviewHost` for the BGRA/NV12 upload fallback.
 
 Files:
 
@@ -113,6 +113,5 @@ Files:
 - `Dx12CameraOptions.cs`: startup options and event hooks for `Dx12Camera`.
 - `TextureNativePreviewPolicy.cs`: remembers short-lived native DX12 camera open failures per camera/mode so fallback can proceed without retry storms.
 - `TextureNativeCameraRecorder.cs`: texture-native stream, frame lease types, NV12 conversion, raw/processed recording sessions, and texture sink writer.
-- `TextureNativeCameraProbe.cs`: utility for checking whether a camera can supply D3D-backed frames and preview bytes.
 
 Change this folder when GPU preview rendering, swap-chain management, Direct3D shader upload, or texture-native preview/recording needs work. Keep generic camera enumeration in `Common`, Media Foundation source-reader setup in `MediaFoundation`, and high-level backend choice in `Pipeline` or the UI integration layer.

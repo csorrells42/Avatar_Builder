@@ -15,6 +15,11 @@ public sealed class AvatarProfile
     public DateTime? LastSelectedAtUtc { get; set; }
 
     public bool HasDataFolder => !string.IsNullOrWhiteSpace(DataFolderName);
+
+    public override string ToString()
+    {
+        return string.IsNullOrWhiteSpace(DisplayName) ? Id : DisplayName;
+    }
 }
 
 public sealed class AvatarProfileRegistry

@@ -27,23 +27,15 @@ public sealed class AvatarSystemDashboard
 
     public FaceFrameGeometry CurrentFaceFrameGeometry { get; set; } = FaceFrameGeometry.None;
 
-    public LastGoodFeatureMeshStabilityReport LastGoodFeatureStability { get; set; } = new();
-
     public FaceReconstructionLaneStatus ReconstructionLane { get; set; } = FaceReconstructionLaneStatus.Waiting;
 
     public string FastTrackingSummary { get; set; } =
-        "MediaPipe/OpenCV eye, jaw, brow, mouth, and face tracking remains live for overlays and narcolepsy cues.";
+        "MediaPipe/OpenCV eye, jaw, brow, mouth, and face tracking remains live for overlays and capture measurements.";
 
     public string AvatarReconstructionSummary { get; set; } =
         "3DDFA/ONNX is the active avatar reconstruction lane for dense face geometry, pose, and depth.";
 
-    public int LastGoodFeatureSampleCount { get; set; }
-
     public int LastGoodThreeDdfaSampleCount { get; set; }
-
-    public string LastGoodFeatureStatus { get; set; } = "";
-
-    public string LastGoodFeaturesHtmlPath { get; set; } = "";
 
     public string LastGoodThreeDdfaHtmlPath { get; set; } = "";
 

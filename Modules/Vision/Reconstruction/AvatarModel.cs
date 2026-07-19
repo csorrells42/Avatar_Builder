@@ -51,7 +51,7 @@ public sealed class AvatarIdentityModel
 
     public List<FaceMeshLandmarkPoint> MeanDenseVertices { get; init; } = [];
 
-    public List<LastGoodFeatureMeshWireframeEdge> TopologyEdges { get; init; } = [];
+    public List<MeshTopologyEdge> TopologyEdges { get; init; } = [];
 
     public List<AvatarRegionConfidence> RegionConfidence { get; init; } = [];
 }

@@ -20,7 +20,6 @@ Current entry points:
 - `Dx12CameraOptions.cs`
 - `TextureNativePreviewPolicy.cs`
 - `TextureNativeCameraRecorder.cs`
-- `TextureNativeCameraProbe.cs`
 
 Drop-in boundary:
 - Use `ICameraPreviewPresenter` when another program needs a camera preview surface without knowing whether the backing renderer is DX12, WPF, or a fallback.

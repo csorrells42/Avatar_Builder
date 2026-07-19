@@ -10,7 +10,7 @@ Reference material:
 - `https://developers.google.com/edge/mediapipe/solutions/vision/face_landmarker`: official Face Landmarker guide.
 - The current MediaPipe Solutions direction is Tasks plus packaged models. Legacy Face Mesh and Iris are listed as upgraded into Face Landmark detection, so new work should target Face Landmarker rather than older legacy APIs.
 - Face Landmarker supports still images, decoded video frames, and live video streams. The live stream mode returns results asynchronously, which matches this folder's sidecar/client boundary.
-- Face Landmarker can output a dense face mesh, blendshape scores, and facial transformation matrices. The app exploits those outputs for feature/mesh review, blink/jaw/mouth corroboration, overlays, narcolepsy cues, and frame-geometry summaries. 3DDFA_V2 ONNX owns avatar pose and dense face reconstruction.
+- Face Landmarker can output a dense face mesh, blendshape scores, and facial transformation matrices. The app exploits those outputs for feature/mesh review, blink/jaw/mouth measurements, overlays, capture quality, and frame-geometry summaries. 3DDFA_V2 ONNX owns avatar pose and dense face reconstruction.
 
 Implementation rules:
 

@@ -278,7 +278,7 @@ def handle_request(cv2, np, face_boxes, tddfa, calc_pose, dense_triangles, start
         "status": f"3DDFA/ONNX dense reconstruction lock ({dense_count} vertices)",
         "backend": "3DDFA_V2 ONNX",
         "capturedAtUtc": captured_at_utc,
-        "trustDecision": "3DDFA reconstruction available for avatar trust comparison; MediaPipe remains the live narcolepsy tracker",
+        "trustDecision": "3DDFA reconstruction available for avatar trust comparison; MediaPipe remains the live feature tracker",
         "reconstructionConfidencePercent": finite_float(confidence),
         "pose": {
             "aRotationAroundXDegrees": finite_float(pose[1] if len(pose) > 1 else 0.0),

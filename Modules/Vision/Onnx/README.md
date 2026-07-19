@@ -2,7 +2,7 @@
 
 Namespace: `AvatarBuilder.Modules.Vision.Onnx`
 
-This module owns ONNX-backed model bundle discovery and sidecar adapters. It should not own avatar decisions, narcolepsy triggers, WPF controls, or long-term personal-model learning.
+This module owns ONNX-backed model bundle discovery and sidecar adapters. It should not own avatar acceptance decisions, WPF controls, or long-term model policy.
 
 Files:
 
@@ -24,5 +24,5 @@ Rules:
 
 - Keep 3DDFA/ONNX work separate from the MediaPipe live tracking lane.
 - The avatar system may use this lane for dense reconstruction, head pose, coefficients, and trust checks.
-- The narcolepsy tracker should continue to use the fast MediaPipe/OpenCV pipeline and should not wait on 3DDFA inference.
+- The fast MediaPipe/OpenCV feature tracker should not wait on 3DDFA inference.
 - Add `Microsoft.ML.OnnxRuntime` in-process only if it gives a concrete benefit over the sidecar and does not pull UI/camera rendering into model code.

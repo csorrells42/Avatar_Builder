@@ -17,5 +17,5 @@ public sealed class LastGoodThreeDdfaReport
 
     public FaceReconstructionLaneStatus ReconstructionLane { get; init; } = FaceReconstructionLaneStatus.Waiting;
 
-    public IReadOnlyList<LastGoodFeatureThreeDdfaSnapshot> Samples { get; init; } = [];
+    public IReadOnlyList<ThreeDdfaReconstructionSnapshot> Samples { get; init; } = [];
 }

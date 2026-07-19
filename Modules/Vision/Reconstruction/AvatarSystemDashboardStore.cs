@@ -38,7 +38,6 @@ public sealed class AvatarSystemDashboardStore
             : dashboard.AvatarCaptureRequested ? "warn" : "muted";
         var quality = dashboard.CurrentCaptureQuality;
         var pose = dashboard.CurrentFaceFrameGeometry;
-        var stability = dashboard.LastGoodFeatureStability;
         var lane = dashboard.ReconstructionLane;
 
         var html = new StringBuilder();
@@ -61,16 +60,11 @@ public sealed class AvatarSystemDashboardStore
         html.AppendLine(Metric("3DDFA lane", lane.AvatarReconstructionStatus));
         html.AppendLine(Metric("Dense reconstruction", lane.TrustLevel));
         html.AppendLine(Metric("Fast tracking", lane.FastTrackingStatus));
-        html.AppendLine(Metric("MediaPipe samples", dashboard.LastGoodFeatureSampleCount.ToString(CultureInfo.InvariantCulture)));
         html.AppendLine(Metric("3DDFA samples", dashboard.LastGoodThreeDdfaSampleCount.ToString(CultureInfo.InvariantCulture)));
         html.AppendLine(Metric("Model observations", dashboard.AvatarModelObservationCount.ToString(CultureInfo.InvariantCulture)));
         html.AppendLine(Metric("Model confidence", $"{dashboard.AvatarModelConfidencePercent:0.#}%"));
         html.AppendLine(Metric("Model coverage", $"{dashboard.AvatarModelCoveragePercent:0.#}%"));
         html.AppendLine(Metric("Model audit", dashboard.AvatarModelAuditStatus));
-        html.AppendLine(Metric("B head-turn lock", FormatAxis(stability.YawHealthPercent, stability.YawRangeDegrees, "deg")));
-        html.AppendLine(Metric("A tilt lock", FormatAxis(stability.AHealthPercent, stability.ARangeDegrees, "deg")));
-        html.AppendLine(Metric("C tilt lock", FormatAxis(stability.CHealthPercent, stability.CRangeDegrees, "deg")));
-        html.AppendLine(Metric("Z distance lock", FormatAxis(stability.ZHealthPercent, stability.ZFaceScaleRangePercent, "% scale")));
         html.AppendLine(Metric("Z apparent", pose.HasFace && pose.ApparentDistanceUnits is { } apparent ? $"{apparent:0.###} {pose.ApparentDistanceUnitName}" : "waiting"));
         html.AppendLine(Metric("Z source", string.IsNullOrWhiteSpace(pose.DistanceSource) ? "waiting" : pose.DistanceSource));
         html.AppendLine(Metric("MediaPipe A/B/C", pose.HasFace ? $"{pose.ARotationAroundXDegrees:0.#} / {pose.BRotationAroundYDegrees:0.#} / {pose.CRotationAroundZDegrees:0.#} deg" : "waiting"));
@@ -99,11 +93,6 @@ public sealed class AvatarSystemDashboardStore
             html.AppendLine($"<p><a href=\"{H(dashboard.AvatarModelAuditHtmlPath)}\">Open Avatar Model Regression Audit</a></p>");
         }
 
-        if (!string.IsNullOrWhiteSpace(dashboard.LastGoodFeaturesHtmlPath))
-        {
-            html.AppendLine($"<p><a href=\"{H(dashboard.LastGoodFeaturesHtmlPath)}\">Open MediaPipe Last 5 Feature Locks</a></p>");
-        }
-
         if (!string.IsNullOrWhiteSpace(dashboard.LastGoodThreeDdfaHtmlPath))
         {
             html.AppendLine($"<p><a href=\"{H(dashboard.LastGoodThreeDdfaHtmlPath)}\">Open 3DDFA Last 5 Dense Reconstructions</a></p>");
@@ -111,7 +100,6 @@ public sealed class AvatarSystemDashboardStore
 
         html.AppendLine($"<p class=\"muted\">Avatar model: {H(dashboard.AvatarModelStatus)} {H(dashboard.AvatarModelCoverageSummary)}</p>");
         html.AppendLine($"<p class=\"muted\">Model audit: {H(dashboard.AvatarModelAuditSummary)}</p>");
-        html.AppendLine($"<p class=\"muted\">{H(dashboard.LastGoodFeatureStatus)}</p>");
         html.AppendLine("</section>");
 
         html.AppendLine("<section><h2>Reconstruction Lane Warnings</h2>");
@@ -124,13 +112,6 @@ public sealed class AvatarSystemDashboardStore
     private static string Metric(string label, string value)
     {
         return $"<div class=\"metric\"><div class=\"label\">{H(label)}</div><div class=\"value\">{H(value)}</div></div>";
-    }
-
-    private static string FormatAxis(double healthPercent, double range, string rangeUnits)
-    {
-        return healthPercent > 0d
-            ? $"{healthPercent:0.#}% | range {range:0.#} {rangeUnits}"
-            : "warming";
     }
 
     private static string List(IEnumerable<string> values, string fallback)

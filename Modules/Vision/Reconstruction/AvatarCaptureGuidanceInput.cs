@@ -12,9 +12,5 @@ public sealed class AvatarCaptureGuidanceInput
 
     public bool FaceLocked { get; set; }
 
-    public bool TrackingAuditHold { get; set; }
-
-    public string TrackingAuditHoldSummary { get; set; } = "";
-
     public AvatarCaptureQualityAssessment CaptureQuality { get; set; } = AvatarCaptureQualityAssessment.Waiting;
 }

@@ -6,13 +6,6 @@ public static class AvatarCaptureGuidanceAdvisor
     {
         ArgumentNullException.ThrowIfNull(input);
 
-        if (input.TrackingAuditHold)
-        {
-            return Blocked(
-                "Review tracking first",
-                $"{Clean(input.TrackingAuditHoldSummary, "Tracking review is holding avatar capture.")} Check that the 3DDFA pose follows your head while eyes, nose, and mouth stay attached to the face.");
-        }
-
         if (!input.SubjectConfirmed)
         {
             return Blocked(

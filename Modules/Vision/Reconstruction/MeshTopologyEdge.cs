@@ -1,6 +1,6 @@
 namespace AvatarBuilder.Modules.Vision.Reconstruction;
 
-public sealed class LastGoodFeatureMeshWireframeEdge
+public sealed class MeshTopologyEdge
 {
     public int FromIndex { get; init; }
 

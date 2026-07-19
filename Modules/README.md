@@ -1,116 +1,63 @@
 # Avatar Builder Modules
 
-Avatar Builder keeps runtime code in purpose-named modules. Folder path and namespace should match so the codebase is navigable from either the file tree or a symbol search.
+Runtime capabilities live in purpose-named modules. Folder path and namespace should agree so a developer can navigate by either the file tree or symbol search.
 
-## Reusable Module Rule
+## Reusable module rule
 
-Build every new capability as the smallest reusable module that can stand on its own. The WPF app shell may compose modules, draw controls, and handle user workflow, but recognition logic, camera logic, event evidence, recording, personalization, identity gating, 3D/avatar reconstruction, and AI-assistant integration data should live behind narrow module contracts.
+The WPF shell composes modules and owns controls, drawing, and workflow. Camera capture, facial measurement, subject gating, reconstruction, storage, and report generation belong behind narrow module contracts. Backend implementations must not depend on WPF controls.
 
-This is a project rule so Avatar Builder can later feed the main AI program without copying WPF-specific code. Prefer backend-neutral input/output models, analyzers that accept measurements instead of UI controls, and durable DTOs that can be consumed by another process. If a feature can naturally be separated as face identity, eyelid state, jaw/lip droop, subject personalization, event packaging, or avatar reconstruction, keep that capability self-contained and let `MainWindow.xaml.cs` orchestrate it.
+Prefer backend-neutral DTOs and latest-frame asynchronous workers. Reusable modules must be independently callable by a future AI application without copying `MainWindow.xaml.cs`.
 
-## App Shell
+## App shell
 
-`MainWindow.xaml.cs` composes modules and owns WPF controls, drawing, and user workflow. New camera or vision backends should not be implemented directly in the app shell; they should enter through a module interface.
+`MainWindow.xaml` defines the visible workflow. `MainWindow.xaml.cs` coordinates camera state, fast tracking, subject confirmation, 3DDFA capture, immutable report snapshots, and UI status. New backend algorithms do not belong in the app shell.
 
 ## Webcam
 
 Folder: `Modules/Webcam`
 
-Owns camera discovery, camera controls, camera mode selection, preview frame delivery, and camera backend adapters.
+Owns camera discovery, controls, mode selection, frame delivery, recording primitives used by avatar tooling, and preview presentation.
 
-The root `WebcamModule.cs` file is the entry point for common camera operations and DX12 viewport creation. Use it when wiring app-shell code to camera discovery, preview services, or the Jericho Down-derived DX12 camera host.
-
-Key submodules:
-
-- `Common`: shared camera models and contracts.
-- `DirectShow`: Windows DirectShow enumeration and camera-control support.
-- `Ffmpeg`: bundled FFmpeg camera probing and fallback preview.
-- `MediaFoundation`: Windows Media Foundation capture and mode probing.
-- `Pipeline`: composition that chooses Media Foundation first and FFmpeg fallback second.
-- `DirectX11`: D3D11 device-manager and shared-texture bridge code used by the texture-native camera path.
-- `DirectX12`: Jericho Down-derived DX12 viewport, presenter, texture-native camera wrapper, recorder/probe support, and latest-frame pumps.
-
-See `Webcam/README.md`.
+- `Common`: camera DTOs, source selection, frame types, color settings, and preview contracts.
+- `DirectShow`: camera enumeration and control access.
+- `Ffmpeg`: bundled FFmpeg mode probing and preview fallback.
+- `MediaFoundation`: Windows capture, mode probing, and texture-native recording primitives.
+- `Pipeline`: selects the available camera implementation.
+- `DirectX11`: D3D11 device manager and shared-texture bridge.
+- `DirectX12`: DX12 viewport, presenter, camera wrapper, diagnostics, and latest-frame pumps.
 
 ## Vision
 
 Folder: `Modules/Vision`
 
-Owns face detection, landmarks, eye/lip aperture measurement, measurement quality, reconstruction, and trend analysis.
+Owns face localization, landmarks, feature measurements, capture quality, reconstruction, persistence, and inspection reports.
 
-Key submodules:
-
-- `Common`: shared landmark contracts and frame/result models.
-- `Analysis`: backend-neutral cue scoring, contour metrics, reconstruction, and trend logic.
-- `OpenCv`: OpenCV/YuNet/LBF/aperture implementations.
-- `MediaPipe`: MediaPipe Face Landmarker model metadata, Python sidecar bridge, and dense-landmark mapping.
-- `Onnx`: ONNX-backed avatar reconstruction adapters. The current adapter is a 3DDFA_V2 Python sidecar that returns dense reconstruction, pose, and coefficient evidence without blocking live tracking.
-- `Pipeline`: composite tracker that chooses and fuses vision backends.
-- `Personalization`: avatar-user registry, subject-gate helpers, and avatar capture-quality scoring.
-- `Reconstruction`: backend-neutral 3D/avatar reconstruction job/result contracts, two-lane tracking/reconstruction status reports, Avatar System reports, separate MediaPipe Last 5 and 3DDFA Last 5 review pages, bounded persistent Avatar Model observation/model stores, and the active 3DDFA_V2 ONNX dense reconstruction work-item spec.
-- `Deprecated`: retired module experiments kept for reference outside the active app build, including the old rolling measurement-learning model, old measurement preview/package/plan path, old evaluator/smoke/verifier tooling, and old Deep3D/PyTorch sidecar contract.
-
-See `Vision/README.md`.
-
-## Episodes
-
-Folder and namespace: `Modules/Episodes`, `AvatarBuilder.Modules.Episodes`
-
-Owns clinician-review event data: episode rows, landmark timeline samples, and aggregate evidence.
-
-Look here when changing:
-
-- event grid row fields
-- event summary evidence
-- landmark timeline JSON/CSV contents
-
-See `Episodes/README.md`.
-
-## Recording
-
-Folder and namespace: `Modules/Recording`, `AvatarBuilder.Modules.Recording`
-
-Owns event video writing and recorder lifecycle. It accepts already-rendered frames and paths instead of reaching into webcam or vision internals.
-
-Look here when changing:
-
-- event clip encoder behavior
-- pre-roll frame writing
-- FFmpeg recording lifecycle
-
-See `Recording/README.md`.
+- `Common`: landmark contracts and frame/result models shared by every backend.
+- `Analysis`: contour measurements, temporal repair, camera-space face geometry, and face-lock stability.
+- `OpenCv`: YuNet, LBF, and aperture fallback implementations.
+- `MediaPipe`: Face Landmarker model discovery, Python sidecar, and dense-result mapping.
+- `Onnx`: 3DDFA_V2 model discovery, Python sidecar client, and dense reconstruction protocol.
+- `Pipeline`: tracker ordering and fusion rules.
+- `Personalization`: profile registry, subject gate, and avatar capture-quality scoring.
+- `Reconstruction`: persistent 3DDFA observations, model builder, regression history, dashboard, and dense reconstruction review page.
 
 ## Infrastructure
 
-Folder and namespace: `Modules/Infrastructure`, `AvatarBuilder.Modules.Infrastructure`
+Folder: `Modules/Infrastructure`
 
-Owns shared host-level utilities such as locating bundled FFmpeg. Keep this small; if a helper has domain meaning, move it to that domain module.
+Contains small host-level helpers such as atomic text writes and bundled FFmpeg lookup. Domain behavior belongs in its owning module.
 
-Look here when changing:
-
-- dependency lookup paths
-- shared host/runtime helpers
-
-See `Infrastructure/README.md`.
-
-## Dependency Direction
-
-Preferred direction:
+## Dependency direction
 
 ```text
 UI -> Webcam
 UI -> Vision
-UI -> Episodes
-UI -> Recording
-
-Episodes -> Vision.Analysis
-Vision.Pipeline -> Vision.OpenCv / Vision.MediaPipe / Vision.Common
-Vision.Onnx -> external 3DDFA_V2 Python sidecar
+Vision.Pipeline -> Vision.MediaPipe / Vision.OpenCv / Vision.Common
 Vision.Analysis -> Vision.Common
-Vision.Reconstruction -> Vision.Personalization
+Vision.Onnx -> external 3DDFA_V2 Python sidecar
+Vision.Reconstruction -> Vision.Personalization / Vision.Common
 Webcam.Pipeline -> Webcam.MediaFoundation / Webcam.Ffmpeg / Webcam.Common
 Webcam.Ffmpeg -> Infrastructure
-Recording -> Infrastructure
 ```
 
-Avoid making backend implementations depend on WPF controls. Avoid making `Vision` depend on `Webcam` unless the dependency is a tiny frame abstraction.
+`Vision` should not depend on concrete webcam backends. Pass only the smallest frame abstraction needed at the composition boundary.

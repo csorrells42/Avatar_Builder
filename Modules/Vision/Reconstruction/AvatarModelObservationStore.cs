@@ -21,44 +21,25 @@ public sealed class AvatarModelObservationStore
         string folder,
         string subjectId,
         string subjectDisplayName,
-        IReadOnlyList<LastGoodFeatureMeshSample> samples,
-        IReadOnlyList<LastGoodFeatureThreeDdfaSnapshot> threeDdfaSamples)
+        IReadOnlyList<ThreeDdfaReconstructionSnapshot> threeDdfaSamples)
     {
         Directory.CreateDirectory(folder);
         var path = GetJsonPath(folder);
         var existing = Read(path);
-        var byRequestId = existing.Observations
+        var retainedThreeDdfaObservations = existing.Observations
+            .Where(static observation => observation.Source.Contains("3DDFA", StringComparison.OrdinalIgnoreCase))
+            .ToList();
+        var byRequestId = retainedThreeDdfaObservations
             .Where(static observation => !string.IsNullOrWhiteSpace(observation.RequestId))
             .GroupBy(static observation => observation.RequestId, StringComparer.Ordinal)
             .ToDictionary(static group => group.Key, static group => group.OrderByDescending(item => item.CapturedAtUtc).First(), StringComparer.Ordinal);
 
-        var bySampleFallback = existing.Observations
+        var bySampleFallback = retainedThreeDdfaObservations
             .Where(static observation => string.IsNullOrWhiteSpace(observation.RequestId))
             .GroupBy(static observation => observation.SampleId, StringComparer.Ordinal)
             .ToDictionary(static group => group.Key, static group => group.OrderByDescending(item => item.CapturedAtUtc).First(), StringComparer.Ordinal);
 
         var topology = existing.DenseTopologyEdges.ToList();
-        foreach (var sample in samples)
-        {
-            if (TryCreateObservation(sample, out var observation))
-            {
-                if (!string.IsNullOrWhiteSpace(observation.RequestId))
-                {
-                    byRequestId[observation.RequestId] = observation;
-                }
-                else
-                {
-                    bySampleFallback[observation.SampleId] = observation;
-                }
-
-                var snapshotEdges = sample.ThreeDdfaFullResolution?.TopologyEdges;
-                if (snapshotEdges is { Count: > 0 } && snapshotEdges.Count > topology.Count)
-                {
-                    topology = snapshotEdges.ToList();
-                }
-            }
-        }
-
         foreach (var snapshot in threeDdfaSamples)
         {
             if (TryCreateObservation(snapshot, out var observation))
@@ -123,61 +104,7 @@ public sealed class AvatarModelObservationStore
         }
     }
 
-    private static bool TryCreateObservation(LastGoodFeatureMeshSample sample, out AvatarModelObservation observation)
-    {
-        observation = new AvatarModelObservation();
-        var snapshot = sample.ThreeDdfaFullResolution;
-        if (snapshot is null || snapshot.Vertices.Count == 0)
-        {
-            return false;
-        }
-
-        var expressionEnergy = CalculateExpressionEnergy(snapshot.ExpressionCoefficients);
-        var baseWeight = Math.Clamp(
-            snapshot.ReconstructionConfidencePercent * 0.45d
-            + sample.OverallQualityPercent * 0.25d
-            + sample.EyeQualityPercent * 0.10d
-            + sample.MouthQualityPercent * 0.10d
-            + sample.BrowQualityPercent * 0.10d,
-            0d,
-            100d);
-        var identityExpressionPenalty = Math.Clamp(expressionEnergy * 0.30d, 0d, 35d);
-        var identityWeight = Math.Clamp(baseWeight - identityExpressionPenalty, 0d, 100d);
-
-        observation = new AvatarModelObservation
-        {
-            RequestId = snapshot.RequestId,
-            SampleId = sample.SampleId,
-            CapturedAtUtc = snapshot.CapturedAtUtc == default ? sample.CapturedAtUtc : snapshot.CapturedAtUtc,
-            Source = snapshot.Source,
-            ReconstructionConfidencePercent = Round(snapshot.ReconstructionConfidencePercent),
-            SampleQualityPercent = Round(sample.OverallQualityPercent),
-            EyeQualityPercent = Round(sample.EyeQualityPercent),
-            MouthQualityPercent = Round(sample.MouthQualityPercent),
-            BrowQualityPercent = Round(sample.BrowQualityPercent),
-            ARotationAroundXDegrees = Round(snapshot.ARotationAroundXDegrees),
-            BRotationAroundYDegrees = Round(snapshot.BRotationAroundYDegrees),
-            CRotationAroundZDegrees = Round(snapshot.CRotationAroundZDegrees),
-            XHorizontalPercent = Round(sample.XHorizontalPercent),
-            YVerticalPercent = Round(sample.YVerticalPercent),
-            RelativeDistanceScale = RoundNullable(sample.RelativeDistanceScale),
-            ApparentDistanceUnits = RoundNullable(sample.ApparentDistanceUnits),
-            IdentityWeightPercent = Round(identityWeight),
-            ExpressionWeightPercent = Round(baseWeight),
-            IdentityUse = identityExpressionPenalty > 20d
-                ? "expression-heavy frame: useful for expression range, downweighted for base identity"
-                : "identity frame: pose-normalized into the base face model",
-            TrustDecision = snapshot.TrustDecision,
-            Vertices = snapshot.Vertices.Select(CopyPoint).ToList(),
-            CameraMatrixCoefficients = snapshot.CameraMatrixCoefficients.Select(Round).ToList(),
-            ShapeCoefficients = snapshot.ShapeCoefficients.Select(Round).ToList(),
-            ExpressionCoefficients = snapshot.ExpressionCoefficients.Select(Round).ToList(),
-            Warnings = snapshot.Warnings.ToList()
-        };
-        return true;
-    }
-
-    private static bool TryCreateObservation(LastGoodFeatureThreeDdfaSnapshot snapshot, out AvatarModelObservation observation)
+    private static bool TryCreateObservation(ThreeDdfaReconstructionSnapshot snapshot, out AvatarModelObservation observation)
     {
         observation = new AvatarModelObservation();
         if (snapshot.Vertices.Count == 0)
@@ -255,10 +182,4 @@ public sealed class AvatarModelObservationStore
             : 0d;
     }
 
-    private static double? RoundNullable(double? value)
-    {
-        return value is { } number && double.IsFinite(number)
-            ? Round(number)
-            : null;
-    }
 }

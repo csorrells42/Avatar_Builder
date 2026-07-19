@@ -190,7 +190,7 @@ public sealed class LastGoodThreeDdfaStore
     const toggle = document.getElementById('toggleAutoRefresh');
     const status = document.getElementById('refreshStatus');
     if (!toggle) return;
-    const key = 'episodeMonitorLast5ThreeDdfaAutoRefreshPaused';
+    const key = 'avatarBuilderLast5ThreeDdfaAutoRefreshPaused';
     const isPaused = () => {
       try { return window.localStorage?.getItem(key) === 'true'; }
       catch { return false; }

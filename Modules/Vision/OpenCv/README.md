@@ -10,7 +10,7 @@ Reference material:
 - Current app packages: `OpenCvSharp4` and `OpenCvSharp4.runtime.win`.
 - OpenCvSharp4 is the maintenance family currently used by the app. OpenCvSharp5 is the active family for new .NET 8+ projects, so future OpenCV upgrades should evaluate a controlled migration instead of mixing package families.
 - OpenCvSharp does not provide CUDA support through the stock packages. GPU/OpenCV-CUDA experiments should stay in a separate sidecar or native backend instead of leaking CUDA-specific assumptions into this module.
-- The retired solvePnP experiment lives under `Modules\Deprecated\Vision\OpenCv` for reference. Active avatar pose and dense geometry now come from 3DDFA_V2 ONNX.
+- Active avatar pose and dense geometry come from 3DDFA_V2 ONNX; OpenCV remains a localization and feature-tracking fallback.
 
 Implementation rules:
 

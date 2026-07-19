@@ -9,7 +9,7 @@ public sealed class FaceReconstructionLaneStatus
     public string FastTrackingLaneName { get; set; } = "MediaPipe fast tracking lane";
 
     public string FastTrackingPurpose { get; set; } =
-        "Live face, eye, mouth, brow, overlay, and narcolepsy-cue tracking.";
+        "Live face, eye, mouth, brow, overlay, and capture-measurement tracking.";
 
     public bool FastTrackingAvailable { get; set; }
 
@@ -48,7 +48,7 @@ public sealed class FaceReconstructionLaneStatus
         "Avatar capture waits for validated 3DDFA_V2 ONNX dense reconstruction; MediaPipe/OpenCV remains the fast tracking lane.";
 
     public string LearningImpact { get; set; } =
-        "Does not block narcolepsy tracking. Avatar fitting should trust dense depth/head-shape output only after the 3DDFA_V2 ONNX lane is ready.";
+        "Does not block live feature tracking. Avatar fitting should trust dense depth/head-shape output only after the 3DDFA_V2 ONNX lane is ready.";
 
     public List<string> Warnings { get; set; } = [];
 

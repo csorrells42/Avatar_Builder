@@ -15,7 +15,6 @@
         Closing="WindowClosing">
     <Window.Resources>
         <SolidColorBrush x:Key="PanelBrush" Color="#101820" />
-        <SolidColorBrush x:Key="PanelAltBrush" Color="#0c1218" />
         <SolidColorBrush x:Key="BorderBrush" Color="#243545" />
 
         <Style TargetType="TextBlock">
@@ -29,12 +28,6 @@
             <Setter Property="BorderThickness" Value="1" />
             <Setter Property="Padding" Value="14,8" />
             <Setter Property="MinHeight" Value="34" />
-        </Style>
-
-        <Style x:Key="NarcolepsyActionButtonStyle" TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
-            <Setter Property="Width" Value="180" />
-            <Setter Property="MinHeight" Value="36" />
-            <Setter Property="Margin" Value="0,0,8,8" />
         </Style>
 
         <Style x:Key="StartStopButtonStyle" TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
@@ -149,25 +142,6 @@
             <Setter Property="Background" Value="#101820" />
         </Style>
 
-        <Style TargetType="DataGrid">
-            <Setter Property="Background" Value="#0c1218" />
-            <Setter Property="Foreground" Value="#f5f8fb" />
-            <Setter Property="BorderBrush" Value="#243545" />
-            <Setter Property="GridLinesVisibility" Value="Horizontal" />
-            <Setter Property="HeadersVisibility" Value="Column" />
-            <Setter Property="RowBackground" Value="#0c1218" />
-            <Setter Property="AlternatingRowBackground" Value="#101820" />
-            <Setter Property="HorizontalGridLinesBrush" Value="#1d2c38" />
-            <Setter Property="VerticalGridLinesBrush" Value="#1d2c38" />
-        </Style>
-
-        <Style TargetType="DataGridColumnHeader">
-            <Setter Property="Background" Value="#182532" />
-            <Setter Property="Foreground" Value="#f5f8fb" />
-            <Setter Property="BorderBrush" Value="#2b4054" />
-            <Setter Property="FontWeight" Value="SemiBold" />
-            <Setter Property="Padding" Value="8,6" />
-        </Style>
     </Window.Resources>
 
     <Grid Margin="14">
@@ -206,12 +180,7 @@
                 <ColumnDefinition Width="*" />
                 <ColumnDefinition Width="390" />
             </Grid.ColumnDefinitions>
-            <Grid.RowDefinitions>
-                <RowDefinition Height="*" />
-                <RowDefinition Height="230" />
-            </Grid.RowDefinitions>
-
-            <Border Grid.Column="0" Grid.Row="0" Background="#05080c" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1">
+            <Border Grid.Column="0" Background="#05080c" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1">
                 <Grid x:Name="PreviewHost" SizeChanged="PreviewHostSizeChanged">
                     <Grid x:Name="DirectX12PreviewLayer" Visibility="Collapsed" ClipToBounds="True" />
                     <Image x:Name="PreviewImage" Stretch="Uniform" Visibility="Collapsed" />
@@ -223,102 +192,82 @@
                     </StackPanel>
                     <Border x:Name="TrackingOverlay" HorizontalAlignment="Left" VerticalAlignment="Top" Margin="14" Background="#d8080d12" BorderBrush="#37506a" BorderThickness="1" Padding="10" MinWidth="360" MaxWidth="860">
                         <StackPanel>
-                            <TextBlock x:Name="OverlayStateText" Text="Tracking idle" FontWeight="Bold" TextWrapping="Wrap" />
-                            <TextBlock x:Name="OverlayMetricText" Text="Motion -- | Threshold --" Foreground="#b9d7ef" TextWrapping="Wrap" Margin="0,4,0,0" />
-                            <TextBlock x:Name="OverlayTriggerText" Text="Enable episode watch to arm tracking." Foreground="#b9d7ef" TextWrapping="Wrap" Margin="0,4,0,0" />
+                            <TextBlock x:Name="OverlayStateText" Text="Avatar tracking idle" FontWeight="Bold" TextWrapping="Wrap" />
+                            <TextBlock x:Name="OverlayMetricText" Text="Face lock -- | eye -- | mouth --" Foreground="#b9d7ef" TextWrapping="Wrap" Margin="0,4,0,0" />
+                            <TextBlock x:Name="OverlayTriggerText" Text="Turn on the camera to begin face tracking." Foreground="#b9d7ef" TextWrapping="Wrap" Margin="0,4,0,0" />
                         </StackPanel>
                     </Border>
                 </Grid>
             </Border>
 
-            <Border Grid.Column="1" Grid.Row="0" Margin="14,0,0,0" Background="{StaticResource PanelBrush}" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" Padding="14">
+            <Border Grid.Column="1" Margin="14,0,0,0" Background="{StaticResource PanelBrush}" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" Padding="14">
                 <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
                     <StackPanel Margin="0,0,18,0">
-                        <Border Background="#0c1218" BorderBrush="#243545" BorderThickness="1" Padding="12" Margin="0,0,0,14">
+                        <Border Background="#0c1218" BorderBrush="#243545" BorderThickness="1" Padding="12">
                             <StackPanel>
-                                <TextBlock Text="Narcolepsy Tracking" FontSize="20" FontWeight="Bold" />
-                                <TextBlock Text="Logs observable sustained low-motion events for review. This does not diagnose a medical condition." Foreground="#b9d7ef" TextWrapping="Wrap" Margin="0,8,0,8" />
+                                <TextBlock Text="Avatar Building" FontSize="20" FontWeight="Bold" />
+                                <TextBlock Text="Captures 3DDFA face reconstruction data while keeping live eye, jaw, and brow tracking available for review." Foreground="#b9d7ef" TextWrapping="Wrap" Margin="0,8,0,8" />
 
-                                <Button x:Name="SleepEventWatchButton" Style="{StaticResource StartStopButtonStyle}" Content="Start Sleep Event Watch" ToolTip="Starts or stops automatic event watching from low motion, eye cues, mouth cues, and trends." HorizontalAlignment="Left" Margin="0,8,0,8" Click="SleepEventWatchClicked" />
-                                <CheckBox x:Name="SnapshotCheckBox" Content="Save snapshots at episode start and end" ToolTip="Adds still images to each event folder for quick review." IsChecked="True" />
-                                <CheckBox x:Name="EventVideoCheckBox" Content="Save webcam video for events" ToolTip="Writes an annotated webcam MP4 into each event folder when enabled." IsChecked="True" />
+                                <TextBlock Text="Avatar user" FontWeight="SemiBold" Margin="0,4,0,0" />
+                                <ComboBox x:Name="AvatarProfileComboBox" DisplayMemberPath="DisplayName" SelectionChanged="AvatarProfileSelectionChanged" />
+                                <Grid Margin="0,8,0,0">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBox x:Name="AvatarProfileNameTextBox" MinHeight="32" MinWidth="160" ToolTip="Type a consenting person's name to create or switch to their avatar profile." />
+                                    <Button Grid.Column="1" Content="Add User" Margin="8,0,0,0" Padding="10,6" MinHeight="32" Click="AddAvatarProfileClicked" />
+                                </Grid>
+                                <TextBlock x:Name="AvatarProfileStatusText" Foreground="#b9d7ef" TextWrapping="Wrap" Margin="0,6,0,8" />
 
-                                <Separator Margin="0,18,0,14" Background="#243545" />
+                                <CheckBox x:Name="AvatarSubjectCheckBox" Content="This is the selected user - allow avatar capture" ToolTip="Turn this on only when the selected avatar user is in front of the camera." Checked="AvatarSubjectChanged" Unchecked="AvatarSubjectChanged" />
 
-                                <TextBlock Text="Actions" FontSize="16" FontWeight="Bold" />
-                                <WrapPanel Margin="0,10,0,0">
-                                    <Button x:Name="CalibrateAlertBaselineButton" Style="{StaticResource NarcolepsyActionButtonStyle}" Content="Calibrate Alert Baseline" ToolTip="Use only when you are awake, alert, and not experiencing symptoms. Learns the reference eye, mouth, and jaw measurements." Click="CalibrateAlertBaselineClicked" />
-                                    <Button x:Name="SymptomCaptureButton" Style="{StaticResource NarcolepsyActionButtonStyle}" Content="Capture Symptoms" ToolTip="Marks symptoms, protects the alert baseline, and starts or stops an event recording." Click="SymptomCaptureClicked" />
-                                    <Button Style="{StaticResource NarcolepsyActionButtonStyle}" Content="Export Event List" Click="ExportClicked" />
-                                    <Button Style="{StaticResource NarcolepsyActionButtonStyle}" Content="View Event Log" Click="OpenEventLogClicked" />
-                                </WrapPanel>
-                                <TextBlock x:Name="CalibrationGuardText" Text="Alert baseline calibration is available when you are awake, alert, and symptom-free." Foreground="#b9d7ef" TextWrapping="Wrap" Margin="0,8,0,0" />
-
-                                <Separator Margin="0,18,0,14" Background="#243545" />
-
-                                <Expander Header="Event Triggers" IsExpanded="False">
-                                    <StackPanel Margin="0,10,0,0">
+                                <Border Background="#081018" BorderBrush="#243545" BorderThickness="1" Padding="10" Margin="0,10,0,0">
+                                    <StackPanel>
                                         <Grid>
                                             <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="Auto" />
                                                 <ColumnDefinition Width="*" />
                                                 <ColumnDefinition Width="Auto" />
                                             </Grid.ColumnDefinitions>
-                                            <TextBlock Text="Low-motion threshold" FontWeight="SemiBold" />
-                                            <TextBlock x:Name="ThresholdValueText" Grid.Column="1" Text="1.5%" Foreground="#b9d7ef" />
+                                            <Border x:Name="AvatarLearningIndicator" Width="11" Height="11" CornerRadius="6" Background="#59616b" Margin="0,0,8,0" VerticalAlignment="Center" />
+                                            <TextBlock x:Name="AvatarLearningStateText" Grid.Column="1" Text="Avatar capture stopped" FontWeight="SemiBold" VerticalAlignment="Center" TextWrapping="Wrap" />
+                                            <Button x:Name="AvatarLearningToggleButton" Grid.Column="2" Style="{StaticResource StartStopButtonStyle}" Content="Start Avatar Capture" ToolTip="Starts or stops 3DDFA avatar capture." Padding="10,6" Margin="8,0,0,0" Click="AvatarLearningToggleClicked" />
                                         </Grid>
-                                        <Slider x:Name="ThresholdSlider" Minimum="0.2" Maximum="8" Value="1.5" TickPlacement="BottomRight" Ticks="1.5" ValueChanged="SettingChanged" />
-
-                                        <Grid Margin="0,18,0,0">
-                                            <Grid.ColumnDefinitions>
-                                                <ColumnDefinition Width="*" />
-                                                <ColumnDefinition Width="Auto" />
-                                            </Grid.ColumnDefinitions>
-                                            <TextBlock Text="Stillness time" FontWeight="SemiBold" />
-                                            <TextBlock x:Name="StillnessValueText" Grid.Column="1" Text="120s" Foreground="#b9d7ef" />
-                                        </Grid>
-                                        <Slider x:Name="StillnessSlider" Minimum="15" Maximum="900" Value="120" TickPlacement="BottomRight" Ticks="120" ValueChanged="SettingChanged" />
-
-                                        <Grid Margin="0,18,0,0">
-                                            <Grid.ColumnDefinitions>
-                                                <ColumnDefinition Width="*" />
-                                                <ColumnDefinition Width="Auto" />
-                                            </Grid.ColumnDefinitions>
-                                            <TextBlock Text="Eye cue sensitivity" FontWeight="SemiBold" />
-                                            <TextBlock x:Name="EyeCueValueText" Grid.Column="1" Text="35%" Foreground="#b9d7ef" />
-                                        </Grid>
-                                        <Slider x:Name="EyeCueSlider" Minimum="15" Maximum="80" Value="35" TickPlacement="BottomRight" Ticks="35" ValueChanged="SettingChanged" />
-
-                                        <Grid Margin="0,18,0,0">
-                                            <Grid.ColumnDefinitions>
-                                                <ColumnDefinition Width="*" />
-                                                <ColumnDefinition Width="Auto" />
-                                            </Grid.ColumnDefinitions>
-                                            <TextBlock Text="Jaw cue sensitivity" FontWeight="SemiBold" />
-                                            <TextBlock x:Name="JawCueValueText" Grid.Column="1" Text="35%" Foreground="#b9d7ef" />
-                                        </Grid>
-                                        <Slider x:Name="JawCueSlider" Minimum="15" Maximum="120" Value="35" TickPlacement="BottomRight" Ticks="35" ValueChanged="SettingChanged" />
-
-                                        <Grid Margin="0,18,0,0">
-                                            <Grid.ColumnDefinitions>
-                                                <ColumnDefinition Width="*" />
-                                                <ColumnDefinition Width="Auto" />
-                                            </Grid.ColumnDefinitions>
-                                            <TextBlock Text="Face cue time" FontWeight="SemiBold" />
-                                            <TextBlock x:Name="FaceCueTimeValueText" Grid.Column="1" Text="3s" Foreground="#b9d7ef" />
-                                        </Grid>
-                                        <Slider x:Name="FaceCueTimeSlider" Minimum="1" Maximum="20" Value="3" TickPlacement="BottomRight" Ticks="3" ValueChanged="SettingChanged" />
-
-                                        <Grid Margin="0,18,0,0">
-                                            <Grid.ColumnDefinitions>
-                                                <ColumnDefinition Width="*" />
-                                                <ColumnDefinition Width="Auto" />
-                                            </Grid.ColumnDefinitions>
-                                            <TextBlock Text="Eye-led AI cue score" FontWeight="SemiBold" />
-                                            <TextBlock x:Name="CompositeCueValueText" Grid.Column="1" Text="55%" Foreground="#b9d7ef" />
-                                        </Grid>
-                                        <Slider x:Name="CompositeCueSlider" Minimum="25" Maximum="90" Value="55" TickPlacement="BottomRight" Ticks="55" ValueChanged="SettingChanged" />
+                                        <TextBlock x:Name="AvatarLearningStatusText" Text="Not capturing: select the correct user, confirm they are at the camera, then start avatar capture." Foreground="#b9d7ef" TextWrapping="Wrap" Margin="0,8,0,0" />
+                                        <TextBlock x:Name="AvatarTrackingSanityText" Text="Tracking sanity: waiting for enough accepted measurements." Foreground="#b9d7ef" TextWrapping="Wrap" Margin="0,6,0,0" />
+                                        <TextBlock x:Name="AvatarReconstructionLaneText" Text="Avatar reconstruction: 3DDFA/ONNX waiting." Foreground="#b9d7ef" TextWrapping="Wrap" Margin="0,6,0,0" />
+                                        <Border Background="#0b141c" BorderBrush="#243545" BorderThickness="1" Padding="10" Margin="0,10,0,0">
+                                            <StackPanel>
+                                                <TextBlock x:Name="AvatarCaptureGuidanceTitleText" Text="Capture Guidance" FontWeight="SemiBold" TextWrapping="Wrap" />
+                                                <TextBlock x:Name="AvatarCaptureGuidanceDetailText" Text="Select the correct user, start the camera, then use Start Avatar Capture when you want 3DDFA samples collected." Foreground="#b9d7ef" TextWrapping="Wrap" Margin="0,6,0,0" />
+                                            </StackPanel>
+                                        </Border>
+                                        <UniformGrid Columns="2" Margin="0,10,0,0">
+                                            <Button Content="Open Avatar System" ToolTip="Opens one combined page for 3DDFA reconstruction, live tracking review, stored avatar data, and next capture guidance." Margin="0,0,6,0" Click="OpenAvatarSystemClicked" />
+                                            <Button Content="Open 3DDFA Last 5" ToolTip="Opens the separate dense 3DDFA reconstruction viewer for the last five avatar samples." Margin="6,0,0,0" Click="OpenLastGoodThreeDdfaClicked" />
+                                            <Button Content="Open Avatar Model Progress" ToolTip="Opens the accumulated 3DDFA identity and expression model viewer." Margin="0,8,6,0" Click="OpenAvatarModelProgressClicked" />
+                                            <Button x:Name="RebuildAvatarDataButton" Content="Rebuild Avatar Data" ToolTip="Archives the current Avatar data and starts fresh review/capture files." Margin="6,8,0,0" Click="RebuildAvatarDataClicked" />
+                                        </UniformGrid>
                                     </StackPanel>
-                                </Expander>
+                                </Border>
+
+                                <Separator Margin="0,18,0,14" Background="#243545" />
+
+                                <TextBlock Text="Camera and Model Quality" FontSize="16" FontWeight="Bold" />
+
+                                <Grid Margin="0,14,0,0">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Text="Tracking fidelity" FontWeight="SemiBold" />
+                                    <TextBlock x:Name="TrackingFidelityValueText" Grid.Column="1" Text="HD" Foreground="#b9d7ef" />
+                                </Grid>
+                                <ComboBox x:Name="TrackingFidelityComboBox" SelectionChanged="TrackingFidelitySelectionChanged" />
+                                <TextBlock x:Name="TrackingFidelityStatusText" Text="Tracking frames: 1920px max at 10 fps." Foreground="#b9d7ef" TextWrapping="Wrap" Margin="0,6,0,0" />
+                                <CheckBox x:Name="DirectX12PreviewCheckBox" Content="DX12 preview viewport" IsChecked="True" Checked="DirectX12PreviewChanged" Unchecked="DirectX12PreviewChanged" />
+                                <ToggleButton x:Name="LiveWireframePreviewToggle" Content="Show Live Wireframe" ToolTip="Hides the webcam image and shows the current camera-relative MediaPipe face mesh while analysis keeps running." HorizontalAlignment="Left" Margin="0,8,0,0" Checked="LiveWireframePreviewChanged" Unchecked="LiveWireframePreviewChanged" />
 
                                 <Separator Margin="0,18,0,14" Background="#243545" />
 
@@ -353,87 +302,17 @@
                                             <TextBlock x:Name="FaceFieldSizeValueText" Grid.Column="1" Text="60%" Foreground="#b9d7ef" />
                                         </Grid>
                                         <Slider x:Name="FaceFieldSizeSlider" Minimum="25" Maximum="90" Value="60" TickPlacement="BottomRight" Ticks="60" ValueChanged="SettingChanged" />
-                                        <CheckBox x:Name="FaceAutoFollowCheckBox" Content="Auto-follow face field" IsChecked="True" Checked="FaceCueChanged" Unchecked="FaceCueChanged" />
+                                        <CheckBox x:Name="FaceAutoFollowCheckBox" Content="Auto-follow face field" IsChecked="True" Checked="FaceTrackingFieldChanged" Unchecked="FaceTrackingFieldChanged" />
                                     </StackPanel>
                                 </Expander>
 
-                                <TextBlock x:Name="MonitorStatusText" Text="Episode monitor idle." TextWrapping="Wrap" Margin="0,8,0,0" Foreground="#b9d7ef" />
+                                <TextBlock x:Name="MonitorStatusText" Text="Avatar tracking idle." TextWrapping="Wrap" Margin="0,8,0,0" Foreground="#b9d7ef" />
 
                                 <Separator Margin="0,18,0,14" Background="#243545" />
 
-                                <TextBlock Text="Output" FontSize="16" FontWeight="Bold" />
+                                <TextBlock Text="Avatar Data" FontSize="16" FontWeight="Bold" />
                                 <TextBlock x:Name="OutputFolderText" TextWrapping="Wrap" Foreground="#b9d7ef" Margin="0,8,0,0" />
-                                <Button Content="Choose Folder" HorizontalAlignment="Left" Margin="0,8,0,0" Click="BrowseOutputClicked" />
-                            </StackPanel>
-                        </Border>
-
-                        <Border Background="#0c1218" BorderBrush="#243545" BorderThickness="1" Padding="12">
-                            <StackPanel>
-                                <TextBlock Text="Avatar Building" FontSize="20" FontWeight="Bold" />
-                                <TextBlock Text="Captures 3DDFA face reconstruction data while keeping live eye, jaw, and brow tracking available for review." Foreground="#b9d7ef" TextWrapping="Wrap" Margin="0,8,0,8" />
-
-                                <TextBlock Text="Avatar user" FontWeight="SemiBold" Margin="0,4,0,0" />
-                                <ComboBox x:Name="AvatarProfileComboBox" DisplayMemberPath="DisplayName" SelectionChanged="AvatarProfileSelectionChanged" />
-                                <Grid Margin="0,8,0,0">
-                                    <Grid.ColumnDefinitions>
-                                        <ColumnDefinition Width="*" />
-                                        <ColumnDefinition Width="Auto" />
-                                    </Grid.ColumnDefinitions>
-                                    <TextBox x:Name="AvatarProfileNameTextBox" MinHeight="32" MinWidth="160" ToolTip="Type a consenting person's name to create or switch to their avatar profile." />
-                                    <Button Grid.Column="1" Content="Add User" Margin="8,0,0,0" Padding="10,6" MinHeight="32" Click="AddAvatarProfileClicked" />
-                                </Grid>
-                                <TextBlock x:Name="AvatarProfileStatusText" Foreground="#b9d7ef" TextWrapping="Wrap" Margin="0,6,0,8" />
-
-                                <CheckBox x:Name="AvatarSubjectCheckBox" Content="This is the selected user - allow avatar capture" ToolTip="Turn this on only when the selected avatar user is in front of the camera." Checked="AvatarSubjectChanged" Unchecked="AvatarSubjectChanged" />
-
-                                <Border Background="#081018" BorderBrush="#243545" BorderThickness="1" Padding="10" Margin="0,10,0,0">
-                                    <StackPanel>
-                                        <Grid>
-                                            <Grid.ColumnDefinitions>
-                                                <ColumnDefinition Width="Auto" />
-                                                <ColumnDefinition Width="*" />
-                                                <ColumnDefinition Width="Auto" />
-                                            </Grid.ColumnDefinitions>
-                                            <Border x:Name="AvatarLearningIndicator" Width="11" Height="11" CornerRadius="6" Background="#59616b" Margin="0,0,8,0" VerticalAlignment="Center" />
-                                            <TextBlock x:Name="AvatarLearningStateText" Grid.Column="1" Text="Avatar capture stopped" FontWeight="SemiBold" VerticalAlignment="Center" TextWrapping="Wrap" />
-                                            <Button x:Name="AvatarLearningToggleButton" Grid.Column="2" Style="{StaticResource StartStopButtonStyle}" Content="Start Avatar Capture" ToolTip="Starts or stops 3DDFA avatar capture. Event recording is separate." Padding="10,6" Margin="8,0,0,0" Click="AvatarLearningToggleClicked" />
-                                        </Grid>
-                                        <TextBlock x:Name="AvatarLearningStatusText" Text="Not capturing: select the correct user, confirm they are at the camera, then start avatar capture." Foreground="#b9d7ef" TextWrapping="Wrap" Margin="0,8,0,0" />
-                                        <TextBlock x:Name="AvatarTrackingSanityText" Text="Tracking sanity: waiting for enough accepted measurements." Foreground="#b9d7ef" TextWrapping="Wrap" Margin="0,6,0,0" />
-                                        <TextBlock x:Name="AvatarReconstructionLaneText" Text="Avatar reconstruction: 3DDFA/ONNX waiting." Foreground="#b9d7ef" TextWrapping="Wrap" Margin="0,6,0,0" />
-                                        <Border Background="#0b141c" BorderBrush="#243545" BorderThickness="1" Padding="10" Margin="0,10,0,0">
-                                            <StackPanel>
-                                                <TextBlock x:Name="AvatarCaptureGuidanceTitleText" Text="Capture Guidance" FontWeight="SemiBold" TextWrapping="Wrap" />
-                                                <TextBlock x:Name="AvatarCaptureGuidanceDetailText" Text="Select the correct user, start the camera, then use Start Avatar Capture when you want 3DDFA samples collected." Foreground="#b9d7ef" TextWrapping="Wrap" Margin="0,6,0,0" />
-                                            </StackPanel>
-                                        </Border>
-                                        <UniformGrid Columns="2" Margin="0,10,0,0">
-                                            <Button Content="Open Avatar System" ToolTip="Opens one combined page for 3DDFA reconstruction, live tracking review, stored avatar data, and next capture guidance." Margin="0,0,6,0" Click="OpenAvatarSystemClicked" />
-                                            <Button Content="Open MediaPipe Last 5" ToolTip="Opens the lightweight rolling viewer for the last five fast feature-lock samples." Margin="6,0,0,0" Click="OpenLastGoodFeaturesClicked" />
-                                            <Button Content="Open 3DDFA Last 5" ToolTip="Opens the separate dense 3DDFA reconstruction viewer for the last five avatar samples." Margin="0,8,6,0" Click="OpenLastGoodThreeDdfaClicked" />
-                                            <Button Content="Open Avatar Model Progress" ToolTip="Opens the accumulated 3DDFA identity and expression model viewer." Margin="6,8,0,0" Click="OpenAvatarModelProgressClicked" />
-                                            <Button x:Name="RebuildAvatarDataButton" Content="Rebuild Avatar Data" ToolTip="Archives the current Avatar data and starts fresh review/capture files." Margin="0,8,6,0" Click="RebuildAvatarDataClicked" />
-                                        </UniformGrid>
-                                    </StackPanel>
-                                </Border>
-
-                                <Separator Margin="0,18,0,14" Background="#243545" />
-
-                                <TextBlock Text="Camera and Model Quality" FontSize="16" FontWeight="Bold" />
-
-                                <Grid Margin="0,14,0,0">
-                                    <Grid.ColumnDefinitions>
-                                        <ColumnDefinition Width="*" />
-                                        <ColumnDefinition Width="Auto" />
-                                    </Grid.ColumnDefinitions>
-                                    <TextBlock Text="Tracking fidelity" FontWeight="SemiBold" />
-                                    <TextBlock x:Name="TrackingFidelityValueText" Grid.Column="1" Text="HD" Foreground="#b9d7ef" />
-                                </Grid>
-                                <ComboBox x:Name="TrackingFidelityComboBox" SelectionChanged="TrackingFidelitySelectionChanged" />
-                                <TextBlock x:Name="TrackingFidelityStatusText" Text="Tracking frames: 1920px max at 10 fps." Foreground="#b9d7ef" TextWrapping="Wrap" Margin="0,6,0,0" />
-                                <CheckBox x:Name="DirectX12PreviewCheckBox" Content="DX12 preview viewport" IsChecked="True" Checked="DirectX12PreviewChanged" Unchecked="DirectX12PreviewChanged" />
-                                <ToggleButton x:Name="LiveWireframePreviewToggle" Content="Show Live Wireframe" ToolTip="Hides the webcam preview and shows the latest accepted dense wireframe sample while camera analysis keeps running." HorizontalAlignment="Left" Margin="0,8,0,0" Checked="LiveWireframePreviewChanged" Unchecked="LiveWireframePreviewChanged" />
-                                <CheckBox x:Name="LiveWireframeHeadLockCheckBox" Content="Head-lock live wireframe" IsChecked="True" ToolTip="Draws the live dense wireframe in a head-attached eye-line/chin coordinate frame so feature sliding is easier to spot." Checked="LiveWireframeHeadLockChanged" Unchecked="LiveWireframeHeadLockChanged" />
+                                <Button Content="Choose Data Folder" HorizontalAlignment="Left" Margin="0,8,0,0" Click="BrowseOutputClicked" />
 
                                 <Separator Margin="0,18,0,14" Background="#243545" />
 
@@ -457,24 +336,6 @@
                 </ScrollViewer>
             </Border>
 
-            <Border Grid.Column="0" Grid.ColumnSpan="2" Grid.Row="1" Margin="0,14,0,0" Background="{StaticResource PanelAltBrush}" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1">
-                <DataGrid x:Name="EventGrid" AutoGenerateColumns="False" IsReadOnly="True" SelectionMode="Single" PreviewMouseRightButtonDown="EventGridRightClick">
-                    <DataGrid.ContextMenu>
-                        <ContextMenu>
-                            <MenuItem Header="Delete Event" Click="DeleteSelectedEventClicked" />
-                        </ContextMenu>
-                    </DataGrid.ContextMenu>
-                    <DataGrid.Columns>
-                        <DataGridTextColumn Header="Started" Binding="{Binding StartLabel}" Width="150" />
-                        <DataGridTextColumn Header="Ended" Binding="{Binding EndLabel}" Width="150" />
-                        <DataGridTextColumn Header="Duration" Binding="{Binding Duration}" Width="95" />
-                        <DataGridTextColumn Header="Event" Binding="{Binding Event}" Width="180" />
-                        <DataGridTextColumn Header="Avg Motion" Binding="{Binding AvgMotion}" Width="110" />
-                        <DataGridTextColumn Header="Notes" Binding="{Binding Notes}" Width="240" />
-                        <DataGridTextColumn Header="Files" Binding="{Binding File}" Width="*" />
-                    </DataGrid.Columns>
-                </DataGrid>
-            </Border>
         </Grid>
 
         <TextBlock x:Name="FooterText" Grid.Row="2" Text="Ready." Foreground="#b9d7ef" />

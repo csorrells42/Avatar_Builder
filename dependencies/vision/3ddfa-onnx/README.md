@@ -15,7 +15,7 @@ dependencies/vision/3ddfa-onnx/3DDFA_V2/weights/mb1_120x120.onnx
 dependencies/vision/3ddfa-onnx/3DDFA_V2/weights/mb1_120x120.pth
 ```
 
-This lane is for avatar reconstruction, dense face/head pose, depth, and quality checks. It is intentionally separate from the fast MediaPipe/OpenCV tracking lane used for live overlays and narcolepsy event cues.
+This lane is for avatar reconstruction, dense face/head pose, depth, and quality checks. It is intentionally separate from the fast MediaPipe/OpenCV lane used for live overlays and feature measurements.
 
 Run `tools\SetupThreeDdfaOnnxSidecar.ps1` from the repo root to clone or update the official 3DDFA_V2 repository and install Python packages. The script does not invent or redistribute third-party weights; add the official `mb1_120x120` checkpoint or converted ONNX weight under `3DDFA_V2\weights`.
 

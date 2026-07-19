@@ -54,7 +54,7 @@ public static class AvatarModelBuilder
 
     private static AvatarIdentityModel BuildIdentity(
         IReadOnlyList<AvatarModelObservation> observations,
-        IReadOnlyList<LastGoodFeatureMeshWireframeEdge> topologyEdges)
+        IReadOnlyList<MeshTopologyEdge> topologyEdges)
     {
         var vertexAccumulators = new Dictionary<int, WeightedPointAccumulator>();
         var shapeAccumulators = CreateCoefficientAccumulators(observations.Max(static observation => observation.ShapeCoefficients.Count));

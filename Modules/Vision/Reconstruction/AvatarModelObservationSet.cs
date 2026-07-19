@@ -17,7 +17,7 @@ public sealed class AvatarModelObservationSet
     public string StoragePolicy { get; init; } =
         "Bounded measurement-only 3DDFA observation set. The newest accepted observations are retained; raw camera video and photos are not stored here.";
 
-    public List<LastGoodFeatureMeshWireframeEdge> DenseTopologyEdges { get; init; } = [];
+    public List<MeshTopologyEdge> DenseTopologyEdges { get; init; } = [];
 
     public List<AvatarModelObservation> Observations { get; init; } = [];
 }
