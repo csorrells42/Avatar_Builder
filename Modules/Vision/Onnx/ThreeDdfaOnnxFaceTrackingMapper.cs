@@ -5,6 +5,7 @@ namespace AvatarBuilder.Modules.Vision.Onnx;
 
 public static class ThreeDdfaOnnxFaceTrackingMapper
 {
+    private const int SparseLandmarkCount = 68;
     private static readonly int[] JawIndices = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
     private static readonly int[] LeftBrowIndices = [17, 18, 19, 20, 21];
     private static readonly int[] RightBrowIndices = [22, 23, 24, 25, 26];
@@ -40,7 +41,7 @@ public static class ThreeDdfaOnnxFaceTrackingMapper
             };
         }
 
-        var sparse = response.SparseLandmarks.ToDictionary(static point => point.Index);
+        var sparse = IndexSparseLandmarks(response.SparseLandmarks);
         var jaw = SelectPoints(sparse, JawIndices, frameWidth, frameHeight);
         var leftEye = SelectPoints(sparse, LeftEyeIndices, frameWidth, frameHeight);
         var rightEye = SelectPoints(sparse, RightEyeIndices, frameWidth, frameHeight);
@@ -52,7 +53,7 @@ public static class ThreeDdfaOnnxFaceTrackingMapper
         var confidence = Math.Clamp(response.ReconstructionConfidencePercent / 100d, 0.01d, 1d);
         var eyeConfidence = leftEye.Count >= 4 && rightEye.Count >= 4 ? confidence * 0.92d : confidence * 0.35d;
         var mouthConfidence = outerLip.Count >= 4 ? confidence * 0.90d : confidence * 0.35d;
-        var source = "3DDFA_V2 ONNX FaceBoxes and 68-point landmarks";
+        const string source = "3DDFA_V2 ONNX FaceBoxes and 68-point landmarks";
 
         var featureDetection = new FaceFeatureDetection
         {
@@ -117,19 +118,41 @@ public static class ThreeDdfaOnnxFaceTrackingMapper
         return new Rect(left, top, right - left, bottom - top);
     }
 
+    private static ThreeDdfaOnnxSidecarVertex?[] IndexSparseLandmarks(
+        IReadOnlyList<ThreeDdfaOnnxSidecarVertex> points)
+    {
+        var indexed = new ThreeDdfaOnnxSidecarVertex?[SparseLandmarkCount];
+        foreach (var point in points)
+        {
+            if ((uint)point.Index < (uint)indexed.Length)
+            {
+                indexed[point.Index] = point;
+            }
+        }
+
+        return indexed;
+    }
+
     private static IReadOnlyList<Point> SelectPoints(
-        IReadOnlyDictionary<int, ThreeDdfaOnnxSidecarVertex> points,
+        IReadOnlyList<ThreeDdfaOnnxSidecarVertex?> points,
         IReadOnlyList<int> indices,
         int frameWidth,
         int frameHeight)
     {
-        return indices
-            .Where(points.ContainsKey)
-            .Select(index => points[index])
-            .Select(point => new Point(
+        var selected = new List<Point>(indices.Count);
+        foreach (var index in indices)
+        {
+            if ((uint)index >= (uint)points.Count || points[index] is not { } point)
+            {
+                continue;
+            }
+
+            selected.Add(new Point(
                 Math.Clamp(point.X / frameWidth, 0d, 1d),
-                Math.Clamp(point.Y / frameHeight, 0d, 1d)))
-            .ToList();
+                Math.Clamp(point.Y / frameHeight, 0d, 1d)));
+        }
+
+        return selected;
     }
 
     private static Rect? Bounds(IReadOnlyList<Point> points)
@@ -139,10 +162,20 @@ public static class ThreeDdfaOnnxFaceTrackingMapper
             return null;
         }
 
-        var left = points.Min(static point => point.X);
-        var top = points.Min(static point => point.Y);
-        var right = points.Max(static point => point.X);
-        var bottom = points.Max(static point => point.Y);
+        var first = points[0];
+        var left = first.X;
+        var top = first.Y;
+        var right = first.X;
+        var bottom = first.Y;
+        for (var index = 1; index < points.Count; index++)
+        {
+            var point = points[index];
+            left = Math.Min(left, point.X);
+            top = Math.Min(top, point.Y);
+            right = Math.Max(right, point.X);
+            bottom = Math.Max(bottom, point.Y);
+        }
+
         return right <= left || bottom <= top
             ? null
             : new Rect(left, top, right - left, bottom - top);

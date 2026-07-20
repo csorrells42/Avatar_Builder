@@ -1,4 +1,3 @@
-using AvatarBuilder.Modules.Vision.Analysis;
 using AvatarBuilder.Modules.Vision.Common;
 using System.Windows;
 
@@ -33,10 +32,20 @@ public static class ContourOpeningEstimator
             return null;
         }
 
-        var minX = contour.Min(static point => point.X);
-        var maxX = contour.Max(static point => point.X);
-        var minY = contour.Min(static point => point.Y);
-        var maxY = contour.Max(static point => point.Y);
+        var first = contour[0];
+        var minX = first.X;
+        var maxX = first.X;
+        var minY = first.Y;
+        var maxY = first.Y;
+        for (var index = 1; index < contour.Count; index++)
+        {
+            var point = contour[index];
+            minX = Math.Min(minX, point.X);
+            maxX = Math.Max(maxX, point.X);
+            minY = Math.Min(minY, point.Y);
+            maxY = Math.Max(maxY, point.Y);
+        }
+
         var width = maxX - minX;
         var height = maxY - minY;
         return width <= 0.0001d || height <= 0.0001d
@@ -55,7 +64,11 @@ public static class ContourOpeningEstimator
             return null;
         }
 
-        var distances = new List<double>();
+        var maximumPairCount = contour.Count / 2;
+        Span<double> distances = maximumPairCount <= 64
+            ? stackalloc double[maximumPairCount]
+            : new double[maximumPairCount];
+        var distanceCount = 0;
         for (var upperIndex = 1; upperIndex < oppositeIndex; upperIndex++)
         {
             var lowerIndex = contour.Count - upperIndex;
@@ -64,10 +77,12 @@ public static class ContourOpeningEstimator
                 continue;
             }
 
-            distances.Add(Math.Abs(ProjectAcross(contour[upperIndex], featureAxis) - ProjectAcross(contour[lowerIndex], featureAxis)));
+            distances[distanceCount++] = Math.Abs(
+                ProjectAcross(contour[upperIndex], featureAxis)
+                - ProjectAcross(contour[lowerIndex], featureAxis));
         }
 
-        if (distances.Count == 0)
+        if (distanceCount == 0)
         {
             return null;
         }
@@ -78,13 +93,17 @@ public static class ContourOpeningEstimator
             return null;
         }
 
-        var ordered = distances.OrderBy(static distance => distance).ToList();
-        var trim = ordered.Count >= 5 ? 1 : 0;
-        var averageGap = ordered
-            .Skip(trim)
-            .Take(ordered.Count - trim * 2)
-            .DefaultIfEmpty(ordered[ordered.Count / 2])
-            .Average();
+        var ordered = distances[..distanceCount];
+        ordered.Sort();
+        var trim = distanceCount >= 5 ? 1 : 0;
+        var includedCount = distanceCount - trim * 2;
+        var gapSum = 0d;
+        for (var index = trim; index < distanceCount - trim; index++)
+        {
+            gapSum += ordered[index];
+        }
+
+        var averageGap = gapSum / includedCount;
         return Math.Clamp(averageGap / width, 0d, 2d);
     }
 

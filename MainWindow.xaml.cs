@@ -108,6 +108,9 @@ public partial class MainWindow : Window
     private BitmapSource? _latestFrame;
     private FaceFeatureDetection _currentFaceFeatureDetection = FaceFeatureDetection.None;
     private FaceLandmarkFrame _currentFaceLandmarkFrame = FaceLandmarkFrame.None;
+    private FaceFeatureDetection? _cachedNativeOverlayFeatureDetection;
+    private FaceLandmarkFrame? _cachedNativeOverlayLandmarkFrame;
+    private PreviewTrackingOverlay _cachedNativeTrackingOverlay = PreviewTrackingOverlay.Empty;
     private FaceLandmarkMetrics _currentFaceLandmarkMetrics = FaceLandmarkMetrics.None;
     private FaceLockStabilityAnalysis _currentFaceLockStabilityAnalysis = FaceLockStabilityAnalysis.Waiting;
     private FaceFrameGeometry _currentFaceFrameGeometry = FaceFrameGeometry.None;
@@ -4351,14 +4354,21 @@ public partial class MainWindow : Window
             return PreviewTrackingOverlay.Empty;
         }
 
+        var featureDetection = _currentFaceFeatureDetection;
         var frame = _currentFaceLandmarkFrame;
-        var inferredEyes = frame.EyeArtifactSuppressed;
-        return new PreviewTrackingOverlay
+        if (ReferenceEquals(featureDetection, _cachedNativeOverlayFeatureDetection)
+            && ReferenceEquals(frame, _cachedNativeOverlayLandmarkFrame))
         {
-            FaceBox = ToPreviewOverlayRect(_currentFaceFeatureDetection.FaceBox),
-            LeftEyeBox = ToPreviewOverlayRect(_currentFaceFeatureDetection.LeftEyeBox),
-            RightEyeBox = ToPreviewOverlayRect(_currentFaceFeatureDetection.RightEyeBox),
-            MouthBox = ToPreviewOverlayRect(_currentFaceFeatureDetection.MouthBox),
+            return _cachedNativeTrackingOverlay;
+        }
+
+        var inferredEyes = frame.EyeArtifactSuppressed;
+        var overlay = new PreviewTrackingOverlay
+        {
+            FaceBox = ToPreviewOverlayRect(featureDetection.FaceBox),
+            LeftEyeBox = ToPreviewOverlayRect(featureDetection.LeftEyeBox),
+            RightEyeBox = ToPreviewOverlayRect(featureDetection.RightEyeBox),
+            MouthBox = ToPreviewOverlayRect(featureDetection.MouthBox),
             FaceContour = ToPreviewOverlayPolyline(frame.FaceContour, closed: true),
             JawContour = ToPreviewOverlayPolyline(frame.JawContour, closed: false),
             LeftEyeContour = ToPreviewOverlayPolyline(
@@ -4380,6 +4390,10 @@ public partial class MainWindow : Window
                 closed: true,
                 inferred: frame.MouthReconstructed)
         };
+        _cachedNativeOverlayFeatureDetection = featureDetection;
+        _cachedNativeOverlayLandmarkFrame = frame;
+        _cachedNativeTrackingOverlay = overlay;
+        return overlay;
     }
 
     private List<MeshTopologyEdge> GetOrCreateThreeDdfaTopology(
@@ -4418,13 +4432,29 @@ public partial class MainWindow : Window
             return null;
         }
 
-        var normalized = points
-            .Where(static point => double.IsFinite(point.X) && double.IsFinite(point.Y))
-            .Select(static point => new PreviewOverlayPoint(point.X, point.Y).Clamp())
-            .ToArray();
-        return normalized.Length >= 2
-            ? new PreviewOverlayPolyline(normalized, closed, inferred)
-            : null;
+        var normalized = new PreviewOverlayPoint[points.Count];
+        var normalizedCount = 0;
+        foreach (var point in points)
+        {
+            if (!double.IsFinite(point.X) || !double.IsFinite(point.Y))
+            {
+                continue;
+            }
+
+            normalized[normalizedCount++] = new PreviewOverlayPoint(point.X, point.Y).Clamp();
+        }
+
+        if (normalizedCount < 2)
+        {
+            return null;
+        }
+
+        if (normalizedCount != normalized.Length)
+        {
+            Array.Resize(ref normalized, normalizedCount);
+        }
+
+        return new PreviewOverlayPolyline(normalized, closed, inferred);
     }
 
     private static PreviewOverlayRect? ToPreviewOverlayRect(Rect? region)

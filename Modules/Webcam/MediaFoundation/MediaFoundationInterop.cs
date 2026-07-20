@@ -177,12 +177,6 @@ internal static class MediaFoundationInterop
         out IMFSourceReader reader);
 
     [DllImport("mfreadwrite.dll", ExactSpelling = true, CharSet = CharSet.Unicode)]
-    public static extern int MFCreateSourceReaderFromURL(
-        string sourceUrl,
-        IMFAttributes? attributes,
-        out IMFSourceReader reader);
-
-    [DllImport("mfreadwrite.dll", ExactSpelling = true, CharSet = CharSet.Unicode)]
     public static extern int MFCreateSinkWriterFromURL(
         string outputUrl,
         IntPtr byteStream,

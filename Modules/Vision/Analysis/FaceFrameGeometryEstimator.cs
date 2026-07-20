@@ -25,9 +25,12 @@ public sealed class FaceFrameGeometryEstimator
             return FaceFrameGeometry.None;
         }
 
-        var pose = EstimateOrientationDegrees(frame);
+        var densePoints = frame.HasDenseMesh
+            ? frame.DenseMeshPoints
+            : null;
+        var pose = EstimateOrientationDegrees(frame, densePoints);
         var faceBounds = EstimateFaceBounds(frame);
-        var eyeSpan = TryGetInterEyeFrameWidth(frame, out var interEyeFrameWidth)
+        var eyeSpan = TryGetInterEyeFrameWidth(frame, densePoints, out var interEyeFrameWidth)
             ? interEyeFrameWidth
             : (double?)null;
         var apparentDistance = EstimateApparentDistance(input.Calibration, pose.YawDegrees, eyeSpan);
@@ -78,10 +81,11 @@ public sealed class FaceFrameGeometryEstimator
     }
 
     private static (double YawDegrees, double PitchDegrees, double RollDegrees, string Source) EstimateOrientationDegrees(
-        FaceLandmarkFrame frame)
+        FaceLandmarkFrame frame,
+        IReadOnlyList<FaceMeshLandmarkPoint>? densePoints)
     {
         var hasMatrixPose = TryEstimatePoseFromMatrix(frame.FacialTransformationMatrix, out var matrixPose);
-        var hasDensePose = TryEstimatePoseFromDenseMesh(frame, out var densePose);
+        var hasDensePose = TryEstimatePoseFromDenseMesh(frame, densePoints, out var densePose);
         if (hasMatrixPose && hasDensePose && ShouldPreferDensePose(matrixPose, densePose))
         {
             return (densePose.YawDegrees, densePose.PitchDegrees, densePose.RollDegrees, "dense mesh geometry; transform matrix looked flat");
@@ -112,15 +116,15 @@ public sealed class FaceFrameGeometryEstimator
 
     private static bool TryEstimatePoseFromDenseMesh(
         FaceLandmarkFrame frame,
+        IReadOnlyList<FaceMeshLandmarkPoint>? points,
         out (double YawDegrees, double PitchDegrees, double RollDegrees) pose)
     {
         pose = default;
-        if (!frame.HasDenseMesh)
+        if (!frame.HasDenseMesh || points is null)
         {
             return false;
         }
 
-        var points = frame.DenseMeshPoints.ToDictionary(static point => point.Index);
         if (!TryLandmark(points, 1, out var noseTip)
             || !TryLandmark(points, 10, out var forehead)
             || !TryLandmark(points, 152, out var chin)
@@ -152,14 +156,23 @@ public sealed class FaceFrameGeometryEstimator
     }
 
     private static bool TryLandmark(
-        IReadOnlyDictionary<int, FaceMeshLandmarkPoint> points,
+        IReadOnlyList<FaceMeshLandmarkPoint> points,
         int index,
         out FaceMeshLandmarkPoint point)
     {
-        if (points.TryGetValue(index, out var value))
+        if ((uint)index < (uint)points.Count && points[index].Index == index)
         {
-            point = value;
+            point = points[index];
             return true;
+        }
+
+        foreach (var candidate in points)
+        {
+            if (candidate.Index == index)
+            {
+                point = candidate;
+                return true;
+            }
         }
 
         point = new FaceMeshLandmarkPoint { Index = index };
@@ -173,8 +186,11 @@ public sealed class FaceFrameGeometryEstimator
             return 0d;
         }
 
-        var leftCenter = new Point(leftEye.Average(static point => point.X), leftEye.Average(static point => point.Y));
-        var rightCenter = new Point(rightEye.Average(static point => point.X), rightEye.Average(static point => point.Y));
+        if (!TryGetCenter(leftEye, out var leftCenter) || !TryGetCenter(rightEye, out var rightCenter))
+        {
+            return 0d;
+        }
+
         return Math.Atan2(rightCenter.Y - leftCenter.Y, rightCenter.X - leftCenter.X) * 180d / Math.PI;
     }
 
@@ -183,9 +199,17 @@ public sealed class FaceFrameGeometryEstimator
         out (double YawDegrees, double PitchDegrees, double RollDegrees) pose)
     {
         pose = default;
-        if (values.Count < 16 || values.Any(static value => double.IsNaN(value) || double.IsInfinity(value)))
+        if (values.Count < 16)
         {
             return false;
+        }
+
+        for (var index = 0; index < values.Count; index++)
+        {
+            if (!double.IsFinite(values[index]))
+            {
+                return false;
+            }
         }
 
         var r02 = values[2];
@@ -208,12 +232,15 @@ public sealed class FaceFrameGeometryEstimator
         return true;
     }
 
-    private static bool TryGetInterEyeFrameWidth(FaceLandmarkFrame frame, out double interEyeFrameWidth)
+    private static bool TryGetInterEyeFrameWidth(
+        FaceLandmarkFrame frame,
+        IReadOnlyList<FaceMeshLandmarkPoint>? densePoints,
+        out double interEyeFrameWidth)
     {
         interEyeFrameWidth = 0d;
-        if (frame.HasDenseMesh
-            && TryGetCenter(frame.DenseMeshPoints, EyeA, out var firstEye)
-            && TryGetCenter(frame.DenseMeshPoints, EyeB, out var secondEye))
+        if (densePoints is not null
+            && TryGetCenter(densePoints, EyeA, out var firstEye)
+            && TryGetCenter(densePoints, EyeB, out var secondEye))
         {
             interEyeFrameWidth = Math.Abs(firstEye.X - secondEye.X);
             return interEyeFrameWidth > 0.0001d;
@@ -477,20 +504,14 @@ public sealed class FaceFrameGeometryEstimator
 
     private static FaceBounds? EstimateFaceBounds(FaceLandmarkFrame frame)
     {
-        var densePoints = frame.DenseMeshPoints
-            .Where(static point => double.IsFinite(point.X) && double.IsFinite(point.Y))
-            .Select(static point => new MeshPoint(point.X, point.Y))
-            .ToList();
-        if (densePoints.Count > 0)
+        if (TryEstimateBounds(frame.DenseMeshPoints, out var denseBounds))
         {
-            return FaceBounds.From(densePoints);
+            return denseBounds;
         }
 
-        var contourPoints = frame.FaceContour
-            .Where(static point => double.IsFinite(point.X) && double.IsFinite(point.Y))
-            .Select(static point => new MeshPoint(point.X, point.Y))
-            .ToList();
-        return contourPoints.Count > 0 ? FaceBounds.From(contourPoints) : null;
+        return TryEstimateBounds(frame.FaceContour, out var contourBounds)
+            ? contourBounds
+            : null;
     }
 
     private static bool TryGetCenter(
@@ -498,20 +519,28 @@ public sealed class FaceFrameGeometryEstimator
         IReadOnlyList<int> indices,
         out MeshPoint point)
     {
-        var lookup = points.ToDictionary(static item => item.Index);
-        var values = indices
-            .Where(lookup.ContainsKey)
-            .Select(index => lookup[index])
-            .ToList();
-        if (values.Count == 0)
+        var sumX = 0d;
+        var sumY = 0d;
+        var count = 0;
+        foreach (var index in indices)
+        {
+            if (!TryLandmark(points, index, out var value))
+            {
+                continue;
+            }
+
+            sumX += value.X;
+            sumY += value.Y;
+            count++;
+        }
+
+        if (count == 0)
         {
             point = default;
             return false;
         }
 
-        point = new MeshPoint(
-            values.Average(static value => value.X),
-            values.Average(static value => value.Y));
+        point = new MeshPoint(sumX / count, sumY / count);
         return true;
     }
 
@@ -523,10 +552,68 @@ public sealed class FaceFrameGeometryEstimator
             return false;
         }
 
-        point = new MeshPoint(
-            points.Average(static value => value.X),
-            points.Average(static value => value.Y));
+        var sumX = 0d;
+        var sumY = 0d;
+        foreach (var value in points)
+        {
+            sumX += value.X;
+            sumY += value.Y;
+        }
+
+        point = new MeshPoint(sumX / points.Count, sumY / points.Count);
         return true;
+    }
+
+    private static bool TryEstimateBounds(
+        IReadOnlyList<FaceMeshLandmarkPoint> points,
+        out FaceBounds bounds)
+    {
+        var left = double.PositiveInfinity;
+        var top = double.PositiveInfinity;
+        var right = double.NegativeInfinity;
+        var bottom = double.NegativeInfinity;
+        var found = false;
+        foreach (var point in points)
+        {
+            if (!double.IsFinite(point.X) || !double.IsFinite(point.Y))
+            {
+                continue;
+            }
+
+            left = Math.Min(left, point.X);
+            top = Math.Min(top, point.Y);
+            right = Math.Max(right, point.X);
+            bottom = Math.Max(bottom, point.Y);
+            found = true;
+        }
+
+        bounds = found ? new FaceBounds(left, top, right, bottom) : default;
+        return found;
+    }
+
+    private static bool TryEstimateBounds(IReadOnlyList<Point> points, out FaceBounds bounds)
+    {
+        var left = double.PositiveInfinity;
+        var top = double.PositiveInfinity;
+        var right = double.NegativeInfinity;
+        var bottom = double.NegativeInfinity;
+        var found = false;
+        foreach (var point in points)
+        {
+            if (!double.IsFinite(point.X) || !double.IsFinite(point.Y))
+            {
+                continue;
+            }
+
+            left = Math.Min(left, point.X);
+            top = Math.Min(top, point.Y);
+            right = Math.Max(right, point.X);
+            bottom = Math.Max(bottom, point.Y);
+            found = true;
+        }
+
+        bounds = found ? new FaceBounds(left, top, right, bottom) : default;
+        return found;
     }
 
     private static double Round(double value)
@@ -553,13 +640,5 @@ public sealed class FaceFrameGeometryEstimator
 
         public double CenterY => (Top + Bottom) / 2d;
 
-        public static FaceBounds From(IReadOnlyList<MeshPoint> points)
-        {
-            return new FaceBounds(
-                points.Min(static point => point.X),
-                points.Min(static point => point.Y),
-                points.Max(static point => point.X),
-                points.Max(static point => point.Y));
-        }
     }
 }

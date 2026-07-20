@@ -55,15 +55,54 @@ public sealed class FaceLockStabilityAnalyzer
             return FaceLockStabilityAnalysis.Waiting;
         }
 
-        var samples = _samples.ToList();
-        var faceBoundsSamples = samples.Where(static sample => sample.FaceBounds.HasValue).ToList();
-        var faceBoundsRate = Rate(faceBoundsSamples.Count, samples.Count);
-        var continuity = CalculateContinuityPercent(faceBoundsSamples);
-        var eyeUsableRate = Rate(samples.Count(static sample => sample.EyeUsable), samples.Count);
-        var mouthUsableRate = Rate(samples.Count(static sample => sample.MouthUsable), samples.Count);
-        var eyeQuality = samples.Average(static sample => sample.EyeQualityPercent);
-        var mouthQuality = samples.Average(static sample => sample.MouthQualityPercent);
-        var overallQuality = samples.Average(static sample => sample.OverallMeasurementQualityPercent);
+        var sampleCount = _samples.Count;
+        var faceBoundsCount = 0;
+        var eyeUsableCount = 0;
+        var mouthUsableCount = 0;
+        var eyeQualitySum = 0d;
+        var mouthQualitySum = 0d;
+        var overallQualitySum = 0d;
+        var continuitySum = 0d;
+        Rect? previousFaceBounds = null;
+        var firstCapturedAtUtc = DateTime.MaxValue;
+        var lastCapturedAtUtc = DateTime.MinValue;
+        foreach (var sample in _samples)
+        {
+            firstCapturedAtUtc = firstCapturedAtUtc == DateTime.MaxValue
+                ? sample.CapturedAtUtc
+                : firstCapturedAtUtc;
+            lastCapturedAtUtc = sample.CapturedAtUtc;
+            eyeUsableCount += sample.EyeUsable ? 1 : 0;
+            mouthUsableCount += sample.MouthUsable ? 1 : 0;
+            eyeQualitySum += sample.EyeQualityPercent;
+            mouthQualitySum += sample.MouthQualityPercent;
+            overallQualitySum += sample.OverallMeasurementQualityPercent;
+            if (sample.FaceBounds is not Rect currentFaceBounds)
+            {
+                continue;
+            }
+
+            if (previousFaceBounds is Rect previous)
+            {
+                continuitySum += CalculatePairContinuity(previous, currentFaceBounds);
+            }
+
+            previousFaceBounds = currentFaceBounds;
+            faceBoundsCount++;
+        }
+
+        var faceBoundsRate = Rate(faceBoundsCount, sampleCount);
+        var continuity = faceBoundsCount switch
+        {
+            0 => 0d,
+            1 => 50d,
+            _ => Math.Clamp(continuitySum / (faceBoundsCount - 1) * 100d, 0d, 100d)
+        };
+        var eyeUsableRate = Rate(eyeUsableCount, sampleCount);
+        var mouthUsableRate = Rate(mouthUsableCount, sampleCount);
+        var eyeQuality = eyeQualitySum / sampleCount;
+        var mouthQuality = mouthQualitySum / sampleCount;
+        var overallQuality = overallQualitySum / sampleCount;
         var eyeReliability = CalculateFeatureReliability(faceBoundsRate, continuity, eyeUsableRate, eyeQuality);
         var mouthReliability = CalculateFeatureReliability(faceBoundsRate, continuity, mouthUsableRate, mouthQuality);
         var composite = Math.Clamp(
@@ -77,8 +116,8 @@ public sealed class FaceLockStabilityAnalyzer
 
         return new FaceLockStabilityAnalysis
         {
-            SampleCount = samples.Count,
-            WindowSeconds = (samples[^1].CapturedAtUtc - samples[0].CapturedAtUtc).TotalSeconds,
+            SampleCount = sampleCount,
+            WindowSeconds = (lastCapturedAtUtc - firstCapturedAtUtc).TotalSeconds,
             FaceBoundsRatePercent = faceBoundsRate,
             FaceContinuityPercent = continuity,
             EyeUsableRatePercent = eyeUsableRate,
@@ -105,24 +144,6 @@ public sealed class FaceLockStabilityAnalyzer
             + qualityPercent * 0.22d,
             0d,
             100d);
-    }
-
-    private static double CalculateContinuityPercent(IReadOnlyList<Sample> samples)
-    {
-        if (samples.Count < 2)
-        {
-            return samples.Count == 1 ? 50d : 0d;
-        }
-
-        var scores = new List<double>();
-        for (var index = 1; index < samples.Count; index++)
-        {
-            var previous = samples[index - 1].FaceBounds!.Value;
-            var current = samples[index].FaceBounds!.Value;
-            scores.Add(CalculatePairContinuity(previous, current));
-        }
-
-        return Math.Clamp(scores.Average() * 100d, 0d, 100d);
     }
 
     private static double CalculatePairContinuity(Rect previous, Rect current)
@@ -158,10 +179,20 @@ public sealed class FaceLockStabilityAnalyzer
             return null;
         }
 
-        var minX = points.Min(static point => point.X);
-        var maxX = points.Max(static point => point.X);
-        var minY = points.Min(static point => point.Y);
-        var maxY = points.Max(static point => point.Y);
+        var first = points[0];
+        var minX = first.X;
+        var maxX = first.X;
+        var minY = first.Y;
+        var maxY = first.Y;
+        for (var index = 1; index < points.Count; index++)
+        {
+            var point = points[index];
+            minX = Math.Min(minX, point.X);
+            maxX = Math.Max(maxX, point.X);
+            minY = Math.Min(minY, point.Y);
+            maxY = Math.Max(maxY, point.Y);
+        }
+
         return maxX <= minX || maxY <= minY
             ? null
             : new Rect(minX, minY, maxX - minX, maxY - minY);
@@ -174,7 +205,9 @@ public sealed class FaceLockStabilityAnalyzer
 
     private static double Distance(Point first, Point second)
     {
-        return Math.Sqrt(Math.Pow(first.X - second.X, 2d) + Math.Pow(first.Y - second.Y, 2d));
+        var deltaX = first.X - second.X;
+        var deltaY = first.Y - second.Y;
+        return Math.Sqrt(deltaX * deltaX + deltaY * deltaY);
     }
 
     private static double Diagonal(Rect rect)

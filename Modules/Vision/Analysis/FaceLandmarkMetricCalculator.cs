@@ -28,19 +28,20 @@ public sealed class FaceLandmarkMetricCalculator
             return FaceLandmarkMetrics.None;
         }
 
+        var highFidelityLandmarkSource = IsHighFidelityLandmarkSource(frame.Source);
         var leftEyeOpening = ContourOpeningEstimator.CalculateOpeningRatio(
             frame.LeftEyeContour,
-            ShouldUsePairedAverage(frame, frame.LeftEyeContour, isEye: true));
+            ShouldUsePairedAverage(frame, frame.LeftEyeContour, isEye: true, highFidelityLandmarkSource));
         var rightEyeOpening = ContourOpeningEstimator.CalculateOpeningRatio(
             frame.RightEyeContour,
-            ShouldUsePairedAverage(frame, frame.RightEyeContour, isEye: true));
+            ShouldUsePairedAverage(frame, frame.RightEyeContour, isEye: true, highFidelityLandmarkSource));
         var averageEyeOpening = Average(leftEyeOpening, rightEyeOpening);
         var mediaPipeLeftBlink = BlendshapePercent(frame, "eyeBlinkLeft");
         var mediaPipeRightBlink = BlendshapePercent(frame, "eyeBlinkRight");
         var mediaPipeAverageBlink = Average(mediaPipeLeftBlink, mediaPipeRightBlink);
-        UpdateMediaPipeOpenEyeReference(frame, averageEyeOpening, mediaPipeAverageBlink);
+        UpdateMediaPipeOpenEyeReference(frame, averageEyeOpening, mediaPipeAverageBlink, highFidelityLandmarkSource);
         var rawEyeAsymmetry = CalculateAsymmetryPercent(leftEyeOpening, rightEyeOpening, averageEyeOpening);
-        var possibleOneEyeArtifact = IsPossibleOneEyeArtifact(frame, rawEyeAsymmetry);
+        var possibleOneEyeArtifact = IsPossibleOneEyeArtifact(frame, rawEyeAsymmetry, highFidelityLandmarkSource);
         var stabilizedLeftEyeOpening = StabilizeEyeOpeningWithMediaPipe(leftEyeOpening, mediaPipeLeftBlink ?? mediaPipeAverageBlink);
         var stabilizedRightEyeOpening = StabilizeEyeOpeningWithMediaPipe(rightEyeOpening, mediaPipeRightBlink ?? mediaPipeAverageBlink);
         var stabilizedAverageEyeOpening = Average(stabilizedLeftEyeOpening, stabilizedRightEyeOpening)
@@ -50,15 +51,21 @@ public sealed class FaceLandmarkMetricCalculator
             stabilizedLeftEyeOpening,
             stabilizedRightEyeOpening,
             stabilizedAverageEyeOpening,
-            mediaPipeAverageBlink);
+            mediaPipeAverageBlink,
+            highFidelityLandmarkSource);
         var mediaPipeEyeOpeningCorrection = CalculateCorrection(stabilizedAverageEyeOpening, averageEyeOpening);
         var mouthContour = frame.InnerLipContour.Count >= 4 ? frame.InnerLipContour : frame.OuterLipContour;
         var mouthOpening = ContourOpeningEstimator.CalculateOpeningRatio(
             mouthContour,
-            ShouldUsePairedAverage(frame, mouthContour, isEye: false));
+            ShouldUsePairedAverage(frame, mouthContour, isEye: false, highFidelityLandmarkSource));
         var mediaPipeJawOpen = BlendshapePercent(frame, "jawOpen");
         var mediaPipeMouthClose = BlendshapePercent(frame, "mouthClose");
-        UpdateMediaPipeClosedMouthReference(frame, mouthOpening, mediaPipeJawOpen, mediaPipeMouthClose);
+        UpdateMediaPipeClosedMouthReference(
+            frame,
+            mouthOpening,
+            mediaPipeJawOpen,
+            mediaPipeMouthClose,
+            highFidelityLandmarkSource);
         var stabilizedMouthOpening = StabilizeMouthOpeningWithMediaPipe(mouthOpening, mediaPipeJawOpen, mediaPipeMouthClose);
         var mediaPipeMouthOpeningCorrection = CalculateCorrection(stabilizedMouthOpening, mouthOpening);
         var jawDroop = CalculateJawDroopRatio(frame, mediaPipeJawOpen);
@@ -374,7 +381,8 @@ public sealed class FaceLandmarkMetricCalculator
         double? leftEyeOpening,
         double? rightEyeOpening,
         double? averageEyeOpening,
-        double? mediaPipeAverageBlink)
+        double? mediaPipeAverageBlink,
+        bool highFidelityLandmarkSource)
     {
         if (averageEyeOpening is not double current
             || _smoothedAverageEyeOpeningRatio is not double previous
@@ -388,7 +396,7 @@ public sealed class FaceLandmarkMetricCalculator
             frame.LeftEyeReconstructed
             || frame.RightEyeReconstructed
             || frame.EyeArtifactSuppressed
-            || !IsHighFidelityLandmarkSource(frame.Source)
+            || !highFidelityLandmarkSource
             || frame.BlendshapeScores.Count == 0;
         if (!lowFidelityEyeFrame)
         {
@@ -434,20 +442,25 @@ public sealed class FaceLandmarkMetricCalculator
             vertical = new Vector(-vertical.X, -vertical.Y);
         }
 
-        var points = frame.FaceContour
-            .Concat(frame.JawContour)
-            .Concat(frame.LeftEyeContour)
-            .Concat(frame.RightEyeContour)
-            .Concat(frame.OuterLipContour)
-            .Concat(frame.InnerLipContour)
-            .ToList();
-        if (points.Count < 4)
+        var pointCount = frame.FaceContour.Count
+            + frame.JawContour.Count
+            + frame.LeftEyeContour.Count
+            + frame.RightEyeContour.Count
+            + frame.OuterLipContour.Count
+            + frame.InnerLipContour.Count;
+        if (pointCount < 4)
         {
             return null;
         }
 
-        var faceLeft = points.Min(point => Dot(point, horizontal));
-        var faceRight = points.Max(point => Dot(point, horizontal));
+        var faceLeft = double.PositiveInfinity;
+        var faceRight = double.NegativeInfinity;
+        ExpandProjectedRange(frame.FaceContour, horizontal, ref faceLeft, ref faceRight);
+        ExpandProjectedRange(frame.JawContour, horizontal, ref faceLeft, ref faceRight);
+        ExpandProjectedRange(frame.LeftEyeContour, horizontal, ref faceLeft, ref faceRight);
+        ExpandProjectedRange(frame.RightEyeContour, horizontal, ref faceLeft, ref faceRight);
+        ExpandProjectedRange(frame.OuterLipContour, horizontal, ref faceLeft, ref faceRight);
+        ExpandProjectedRange(frame.InnerLipContour, horizontal, ref faceLeft, ref faceRight);
         var faceWidth = faceRight - faceLeft;
         if (faceWidth <= 0.001d)
         {
@@ -455,7 +468,7 @@ public sealed class FaceLandmarkMetricCalculator
         }
 
         var eyeProjection = Dot(eyePoint, vertical);
-        var chinProjection = frame.JawContour.Max(point => Dot(point, vertical));
+        var chinProjection = MaximumProjection(frame.JawContour, vertical);
         var absoluteLowerFaceSpan = (chinProjection - eyeProjection) / faceWidth;
         var contourDroop = Math.Clamp((absoluteLowerFaceSpan - 0.92d) * 0.42d, 0d, 0.35d);
         if (mediaPipeJawOpenPercent is not double jawOpen || double.IsNaN(jawOpen) || double.IsInfinity(jawOpen))
@@ -511,22 +524,29 @@ public sealed class FaceLandmarkMetricCalculator
 
     private static double CalculateProjectedFaceWidth(FaceLandmarkFrame frame, Vector horizontal)
     {
-        var points = frame.FaceContour
-            .Concat(frame.JawContour)
-            .Concat(frame.LeftBrowContour)
-            .Concat(frame.RightBrowContour)
-            .Concat(frame.LeftEyeContour)
-            .Concat(frame.RightEyeContour)
-            .Concat(frame.OuterLipContour)
-            .Concat(frame.InnerLipContour)
-            .ToList();
-        if (points.Count < 2)
+        var pointCount = frame.FaceContour.Count
+            + frame.JawContour.Count
+            + frame.LeftBrowContour.Count
+            + frame.RightBrowContour.Count
+            + frame.LeftEyeContour.Count
+            + frame.RightEyeContour.Count
+            + frame.OuterLipContour.Count
+            + frame.InnerLipContour.Count;
+        if (pointCount < 2)
         {
             return 0d;
         }
 
-        var left = points.Min(point => Dot(point, horizontal));
-        var right = points.Max(point => Dot(point, horizontal));
+        var left = double.PositiveInfinity;
+        var right = double.NegativeInfinity;
+        ExpandProjectedRange(frame.FaceContour, horizontal, ref left, ref right);
+        ExpandProjectedRange(frame.JawContour, horizontal, ref left, ref right);
+        ExpandProjectedRange(frame.LeftBrowContour, horizontal, ref left, ref right);
+        ExpandProjectedRange(frame.RightBrowContour, horizontal, ref left, ref right);
+        ExpandProjectedRange(frame.LeftEyeContour, horizontal, ref left, ref right);
+        ExpandProjectedRange(frame.RightEyeContour, horizontal, ref left, ref right);
+        ExpandProjectedRange(frame.OuterLipContour, horizontal, ref left, ref right);
+        ExpandProjectedRange(frame.InnerLipContour, horizontal, ref left, ref right);
         return Math.Max(0d, right - left);
     }
 
@@ -552,9 +572,15 @@ public sealed class FaceLandmarkMetricCalculator
             return null;
         }
 
-        return new Point(
-            contour.Average(static point => point.X),
-            contour.Average(static point => point.Y));
+        var sumX = 0d;
+        var sumY = 0d;
+        foreach (var point in contour)
+        {
+            sumX += point.X;
+            sumY += point.Y;
+        }
+
+        return new Point(sumX / contour.Count, sumY / contour.Count);
     }
 
     private static Point? AveragePoint(Point? first, Point? second)
@@ -585,7 +611,10 @@ public sealed class FaceLandmarkMetricCalculator
         return Math.Clamp(Math.Abs(left - right) / denominator * 100d, 0d, 300d);
     }
 
-    private static bool IsPossibleOneEyeArtifact(FaceLandmarkFrame frame, double? rawEyeAsymmetryPercent)
+    private static bool IsPossibleOneEyeArtifact(
+        FaceLandmarkFrame frame,
+        double? rawEyeAsymmetryPercent,
+        bool highFidelityLandmarkSource)
     {
         if (rawEyeAsymmetryPercent is not double asymmetry)
         {
@@ -597,7 +626,7 @@ public sealed class FaceLandmarkMetricCalculator
         var reconstructedOrSuppressed = frame.EyeArtifactSuppressed
             || frame.LeftEyeReconstructed
             || frame.RightEyeReconstructed;
-        var highFidelityDirectEye = IsHighFidelityLandmarkSource(frame.Source)
+        var highFidelityDirectEye = highFidelityLandmarkSource
             && frame.EyeConfidence >= 0.72d
             && !reconstructedOrSuppressed;
         return (asymmetry >= 85d
@@ -631,7 +660,11 @@ public sealed class FaceLandmarkMetricCalculator
             : null;
     }
 
-    private static bool ShouldUsePairedAverage(FaceLandmarkFrame frame, IReadOnlyList<Point> contour, bool isEye)
+    private static bool ShouldUsePairedAverage(
+        FaceLandmarkFrame frame,
+        IReadOnlyList<Point> contour,
+        bool isEye,
+        bool highFidelityLandmarkSource)
     {
         if (contour.Count < 4)
         {
@@ -643,7 +676,7 @@ public sealed class FaceLandmarkMetricCalculator
             return true;
         }
 
-        if (IsHighFidelityLandmarkSource(frame.Source))
+        if (highFidelityLandmarkSource)
         {
             return true;
         }
@@ -659,9 +692,13 @@ public sealed class FaceLandmarkMetricCalculator
         return false;
     }
 
-    private void UpdateMediaPipeOpenEyeReference(FaceLandmarkFrame frame, double? averageEyeOpening, double? mediaPipeAverageBlink)
+    private void UpdateMediaPipeOpenEyeReference(
+        FaceLandmarkFrame frame,
+        double? averageEyeOpening,
+        double? mediaPipeAverageBlink,
+        bool highFidelityLandmarkSource)
     {
-        if (!IsHighFidelityLandmarkSource(frame.Source)
+        if (!highFidelityLandmarkSource
             || averageEyeOpening is not double opening
             || mediaPipeAverageBlink is not double blink
             || blink > 35d
@@ -697,9 +734,10 @@ public sealed class FaceLandmarkMetricCalculator
         FaceLandmarkFrame frame,
         double? mouthOpening,
         double? mediaPipeJawOpenPercent,
-        double? mediaPipeMouthClosePercent)
+        double? mediaPipeMouthClosePercent,
+        bool highFidelityLandmarkSource)
     {
-        if (!IsHighFidelityLandmarkSource(frame.Source)
+        if (!highFidelityLandmarkSource
             || mouthOpening is not double opening
             || mediaPipeJawOpenPercent is not double jawOpen
             || mediaPipeMouthClosePercent is not double mouthClose
@@ -730,10 +768,11 @@ public sealed class FaceLandmarkMetricCalculator
 
         var jawOpen = mediaPipeJawOpenPercent.GetValueOrDefault(double.NaN);
         var mouthOpenByCloseDrop = mediaPipeMouthClosePercent is double close ? 100d - close : double.NaN;
-        var mouthOpenEvidence = new[] { jawOpen, mouthOpenByCloseDrop }
-            .Where(static value => !double.IsNaN(value))
-            .DefaultIfEmpty(double.NaN)
-            .Max();
+        var mouthOpenEvidence = double.IsNaN(jawOpen)
+            ? mouthOpenByCloseDrop
+            : double.IsNaN(mouthOpenByCloseDrop)
+                ? jawOpen
+                : Math.Max(jawOpen, mouthOpenByCloseDrop);
         if (!double.IsNaN(mouthOpenEvidence) && mouthOpenEvidence >= 58d)
         {
             var targetRise = Math.Max(0.12d, closedReference * 1.35d) * Math.Clamp(mouthOpenEvidence / 100d, 0.40d, 1d);
@@ -759,6 +798,31 @@ public sealed class FaceLandmarkMetricCalculator
             || source.Contains("Face Landmarker", StringComparison.OrdinalIgnoreCase)
             || source.Contains("dense", StringComparison.OrdinalIgnoreCase)
             || source.Contains("face mesh", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static void ExpandProjectedRange(
+        IReadOnlyList<Point> points,
+        Vector axis,
+        ref double minimum,
+        ref double maximum)
+    {
+        foreach (var point in points)
+        {
+            var projection = Dot(point, axis);
+            minimum = Math.Min(minimum, projection);
+            maximum = Math.Max(maximum, projection);
+        }
+    }
+
+    private static double MaximumProjection(IReadOnlyList<Point> points, Vector axis)
+    {
+        var maximum = double.NegativeInfinity;
+        foreach (var point in points)
+        {
+            maximum = Math.Max(maximum, Dot(point, axis));
+        }
+
+        return maximum;
     }
 
     private static double? CalculateCorrection(double? adjusted, double? raw)

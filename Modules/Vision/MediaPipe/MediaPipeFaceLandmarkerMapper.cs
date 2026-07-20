@@ -102,7 +102,7 @@ internal static class MediaPipeFaceLandmarkerMapper
             BlendshapeScores = blendshapes,
             DenseMeshTopology = "MediaPipeFaceMesh468",
             DenseMeshPoints = CreateDenseMeshPoints(response.Landmarks),
-            FacialTransformationMatrix = response.FacialTransformationMatrix.ToList(),
+            FacialTransformationMatrix = response.FacialTransformationMatrix,
             FaceContour = faceContour,
             LeftEyeContour = leftEye,
             RightEyeContour = rightEye,
@@ -183,8 +183,8 @@ internal static class MediaPipeFaceLandmarkerMapper
         IReadOnlyList<Point> first,
         IReadOnlyList<Point> second)
     {
-        var firstCenter = first.Count == 0 ? 0d : first.Average(static point => point.X);
-        var secondCenter = second.Count == 0 ? 1d : second.Average(static point => point.X);
+        var firstCenter = first.Count == 0 ? 0d : MeanX(first);
+        var secondCenter = second.Count == 0 ? 1d : MeanX(second);
         return firstCenter <= secondCenter ? (first, second) : (second, first);
     }
 
@@ -210,9 +210,17 @@ internal static class MediaPipeFaceLandmarkerMapper
         out (double YawDegrees, double PitchDegrees, double RollDegrees) pose)
     {
         pose = default;
-        if (values.Count < 16 || values.Any(static value => double.IsNaN(value) || double.IsInfinity(value)))
+        if (values.Count < 16)
         {
             return false;
+        }
+
+        for (var index = 0; index < values.Count; index++)
+        {
+            if (!double.IsFinite(values[index]))
+            {
+                return false;
+            }
         }
 
         // MediaPipe supplies a 4x4 facial transformation matrix. Treat it as row-major here;
@@ -300,10 +308,20 @@ internal static class MediaPipeFaceLandmarkerMapper
             return null;
         }
 
-        var minX = points.Min(static point => point.X);
-        var maxX = points.Max(static point => point.X);
-        var minY = points.Min(static point => point.Y);
-        var maxY = points.Max(static point => point.Y);
+        var first = points[0];
+        var minX = first.X;
+        var maxX = first.X;
+        var minY = first.Y;
+        var maxY = first.Y;
+        for (var index = 1; index < points.Count; index++)
+        {
+            var point = points[index];
+            minX = Math.Min(minX, point.X);
+            maxX = Math.Max(maxX, point.X);
+            minY = Math.Min(minY, point.Y);
+            maxY = Math.Max(maxY, point.Y);
+        }
+
         return maxX <= minX || maxY <= minY
             ? null
             : new Rect(minX, minY, maxX - minX, maxY - minY);
@@ -316,9 +334,33 @@ internal static class MediaPipeFaceLandmarkerMapper
             return 0d;
         }
 
-        var leftCenter = new Point(leftEye.Average(static point => point.X), leftEye.Average(static point => point.Y));
-        var rightCenter = new Point(rightEye.Average(static point => point.X), rightEye.Average(static point => point.Y));
+        var leftCenter = Center(leftEye);
+        var rightCenter = Center(rightEye);
         return Math.Atan2(rightCenter.Y - leftCenter.Y, rightCenter.X - leftCenter.X) * 180d / Math.PI;
+    }
+
+    private static Point Center(IReadOnlyList<Point> points)
+    {
+        var sumX = 0d;
+        var sumY = 0d;
+        foreach (var point in points)
+        {
+            sumX += point.X;
+            sumY += point.Y;
+        }
+
+        return new Point(sumX / points.Count, sumY / points.Count);
+    }
+
+    private static double MeanX(IReadOnlyList<Point> points)
+    {
+        var sum = 0d;
+        foreach (var point in points)
+        {
+            sum += point.X;
+        }
+
+        return sum / points.Count;
     }
 
     private static IReadOnlyDictionary<string, double> CreateBlendshapeDictionary(IReadOnlyList<MediaPipeSidecarBlendshape> blendshapes)

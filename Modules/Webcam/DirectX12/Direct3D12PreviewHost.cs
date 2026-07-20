@@ -13,7 +13,7 @@ using static Vortice.DXGI.DXGI;
 
 namespace AvatarBuilder.Modules.Webcam.DirectX12;
 
-public sealed class Direct3D12PreviewHost : WebcamDirectX12ViewportHost, ICameraPreviewPresenter
+public sealed class Direct3D12PreviewHost : WebcamDirectX12ViewportHost
 {
     private static readonly TimeSpan RendererDisposeLockTimeout = TimeSpan.FromMilliseconds(250);
 
