@@ -4,7 +4,7 @@ namespace AvatarBuilder.Modules.Vision.Reconstruction;
 
 public sealed class AvatarModel
 {
-    public const string CurrentSchemaVersion = "avatar-model-v3-direct-canonical-3ddfa";
+    public const string CurrentSchemaVersion = "avatar-model-v4-ranked-photo-backed-3ddfa";
 
     public string SchemaVersion { get; init; } = CurrentSchemaVersion;
 
@@ -19,7 +19,9 @@ public sealed class AvatarModel
     public string Status { get; init; } = "waiting for 3DDFA observations";
 
     public string StoragePolicy { get; init; } =
-        "Stores measurement-only 3DDFA avatar observations and a derived model. It does not store webcam video or raw photos.";
+        "SQLite indexes ranked observations. Every retained observation has a checksummed binary 3DDFA scan and its paired high-quality camera image.";
+
+    public long SourceObservationRevision { get; init; }
 
     public AvatarIdentityModel Identity { get; init; } = new();
 
@@ -27,15 +29,32 @@ public sealed class AvatarModel
 
     public AvatarPoseCoverage PoseCoverage { get; init; } = new();
 
+    public AvatarModelConvergence Convergence { get; init; } = new();
+
     public List<AvatarModelSampleSummary> RecentSamples { get; init; } = [];
 
     public List<string> Findings { get; init; } = [];
 }
 
+public sealed class AvatarModelConvergence
+{
+    public double ScorePercent { get; init; }
+
+    public double SampleAdequacyPercent { get; init; }
+
+    public double QualityPercent { get; init; }
+
+    public bool IsMatureCandidate { get; init; }
+
+    public string Label { get; init; } = "waiting";
+
+    public string Basis { get; init; } = "Waiting for ranked 3DDFA observations.";
+}
+
 public sealed class AvatarIdentityModel
 {
     public string CoordinateSpace { get; init; } =
-        "Canonical 3DDFA identity space: expression-free BFM vertices are centered, scaled, and weighted directly in their shared model coordinates. Only legacy image-space scans require rigid Procrustes alignment.";
+        "Canonical 3DDFA identity space: expression-free BFM vertices are centered, scaled, and weighted directly in their shared model coordinates.";
 
     public int SampleCount { get; init; }
 
@@ -133,6 +152,8 @@ public sealed class AvatarModelSampleSummary
     public int VertexCount { get; init; }
 
     public string IdentityUse { get; init; } = "";
+
+    public string SourceImageUri { get; init; } = "";
 }
 
 public sealed class AvatarRegionConfidence

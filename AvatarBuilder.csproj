@@ -17,6 +17,7 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <Compile Remove="tools\**\*.cs" />
     <Content Include="dependencies\**\*" Exclude="dependencies\vision\3ddfa-onnx\3DDFA_V2\.git\**\*;dependencies\vision\3ddfa-onnx\3DDFA_V2\.github\**\*;dependencies\vision\3ddfa-onnx\3DDFA_V2\docs\**\*;dependencies\vision\3ddfa-onnx\3DDFA_V2\examples\**\*;dependencies\vision\3ddfa-onnx\3DDFA_V2\**\__pycache__\**\*;dependencies\vision\3ddfa-onnx\3DDFA_V2\demo*.py;dependencies\vision\3ddfa-onnx\3DDFA_V2\demo*.ipynb;dependencies\vision\3ddfa-onnx\3DDFA_V2\gradiodemo.py;dependencies\vision\3ddfa-onnx\3DDFA_V2\latency.py;dependencies\vision\3ddfa-onnx\3DDFA_V2\speed_cpu.py">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
@@ -42,17 +43,17 @@
   </ItemGroup>
 
   <ItemGroup>
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.0" />
+    <PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" Version="2.1.12" />
     <PackageReference Include="OpenCvSharp4" Version="4.13.0.20260602" />
     <PackageReference Include="OpenCvSharp4.runtime.win" Version="4.13.0.20260602" />
     <PackageReference Include="Vortice.D3DCompiler" Version="3.8.3" />
+    <PackageReference Include="Vortice.Direct2D1" Version="3.8.3" />
+    <PackageReference Include="Vortice.Direct3D11" Version="3.8.3" />
     <PackageReference Include="Vortice.Direct3D12" Version="3.8.3" />
   </ItemGroup>
 
   <Target Name="UpdateDesktopRuntime" AfterTargets="Build" Condition="'$(DesignTimeBuild)' != 'true'">
-    <ReadLinesFromFile File="$(DesktopRuntimeManifest)" Condition="Exists('$(DesktopRuntimeManifest)')">
-      <Output TaskParameter="Lines" ItemName="PreviousDesktopRuntimeFile" />
-    </ReadLinesFromFile>
-    <Delete Files="@(PreviousDesktopRuntimeFile)" Condition="'@(PreviousDesktopRuntimeFile)' != ''" />
     <ItemGroup>
       <CurrentDesktopRuntimeFile
         Include="$(TargetDir)**\*"
@@ -61,7 +62,8 @@
     <MakeDir Directories="$(DesktopRuntimeDirectory)" />
     <Copy
       SourceFiles="@(CurrentDesktopRuntimeFile)"
-      DestinationFiles="@(CurrentDesktopRuntimeFile->'$(DesktopRuntimeDirectory)\%(RecursiveDir)%(Filename)%(Extension)')" />
+      DestinationFiles="@(CurrentDesktopRuntimeFile->'$(DesktopRuntimeDirectory)\%(RecursiveDir)%(Filename)%(Extension)')"
+      SkipUnchangedFiles="true" />
     <WriteLinesToFile
       File="$(DesktopRuntimeManifest)"
       Lines="@(CurrentDesktopRuntimeFile->'$(DesktopRuntimeDirectory)\%(RecursiveDir)%(Filename)%(Extension)')"

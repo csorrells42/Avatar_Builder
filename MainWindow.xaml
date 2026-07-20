@@ -13,6 +13,7 @@
         Foreground="#f5f8fb"
         Loaded="WindowLoaded"
         Activated="WindowActivated"
+        Deactivated="WindowDeactivated"
         Closing="WindowClosing">
     <Window.Resources>
         <SolidColorBrush x:Key="PanelBrush" Color="#101820" />
@@ -268,8 +269,13 @@
                           IsCheckable="True"
                           IsChecked="True"
                           Click="DirectX12PreviewMenuItemClicked" />
+                <MenuItem x:Name="FaceMeshOverlayMenuItem"
+                          Header="Show Face _Mesh Overlay"
+                          IsCheckable="True"
+                          ToolTip="Draws the current MediaPipe face mesh over the live webcam image."
+                          Click="FaceMeshOverlayMenuItemClicked" />
                 <MenuItem x:Name="LiveWireframeMenuItem"
-                          Header="Show Live _Wireframe"
+                          Header="Show Live _Wireframe Only"
                           IsCheckable="True"
                           ToolTip="Hides the webcam image and shows the current camera-relative MediaPipe face mesh while analysis keeps running."
                           Click="LiveWireframeMenuItemClicked" />
@@ -374,7 +380,7 @@
                                             <Button Content="Open Avatar System" ToolTip="Opens one combined page for 3DDFA reconstruction, live tracking review, stored avatar data, and next capture guidance." Margin="0,0,6,0" Click="OpenAvatarSystemClicked" />
                                             <Button Content="Open 3DDFA Last 5" ToolTip="Opens the separate dense 3DDFA reconstruction viewer for the last five avatar samples." Margin="6,0,0,0" Click="OpenLastGoodThreeDdfaClicked" />
                                             <Button Content="Open Avatar Model Progress" ToolTip="Opens the accumulated 3DDFA identity and expression model viewer." Margin="0,8,6,0" Click="OpenAvatarModelProgressClicked" />
-                                            <Button x:Name="RebuildAvatarDataButton" Content="Rebuild Avatar Data" ToolTip="Archives the current Avatar data and starts fresh review/capture files." Margin="6,8,0,0" Click="RebuildAvatarDataClicked" />
+                                            <Button x:Name="RebuildAvatarDataButton" Content="Rebuild Avatar Data" ToolTip="Deletes this profile's retained scans and derived model, then starts fresh." Margin="6,8,0,0" Click="RebuildAvatarDataClicked" />
                                         </UniformGrid>
                                     </StackPanel>
                                 </Border>

@@ -5,8 +5,11 @@ obj/
 .vs/
 .venv/
 .nuget-scratch/
+.nuget-temp/
+.storage-smoke/
 .appdata/
 desktop-runtime/
+verification-runtime/
 *.user
 *.suo
 *.log

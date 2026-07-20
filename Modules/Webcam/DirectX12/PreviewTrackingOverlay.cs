@@ -6,12 +6,6 @@ public sealed record PreviewTrackingOverlay
 
     public PreviewOverlayRect? FaceBox { get; init; }
 
-    public PreviewOverlayRect? LeftEyeBox { get; init; }
-
-    public PreviewOverlayRect? RightEyeBox { get; init; }
-
-    public PreviewOverlayRect? MouthBox { get; init; }
-
     public PreviewOverlayPolyline? FaceContour { get; init; }
 
     public PreviewOverlayPolyline? JawContour { get; init; }
@@ -28,10 +22,9 @@ public sealed record PreviewTrackingOverlay
 
     public PreviewOverlayPolyline? InnerLipContour { get; init; }
 
+    public PreviewOverlayMesh? FaceMesh { get; init; }
+
     public bool HasContent => FaceBox is not null
-        || LeftEyeBox is not null
-        || RightEyeBox is not null
-        || MouthBox is not null
         || FaceContour is not null
         || JawContour is not null
         || LeftEyeContour is not null
@@ -39,13 +32,37 @@ public sealed record PreviewTrackingOverlay
         || LeftBrowContour is not null
         || RightBrowContour is not null
         || OuterLipContour is not null
-        || InnerLipContour is not null;
+        || InnerLipContour is not null
+        || FaceMesh is not null;
 }
 
 public sealed record PreviewOverlayPolyline(
     IReadOnlyList<PreviewOverlayPoint> Points,
     bool Closed,
     bool Inferred = false);
+
+public sealed record PreviewOverlayMesh(
+    IReadOnlyList<PreviewOverlayPoint> Points,
+    IReadOnlyList<PreviewOverlayEdge> Edges,
+    IReadOnlyList<PreviewOverlayIndexedPath> FeaturePaths,
+    IReadOnlyList<bool> FeaturePointMask);
+
+public readonly record struct PreviewOverlayEdge(int FromIndex, int ToIndex);
+
+public sealed record PreviewOverlayIndexedPath(
+    IReadOnlyList<int> PointIndices,
+    bool Closed,
+    PreviewOverlayMeshFeatureRole Role);
+
+public enum PreviewOverlayMeshFeatureRole
+{
+    Eye,
+    Brow,
+    Mouth,
+    Jaw,
+    Nose,
+    Face
+}
 
 public readonly record struct PreviewOverlayPoint(double X, double Y)
 {

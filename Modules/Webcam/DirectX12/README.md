@@ -25,14 +25,20 @@ Current entry points:
 - `TextureNativePreviewPolicy.cs`
 - `TextureNativeCameraRecorder.cs`
 - `PreviewTrackingOverlay.cs`
-- `Direct3D12TrackingOverlayRenderer.cs`
+- `Direct2DTrackingOverlayRenderer.cs`
+  - Wraps the DX12 swap-chain back buffers through D3D11On12.
+  - Uses Direct2D per-primitive antialiasing for thin face-mesh and feature lines.
+  - Records each distinct tracking result once, then replays one cached command list per camera frame.
+  - Uses a multithreaded Direct2D factory because WPF owns viewport lifecycle while the camera worker owns drawing.
+  - Invalidates only the retained command list after preview resume; focus changes do not rewrap live swap-chain targets.
+  - Disables the optional overlay after any Direct2D failure so camera-only DX12 presentation remains available.
 
 Timing invariant:
 - A validated D3D11 NV12 payload never creates or copies the shared bridge texture.
 - If no valid payload exists, `TextureNativeCameraRecorder` may copy into the shared bridge texture.
 - `Direct3D12PreviewHost` must finish that shared-texture presentation and call `WaitForGpu()` before capture may copy another frame into the bridge texture.
 - Analysis receives `DuplicatePreviewData()`, which owns only the pooled CPU bytes.
-- `HwndHost` owns native window airspace. Never place a WPF overlay above the DX12 child window; composite it into the swap-chain render pass.
+- `HwndHost` owns native window airspace. Never place a WPF overlay above the DX12 child window; composite it onto the DX12 swap-chain back buffer through `Direct2DTrackingOverlayRenderer`.
 
 Drop-in boundary:
 - Use `ICameraPreviewPresenter` when another program needs a camera preview surface without knowing whether the backing renderer is DX12, WPF, or a fallback.

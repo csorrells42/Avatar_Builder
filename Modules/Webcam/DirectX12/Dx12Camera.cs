@@ -162,6 +162,16 @@ public sealed class Dx12Camera : IDisposable
         _previewHost?.ResumeRendering();
     }
 
+    public void SuspendPreview()
+    {
+        if (_disposed)
+        {
+            return;
+        }
+
+        _previewHost?.SuspendRendering();
+    }
+
     public void ColorPolish(VideoFrameColorSettings settings)
     {
         _colorSettings = settings;

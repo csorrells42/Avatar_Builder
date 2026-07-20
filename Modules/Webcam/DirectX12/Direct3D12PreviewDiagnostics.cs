@@ -43,9 +43,7 @@ public sealed record Direct3D12PreviewDiagnostics(
         var size = Width > 0 && Height > 0 ? $"{Width}x{Height}" : "no frame";
         var sourceFps = SourceFramesPerSecond > 0d ? $"{SourceFramesPerSecond:0.#} source fps" : "source fps unknown";
         var fallback = string.IsNullOrWhiteSpace(FallbackReason) ? string.Empty : $"; fallback: {FallbackReason}";
-        var color = ColorPolishEnabled ? "color on" : "color off";
-        var denoise = DenoiseEnabled ? $"denoise {DenoiseStrength:0.0}" : "denoise off";
-        return $"{PreviewPath}; {FrameFormat}; {size}; {sourceFps}; render {RenderFramesPerSecond:0.#} fps; submitted {SubmittedFrames}; rendered {RenderedFrames}; dropped {DroppedFrames}; {denoise}; {color}; {RecordingMode}{fallback}";
+        return $"{PreviewPath}; {FrameFormat}; {size}; {sourceFps}; render {RenderFramesPerSecond:0.#} fps; submitted {SubmittedFrames}; rendered {RenderedFrames}; dropped {DroppedFrames}; {RecordingMode}{fallback}";
     }
 }
 

@@ -4,6 +4,7 @@ using System.Net;
 using System.Text;
 using System.Text.Json;
 using AvatarBuilder.Modules.Infrastructure;
+using AvatarBuilder.Modules.Storage.AvatarObservations;
 using AvatarBuilder.Modules.Vision.Common;
 
 namespace AvatarBuilder.Modules.Vision.Reconstruction;
@@ -34,13 +35,14 @@ public sealed class AvatarModelHistoryStore
 
     public AvatarModelHistoryReport RecordAndWrite(
         string folder,
-        AvatarModelObservationSet observationSet,
+        AvatarObservationDataset observationSet,
+        AvatarObservationRepository repository,
         AvatarModel currentModel,
         AvatarModel? previousModel)
     {
         Directory.CreateDirectory(folder);
         var previousEntry = ReadLatest(GetLatestJsonPath(folder));
-        var entry = BuildEntry(observationSet, currentModel, previousModel, previousEntry);
+        var entry = BuildEntry(observationSet, repository, currentModel, previousModel, previousEntry);
 
         AppendHistoryEntry(GetJsonLinesPath(folder), entry);
         AtomicTextFileWriter.WriteAllText(
@@ -106,7 +108,8 @@ public sealed class AvatarModelHistoryStore
     }
 
     private static AvatarModelHistoryEntry BuildEntry(
-        AvatarModelObservationSet observationSet,
+        AvatarObservationDataset observationSet,
+        AvatarObservationRepository repository,
         AvatarModel current,
         AvatarModel? previous,
         AvatarModelHistoryEntry? previousEntry)
@@ -140,7 +143,7 @@ public sealed class AvatarModelHistoryStore
             observation.ExpressionWeightPercent - observation.IdentityWeightPercent > 0.1d);
         var excludedCount = observationSet.Observations.Count(static observation => observation.IdentityWeightPercent <= 0.001d);
         var outlierAudit = current.Identity.SampleCount >= MatureModelSampleCount
-            ? AuditObservationGeometry(observationSet.Observations, current.Identity.MeanDenseVertices)
+            ? AuditObservationGeometry(observationSet, repository, current.Identity.MeanDenseVertices)
             : ObservationGeometryAudit.Empty;
 
         var warnings = BuildWarnings(
@@ -289,7 +292,8 @@ public sealed class AvatarModelHistoryStore
     }
 
     private static ObservationGeometryAudit AuditObservationGeometry(
-        IReadOnlyList<AvatarModelObservation> observations,
+        AvatarObservationDataset dataset,
+        AvatarObservationRepository repository,
         IReadOnlyList<FaceMeshLandmarkPoint> meanVertices)
     {
         if (meanVertices.Count == 0)
@@ -299,15 +303,16 @@ public sealed class AvatarModelHistoryStore
 
         var outlierCount = 0;
         var highest = 0d;
-        foreach (var observation in observations)
+        foreach (var metadata in dataset.Observations)
         {
-            if (observation.IdentityWeightPercent <= 0.001d
-                || (observation.CanonicalIdentityVertices.Count == 0 && observation.Vertices.Count == 0))
+            if (metadata.IdentityWeightPercent <= 0.001d
+                || (metadata.CanonicalVertexCount == 0 && metadata.DenseVertexCount == 0))
             {
                 continue;
             }
 
-            var normalized = AvatarModelBuilder.NormalizeIdentityVerticesForAudit(observation, meanVertices);
+            var observation = repository.LoadObservation(dataset, metadata);
+            var normalized = AvatarModelBuilder.NormalizeIdentityVerticesForAudit(observation);
             var rms = CalculateVertexRmsPercent(normalized, meanVertices);
             highest = Math.Max(highest, rms);
             if (rms > ObservationOutlierWarningPercent)

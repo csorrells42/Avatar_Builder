@@ -22,16 +22,6 @@ internal static class MediaPipeFaceLandmarkerMapper
         362, 398, 384, 385, 386, 387, 388, 466, 263, 249, 390, 373, 374, 380, 381, 382
     ];
 
-    private static readonly int[] BrowA =
-    [
-        70, 63, 105, 66, 107, 55, 65, 52, 53, 46
-    ];
-
-    private static readonly int[] BrowB =
-    [
-        336, 296, 334, 293, 300, 285, 295, 282, 283, 276
-    ];
-
     private static readonly int[] OuterLip =
     [
         61, 185, 40, 39, 37, 0, 267, 269, 270, 409,
@@ -79,8 +69,8 @@ internal static class MediaPipeFaceLandmarkerMapper
         var firstEye = Select(response.Landmarks, EyeA);
         var secondEye = Select(response.Landmarks, EyeB);
         var (leftEye, rightEye) = SortEyesByFramePosition(firstEye, secondEye);
-        var firstBrow = Select(response.Landmarks, BrowA);
-        var secondBrow = Select(response.Landmarks, BrowB);
+        var firstBrow = Select(response.Landmarks, MediaPipeBrowOutlineGeometry.BrowAIndices);
+        var secondBrow = Select(response.Landmarks, MediaPipeBrowOutlineGeometry.BrowBIndices);
         var (leftBrow, rightBrow) = SortEyesByFramePosition(firstBrow, secondBrow);
         var outerLip = Select(response.Landmarks, OuterLip);
         var innerLip = Select(response.Landmarks, InnerLip);

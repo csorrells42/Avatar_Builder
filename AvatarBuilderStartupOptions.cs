@@ -8,6 +8,8 @@ public sealed class AvatarBuilderStartupOptions
 
     public bool StartAvatarLearning { get; init; }
 
+    public bool SkipLoginPrompt { get; init; }
+
     public string OutputFolder { get; init; } = "";
 
     public static AvatarBuilderStartupOptions Default { get; } = new();
@@ -22,6 +24,7 @@ public sealed class AvatarBuilderStartupOptions
         var easyAvatarMode = false;
         var openAvatarSystem = false;
         var startAvatarLearning = false;
+        var skipLoginPrompt = false;
         var outputFolder = "";
         var values = args.ToList();
         for (var index = 0; index < values.Count; index++)
@@ -55,6 +58,10 @@ public sealed class AvatarBuilderStartupOptions
                 case "start-avatar":
                     startAvatarLearning = true;
                     break;
+                case "skip-login-prompt":
+                case "no-login-prompt":
+                    skipLoginPrompt = true;
+                    break;
                 case "output-folder":
                 case "output":
                     if (index + 1 < values.Count)
@@ -70,6 +77,7 @@ public sealed class AvatarBuilderStartupOptions
             EasyAvatarMode = easyAvatarMode,
             OpenAvatarSystem = openAvatarSystem || easyAvatarMode,
             StartAvatarLearning = startAvatarLearning || easyAvatarMode,
+            SkipLoginPrompt = skipLoginPrompt,
             OutputFolder = outputFolder
         };
 
@@ -95,6 +103,10 @@ public sealed class AvatarBuilderStartupOptions
                 case "start-avatar-learning":
                 case "start-avatar":
                     startAvatarLearning = IsTruthy(optionValue);
+                    break;
+                case "skip-login-prompt":
+                case "no-login-prompt":
+                    skipLoginPrompt = IsTruthy(optionValue);
                     break;
             }
         }

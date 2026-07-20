@@ -61,9 +61,13 @@ public sealed class AvatarSystemDashboardStore
         html.AppendLine(Metric("Dense reconstruction", lane.TrustLevel));
         html.AppendLine(Metric("Fast tracking", lane.FastTrackingStatus));
         html.AppendLine(Metric("3DDFA samples", dashboard.LastGoodThreeDdfaSampleCount.ToString(CultureInfo.InvariantCulture)));
-        html.AppendLine(Metric("Model observations", dashboard.AvatarModelObservationCount.ToString(CultureInfo.InvariantCulture)));
+        html.AppendLine(Metric("Retained observations", dashboard.RetainedAvatarObservationCount.ToString(CultureInfo.InvariantCulture)));
+        html.AppendLine(Metric("Storage revision", dashboard.StorageRevision.ToString(CultureInfo.InvariantCulture)));
+        html.AppendLine(Metric("Accepted lifetime", dashboard.LifetimeAcceptedObservationCount.ToString(CultureInfo.InvariantCulture)));
+        html.AppendLine(Metric("Rejected lifetime", dashboard.LifetimeRejectedObservationCount.ToString(CultureInfo.InvariantCulture)));
         html.AppendLine(Metric("Model confidence", $"{dashboard.AvatarModelConfidencePercent:0.#}%"));
         html.AppendLine(Metric("Model coverage", $"{dashboard.AvatarModelCoveragePercent:0.#}%"));
+        html.AppendLine(Metric("Model convergence", $"{dashboard.AvatarModelConvergencePercent:0.#}% {dashboard.AvatarModelConvergenceLabel}"));
         html.AppendLine(Metric("Model audit", dashboard.AvatarModelAuditStatus));
         html.AppendLine(Metric("Z apparent", pose.HasFace && pose.ApparentDistanceUnits is { } apparent ? $"{apparent:0.###} {pose.ApparentDistanceUnitName}" : "waiting"));
         html.AppendLine(Metric("Z source", string.IsNullOrWhiteSpace(pose.DistanceSource) ? "waiting" : pose.DistanceSource));

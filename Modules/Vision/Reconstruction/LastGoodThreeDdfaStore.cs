@@ -4,12 +4,14 @@ using System.Net;
 using System.Text;
 using System.Text.Json;
 using AvatarBuilder.Modules.Infrastructure;
+using AvatarBuilder.Modules.Storage.AvatarObservations;
 
 namespace AvatarBuilder.Modules.Vision.Reconstruction;
 
 public sealed class LastGoodThreeDdfaStore
 {
     private const string LegacyJsonFileName = "last_5_3ddfa_reconstructions.json";
+    public const int RetainedReviewSampleCount = 5;
     public const string HtmlFileName = "last_5_3ddfa_reconstructions.html";
 
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
@@ -48,63 +50,56 @@ public sealed class LastGoodThreeDdfaStore
     }
 
     public static IReadOnlyList<ThreeDdfaReconstructionSnapshot> CreateSamples(
-        AvatarModelObservationSet observationSet,
-        IReadOnlyList<ThreeDdfaReconstructionSnapshot>? currentSamples = null)
+        AvatarObservationDataset observationSet,
+        AvatarObservationRepository repository)
     {
         ArgumentNullException.ThrowIfNull(observationSet);
 
         var persisted = observationSet.Observations
-            .Where(static observation => observation.Vertices.Count > 0)
-            .Select(static observation => new ThreeDdfaReconstructionSnapshot
+            .OrderByDescending(static observation => observation.CapturedAtUtc)
+            .Take(RetainedReviewSampleCount)
+            .OrderBy(static observation => observation.CapturedAtUtc)
+            .Select(observation =>
             {
-                RequestId = observation.RequestId,
-                CapturedAtUtc = observation.CapturedAtUtc,
-                Source = observation.Source,
-                DenseVertexCount = observation.Vertices.Count,
-                DenseSampleStride = 1,
-                ReconstructionConfidencePercent = observation.ReconstructionConfidencePercent,
-                ARotationAroundXDegrees = observation.ARotationAroundXDegrees,
-                BRotationAroundYDegrees = observation.BRotationAroundYDegrees,
-                CRotationAroundZDegrees = observation.CRotationAroundZDegrees,
-                PoseSource = "3DDFA_V2 ONNX",
-                TrustDecision = observation.TrustDecision,
-                Vertices = observation.Vertices,
-                CameraMatrixCoefficients = observation.CameraMatrixCoefficients,
-                ShapeCoefficients = observation.ShapeCoefficients,
-                ExpressionCoefficients = observation.ExpressionCoefficients,
-                Warnings = observation.Warnings
+                var loaded = repository.LoadObservation(observationSet, observation);
+                var sourceImagePath = repository.GetImagePath(observationSet, observation);
+                return new ThreeDdfaReconstructionSnapshot
+                {
+                    RequestId = loaded.RequestId,
+                    CapturedAtUtc = loaded.CapturedAtUtc,
+                    Source = loaded.Source,
+                    DenseVertexCount = loaded.DenseVertexCount,
+                    DenseSampleStride = 1,
+                    ReconstructionConfidencePercent = loaded.ReconstructionConfidencePercent,
+                    ARotationAroundXDegrees = loaded.ARotationAroundXDegrees,
+                    BRotationAroundYDegrees = loaded.BRotationAroundYDegrees,
+                    CRotationAroundZDegrees = loaded.CRotationAroundZDegrees,
+                    PoseSource = "3DDFA_V2 ONNX",
+                    TrustDecision = loaded.TrustDecision,
+                    SourceImageUri = string.IsNullOrWhiteSpace(sourceImagePath)
+                        ? ""
+                        : new Uri(sourceImagePath).AbsoluteUri,
+                    Vertices = loaded.Vertices,
+                    CameraMatrixCoefficients = loaded.CameraMatrixCoefficients,
+                    ShapeCoefficients = loaded.ShapeCoefficients,
+                    ExpressionCoefficients = loaded.ExpressionCoefficients,
+                    Warnings = loaded.Warnings
+                };
             });
-        var combined = currentSamples is { Count: > 0 }
-            ? persisted.Concat(currentSamples)
-            : persisted;
-
-        return combined
+        return persisted
             .GroupBy(CreateSampleKey, StringComparer.Ordinal)
             .Select(static group => group.OrderByDescending(sample => sample.CapturedAtUtc).First())
             .OrderBy(static sample => sample.CapturedAtUtc)
-            .TakeLast(AvatarModelObservationStore.MaxReviewGeometryCount)
+            .TakeLast(RetainedReviewSampleCount)
             .ToList();
     }
 
     public static List<MeshTopologyEdge> SelectSharedTopology(
-        AvatarModelObservationSet observationSet,
-        IReadOnlyList<ThreeDdfaReconstructionSnapshot>? currentSamples = null)
+        AvatarObservationDataset observationSet)
     {
         ArgumentNullException.ThrowIfNull(observationSet);
 
-        IReadOnlyList<MeshTopologyEdge> best = observationSet.DenseTopologyEdges;
-        if (currentSamples is not null)
-        {
-            foreach (var sample in currentSamples)
-            {
-                if (sample.TopologyEdges.Count > best.Count)
-                {
-                    best = sample.TopologyEdges;
-                }
-            }
-        }
-
-        return best.ToList();
+        return observationSet.DenseTopologyEdges.ToList();
     }
 
     private static LastGoodThreeDdfaReport PrepareReport(LastGoodThreeDdfaReport report)
@@ -129,7 +124,7 @@ public sealed class LastGoodThreeDdfaStore
             ReconstructionLane = report.ReconstructionLane,
             DenseTopologyEdges = topology.ToList(),
             Samples = report.Samples
-                .TakeLast(AvatarModelObservationStore.MaxReviewGeometryCount)
+                .TakeLast(RetainedReviewSampleCount)
                 .Select(CopyWithoutTopology)
                 .ToList()
         };
@@ -151,6 +146,7 @@ public sealed class LastGoodThreeDdfaStore
             CRotationAroundZDegrees = sample.CRotationAroundZDegrees,
             PoseSource = sample.PoseSource,
             TrustDecision = sample.TrustDecision,
+            SourceImageUri = sample.SourceImageUri,
             Vertices = sample.Vertices,
             SparseLandmarks = sample.SparseLandmarks,
             CameraMatrixCoefficients = sample.CameraMatrixCoefficients,
@@ -201,6 +197,7 @@ public sealed class LastGoodThreeDdfaStore
       <button type="button" id="toggleAutoRefresh" aria-pressed="true">Pause Updates</button>
       <button type="button" id="togglePoints" aria-pressed="true">Points</button>
       <button type="button" id="toggleSurface" aria-pressed="true">Wireframe</button>
+      <button type="button" id="togglePhoto" aria-pressed="false">Photo Overlay</button>
       <button type="button" id="resetView">Reset View</button>
     </div>
   </section>
@@ -240,7 +237,8 @@ public sealed class LastGoodThreeDdfaStore
   const ctx = canvas?.getContext('2d');
   if (!canvas || !ctx) return;
 
-  const view = { points: true, surface: true, yaw: -0.38, pitch: -0.10, zoom: 0.82 };
+  const view = { points: true, surface: true, photo: false, yaw: -0.38, pitch: -0.10, zoom: 0.82 };
+  const imageCache = new Map();
   let activeIndex = samples.length > 0 ? samples.length - 1 : -1;
   let dragging = false;
   let last = null;
@@ -249,6 +247,7 @@ public sealed class LastGoodThreeDdfaStore
   bindAutoRefresh();
   bindToggle(document.getElementById('togglePoints'), 'points');
   bindToggle(document.getElementById('toggleSurface'), 'surface');
+  bindToggle(document.getElementById('togglePhoto'), 'photo');
   document.getElementById('resetView')?.addEventListener('click', () => {
     view.yaw = -0.38;
     view.pitch = -0.10;
@@ -361,7 +360,6 @@ public sealed class LastGoodThreeDdfaStore
     ctx.clearRect(0, 0, rect.width, rect.height);
     ctx.fillStyle = '#061019';
     ctx.fillRect(0, 0, rect.width, rect.height);
-    drawGrid(rect);
 
     document.querySelectorAll('[data-sample-row]').forEach(row => {
       row.dataset.active = row.getAttribute('data-sample-row') === String(activeIndex);
@@ -380,14 +378,16 @@ public sealed class LastGoodThreeDdfaStore
     const vertices = sample.vertices || sample.Vertices || [];
     const sampleEdges = sample.topologyEdges || sample.TopologyEdges || [];
     const edges = sampleEdges.length > 0 ? sampleEdges : sharedEdges;
-    const normalized = normalize(vertices);
-    const byIndex = new Map(normalized.map(point => [point.index, point]));
-
-    if (view.surface) {
-      drawEdges(edges, byIndex, rect);
-    }
-    if (view.points) {
-      drawPoints(normalized, rect);
+    const imageUri = sample.sourceImageUri || sample.SourceImageUri || '';
+    const image = imageUri ? getImage(imageUri) : null;
+    if (view.photo && image?.complete && image.naturalWidth > 0) {
+      drawPhotoMesh(image, vertices, edges, rect);
+    } else {
+      drawGrid(rect);
+      const normalized = normalize(vertices);
+      const byIndex = new Map(normalized.map(point => [point.index, point]));
+      if (view.surface) drawEdges(edges, byIndex, rect);
+      if (view.points) drawPoints(normalized, rect);
     }
 
     const confidence = sample.reconstructionConfidencePercent ?? sample.ReconstructionConfidencePercent;
@@ -401,7 +401,55 @@ public sealed class LastGoodThreeDdfaStore
         <tr><th>Dense mesh</th><td>${vertices.length.toLocaleString()} vertices, ${edges.length.toLocaleString()} topology edges, stride ${formatInteger(sample.denseSampleStride ?? sample.DenseSampleStride)}</td></tr>
         <tr><th>A/B/C</th><td>${formatNumber(sample.aRotationAroundXDegrees ?? sample.ARotationAroundXDegrees)} / ${formatNumber(sample.bRotationAroundYDegrees ?? sample.BRotationAroundYDegrees)} / ${formatNumber(sample.cRotationAroundZDegrees ?? sample.CRotationAroundZDegrees)} deg</td></tr>
         <tr><th>Trust</th><td>${escapeHtml(sample.trustDecision || sample.TrustDecision || '')}</td></tr>
+        <tr><th>Paired photo</th><td>${imageUri ? `<a href="${escapeHtml(imageUri)}">Open exact source frame</a>` : '<span class="muted">Unavailable</span>'}</td></tr>
         <tr><th>Warnings</th><td>${warnings.length ? warnings.map(escapeHtml).join('; ') : '<span class="muted">No 3DDFA warnings.</span>'}</td></tr>`;
+    }
+  }
+
+  function getImage(uri) {
+    if (imageCache.has(uri)) return imageCache.get(uri);
+    const image = new Image();
+    image.addEventListener('load', draw, { once: true });
+    image.src = uri;
+    imageCache.set(uri, image);
+    return image;
+  }
+
+  function drawPhotoMesh(image, vertices, edges, rect) {
+    const scale = Math.min(rect.width / image.naturalWidth, rect.height / image.naturalHeight);
+    const width = image.naturalWidth * scale;
+    const height = image.naturalHeight * scale;
+    const left = (rect.width - width) / 2;
+    const top = (rect.height - height) / 2;
+    ctx.drawImage(image, left, top, width, height);
+    const points = vertices.map(point => ({
+      index: point.index ?? point.Index,
+      x: left + Number(point.x ?? point.X) * scale,
+      y: top + Number(point.y ?? point.Y) * scale
+    })).filter(point => Number.isFinite(point.x) && Number.isFinite(point.y));
+    const byIndex = new Map(points.map(point => [point.index, point]));
+    if (view.surface) {
+      ctx.save();
+      ctx.strokeStyle = '#66d9ff';
+      ctx.lineWidth = 0.7;
+      ctx.globalAlpha = 0.48;
+      for (const edge of edges) {
+        const from = byIndex.get(edge.fromIndex ?? edge.FromIndex);
+        const to = byIndex.get(edge.toIndex ?? edge.ToIndex);
+        if (!from || !to) continue;
+        ctx.beginPath();
+        ctx.moveTo(from.x, from.y);
+        ctx.lineTo(to.x, to.y);
+        ctx.stroke();
+      }
+      ctx.restore();
+    }
+    if (view.points) {
+      ctx.save();
+      ctx.fillStyle = '#66d9ff';
+      ctx.globalAlpha = 0.8;
+      for (const point of points) ctx.fillRect(point.x - 0.55, point.y - 0.55, 1.1, 1.1);
+      ctx.restore();
     }
   }
 

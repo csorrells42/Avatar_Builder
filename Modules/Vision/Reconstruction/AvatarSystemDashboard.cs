@@ -41,13 +41,23 @@ public sealed class AvatarSystemDashboard
 
     public string AvatarModelStatus { get; set; } = "waiting for stored 3DDFA observations";
 
-    public int AvatarModelObservationCount { get; set; }
+    public int RetainedAvatarObservationCount { get; set; }
+
+    public long StorageRevision { get; set; }
+
+    public long LifetimeAcceptedObservationCount { get; set; }
+
+    public long LifetimeRejectedObservationCount { get; set; }
 
     public double AvatarModelConfidencePercent { get; set; }
 
     public double AvatarModelCoveragePercent { get; set; }
 
     public string AvatarModelCoverageSummary { get; set; } = "waiting";
+
+    public double AvatarModelConvergencePercent { get; set; }
+
+    public string AvatarModelConvergenceLabel { get; set; } = "waiting";
 
     public string AvatarModelHtmlPath { get; set; } = "";
 
@@ -58,5 +68,5 @@ public sealed class AvatarSystemDashboard
     public string AvatarModelAuditHtmlPath { get; set; } = "";
 
     public string StoragePolicy { get; set; } =
-        "Avatar capture stores bounded 3DDFA observation data, review JSON/HTML, a derived identity/expression model, and a 30-day rebuild audit. The retired measurement-learning backend is not updating avatar geometry.";
+        "SQLite indexes ranked observations while immutable binary scans and paired source photos hold bulk data. Capture writes are bounded and asynchronous; weaker duplicates are rejected or replaced without blocking preview.";
 }

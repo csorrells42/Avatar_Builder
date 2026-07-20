@@ -42,9 +42,12 @@ The **File** menu owns login, storage, and the hover-open **Face Box System** se
 
 `AvatarBuilderOutputFolder.txt` beside the executable contains the selected data-folder path. **File > Choose Data Folder** opens the path and drive-capacity dialog. If the pointer file is missing, empty, or points to a missing folder, startup asks for a new location and saves it. The intended workstation location is `D:\Avatar Builder Output`.
 
-All user-generated avatar data belongs under that selected folder. The app stores bounded, measurement-oriented data rather than continuous webcam video:
+All user-generated avatar data belongs under that selected folder. The app stores ranked 3DDFA evidence rather than continuous webcam video:
 
-- `avatar_model_observations.json.gz`: bounded accepted 3DDFA observations in the current compact format. Every accepted sample keeps its expression-free canonical 3DDFA identity mesh for learning; only the five newest samples retain the larger observed camera-space scan needed by Last 5 review. A legacy uncompressed JSON file is migrated after a successful compressed write.
+- `AvatarSystem\Storage\avatar-builder.sqlite3`: transactional profile and observation catalog with quality, pose, expression, ranking, object paths, checksums, and revision counters. SQLite runs in WAL mode so readers do not stall the bounded background writer.
+- `AvatarSystem\Storage\Objects\Scans`: immutable content-addressed `.avscan` files containing compact binary full-resolution observed and canonical 3DDFA geometry plus coefficients.
+- `AvatarSystem\Storage\Objects\Images`: the exact JPEG source frame paired one-to-one with every retained scan.
+- `AvatarSystem\Storage\Objects\Topology`: deduplicated binary topology shared by scans with the same mesh.
 - `avatar_model.json`: current canonical 3DDFA identity model.
 - `avatar_model_history.jsonl`: compact improvement and regression history.
 - `avatar_model_progress.html`: interactive current-model viewer.
@@ -56,9 +59,11 @@ No passive continuous video, room imagery, medical-event database, event clips, 
 
 ## Model and review flow
 
-Full 3DDFA samples are requested at most once every 10 seconds while capture is active. Accepted samples are bounded, and the current avatar model is considered for rebuild every 30 seconds. The large model and Last 5 files are rebuilt only when the observation set actually changes. New samples use 3DDFA's own expression-free canonical BFM geometry for the persistent identity; those shared model coordinates are centered, scaled, and averaged directly without redundant pose alignment. The five newest observed camera-space meshes remain available for Last 5 review. Only legacy camera-space observations are aligned with rigid Procrustes rotation and translation, never non-rigidly warped. Observation and model stores are cached in-process, report file writes are serialized, and the compressed archive favors capture-time throughput over maximum compression. The model viewer converts canonical Y-up geometry to browser-canvas coordinates explicitly. Last 5 is rebuilt from the persisted observation database across restarts and stores shared topology once. Expression ranges remain separate, and model history records confidence, coverage, scale-independent shape stability, regional RMS movement, and outlier candidates. Review flags do not silently delete observations.
+Full 3DDFA samples are requested at most once every 10 seconds while capture is active. The camera and analysis lanes only submit immutable captures to a bounded single-writer queue; JPEG encoding, binary serialization, hashing, SQLite transactions, duplicate detection, and replacement happen off the UI thread. The catalog retains at most 360 ranked observations per profile as a storage ceiling. Weak duplicates are rejected, stronger near-duplicates replace weaker evidence, and underrepresented A/B/C/distance and expression buckets receive coverage value.
 
-`tools\AuditAvatarModelData.py <profile-folder>` independently checks observation provenance, identity and review vertex counts, exact direct-canonical reproducibility, legacy alignment error, coefficient variation, and model-history movement. Use it whenever the accumulated face looks distorted or unexpectedly sparse.
+The current avatar model is considered for rebuild every 30 seconds and only changes when the catalog revision changes. Identity averages 3DDFA's expression-free canonical BFM vertices directly in shared model coordinates, streaming one scan at a time from disk. Expression coefficients remain separate. Convergence reports sample adequacy, coefficient stability, retained quality, and pose/depth coverage; 120 observations is only one maturity gate, not an automatic proof of accuracy. Model history records confidence, coverage, scale-independent shape stability, regional RMS movement, and outlier candidates. The Last 5 viewer can switch between a rotatable dense reconstruction and the mesh over its exact paired camera frame.
+
+`tools\AvatarStorageSmoke` exercises SQLite, binary scan/topology files, paired JPEGs, ranking, replacement, reopen/readback, checksums, and reset behavior. The model-history report independently tracks model movement, regional change, confidence, coverage, and outlier evidence across rebuilds.
 
 **View > A/B/C Alignment Audit** opens a live five-second diagnostic report built from exact-frame MediaPipe and 3DDFA pose pairs. It shows raw and calibrated MediaPipe A/B/C, 3DDFA A/B/C, the measured scale/offset transform, correlation, motion range, mean error, p95 error, and a per-axis readiness decision. This comparison never blocks 3DDFA capture or learning; it exists to expose disagreement between the two systems before their outputs are combined downstream.
 
@@ -76,7 +81,8 @@ Runtime code lives under `Modules`:
 - `Modules\Vision\Onnx`: 3DDFA_V2 ONNX sidecar client and runtime discovery.
 - `Modules\Vision\Pipeline`: backend composition and fusion.
 - `Modules\Vision\Personalization`: avatar profiles, user login session, and capture quality.
-- `Modules\Vision\Reconstruction`: observation stores, model building, audit history, dashboards, and review pages.
+- `Modules\Storage\AvatarObservations`: SQLite catalog, binary/image/topology object codecs, asynchronous writer, ranking, replacement, and storage verification.
+- `Modules\Vision\Reconstruction`: model building, convergence, audit history, dashboards, and review pages.
 - `Modules\Vision\Diagnostics`: common timing records, batched live benchmark CSV output, and exact-frame A/B/C alignment auditing.
 - `Modules\Infrastructure`: small shared runtime helpers.
 See `Modules\README.md` and each module README before changing a backend.

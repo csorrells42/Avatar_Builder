@@ -11,7 +11,7 @@ public sealed class AvatarModelStore
 {
     public const string JsonFileName = "avatar_model.json";
     public const string HtmlFileName = "avatar_model_progress.html";
-    private const string ViewerVersion = "avatar-model-viewer-v2";
+    private const string ViewerVersion = "avatar-model-viewer-v3-storage-validation";
 
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
     private readonly object _cacheLock = new();
@@ -107,9 +107,14 @@ public sealed class AvatarModelStore
             : string.Concat(model.Expression.Buckets.Select(bucket =>
                 $"<tr><td>{H(bucket.Name)}</td><td>{bucket.SampleCount.ToString(CultureInfo.InvariantCulture)}</td><td>{bucket.AverageEnergyPercent.ToString("0.#", CultureInfo.InvariantCulture)}%</td><td>{H(bucket.Meaning)}</td></tr>"));
         var sampleRows = model.RecentSamples.Count == 0
-            ? "<tr><td colspan=\"6\" class=\"muted\">Waiting for accepted 3DDFA observations.</td></tr>"
+            ? "<tr><td colspan=\"7\" class=\"muted\">Waiting for accepted 3DDFA observations.</td></tr>"
             : string.Concat(model.RecentSamples.Select(sample =>
-                $"<tr><td>{H(sample.CapturedAtUtc.ToLocalTime().ToString("HH:mm:ss", CultureInfo.InvariantCulture))}</td><td>{sample.WeightPercent.ToString("0.#", CultureInfo.InvariantCulture)}%</td><td>{sample.ReconstructionConfidencePercent.ToString("0.#", CultureInfo.InvariantCulture)}%</td><td>{sample.ARotationAroundXDegrees.ToString("0.#", CultureInfo.InvariantCulture)} / {sample.BRotationAroundYDegrees.ToString("0.#", CultureInfo.InvariantCulture)} / {sample.CRotationAroundZDegrees.ToString("0.#", CultureInfo.InvariantCulture)}</td><td>{sample.VertexCount.ToString("n0", CultureInfo.InvariantCulture)}</td><td>{H(sample.IdentityUse)}</td></tr>"));
+            {
+                var photo = string.IsNullOrWhiteSpace(sample.SourceImageUri)
+                    ? "<span class=\"muted\">Unavailable</span>"
+                    : $"<a href=\"{H(sample.SourceImageUri)}\">Photo</a>";
+                return $"<tr><td>{H(sample.CapturedAtUtc.ToLocalTime().ToString("HH:mm:ss", CultureInfo.InvariantCulture))}</td><td>{sample.WeightPercent.ToString("0.#", CultureInfo.InvariantCulture)}%</td><td>{sample.ReconstructionConfidencePercent.ToString("0.#", CultureInfo.InvariantCulture)}%</td><td>{sample.ARotationAroundXDegrees.ToString("0.#", CultureInfo.InvariantCulture)} / {sample.BRotationAroundYDegrees.ToString("0.#", CultureInfo.InvariantCulture)} / {sample.CRotationAroundZDegrees.ToString("0.#", CultureInfo.InvariantCulture)}</td><td>{sample.VertexCount.ToString("n0", CultureInfo.InvariantCulture)}</td><td>{photo}</td><td>{H(sample.IdentityUse)}</td></tr>";
+            }));
 
         return $$$"""
 <!doctype html>
@@ -147,12 +152,16 @@ public sealed class AvatarModelStore
     <p class="muted">{{{H(model.StoragePolicy)}}}</p>
     <div class="grid">
       <div class="metric"><div class="label">Identity samples</div><div class="value">{{{model.Identity.SampleCount.ToString(CultureInfo.InvariantCulture)}}}</div></div>
+      <div class="metric"><div class="label">Convergence</div><div class="value">{{{model.Convergence.ScorePercent.ToString("0.#", CultureInfo.InvariantCulture)}}}%</div></div>
+      <div class="metric"><div class="label">Maturity</div><div class="value">{{{H(model.Convergence.Label)}}}</div></div>
       <div class="metric"><div class="label">Identity confidence</div><div class="value">{{{model.Identity.ConfidencePercent.ToString("0.#", CultureInfo.InvariantCulture)}}}%</div></div>
       <div class="metric"><div class="label">Dense vertices</div><div class="value">{{{model.Identity.DenseVertexCount.ToString("n0", CultureInfo.InvariantCulture)}}}</div></div>
       <div class="metric"><div class="label">Pose coverage</div><div class="value">{{{model.PoseCoverage.CoveragePercent.ToString("0.#", CultureInfo.InvariantCulture)}}}%</div></div>
       <div class="metric"><div class="label">Expression samples</div><div class="value">{{{model.Expression.SampleCount.ToString(CultureInfo.InvariantCulture)}}}</div></div>
       <div class="metric"><div class="label">Expression energy</div><div class="value">{{{model.Expression.ExpressionEnergyPercent.ToString("0.#", CultureInfo.InvariantCulture)}}}%</div></div>
+      <div class="metric"><div class="label">Storage revision</div><div class="value">{{{model.SourceObservationRevision.ToString(CultureInfo.InvariantCulture)}}}</div></div>
     </div>
+    <p class="muted">{{{H(model.Convergence.Basis)}}}</p>
     <h2>Coverage</h2>
     <table>
       <tr><th>Summary</th><td>{{{H(model.PoseCoverage.Summary)}}}</td></tr>
@@ -168,7 +177,7 @@ public sealed class AvatarModelStore
     <h2>Expression Model</h2>
     <table><tr><th>Bucket</th><th>Samples</th><th>Energy</th><th>Meaning</th></tr>{{{buckets}}}</table>
     <h2>Recent Stored Observations</h2>
-    <table><tr><th>Time</th><th>Weight</th><th>3DDFA</th><th>A/B/C</th><th>Vertices</th><th>Use</th></tr>{{{sampleRows}}}</table>
+    <table><tr><th>Time</th><th>Weight</th><th>3DDFA</th><th>A/B/C</th><th>Vertices</th><th>Photo</th><th>Use</th></tr>{{{sampleRows}}}</table>
   </aside>
 </main>
 <script type="application/json" id="avatarModelJson">{{{sceneJson}}}</script>

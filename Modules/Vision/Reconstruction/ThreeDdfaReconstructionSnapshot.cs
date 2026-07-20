@@ -29,6 +29,8 @@ public sealed class ThreeDdfaReconstructionSnapshot
 
     public string TrustDecision { get; init; } = "";
 
+    public string SourceImageUri { get; init; } = "";
+
     public int VertexCount => Vertices.Count;
 
     public int EdgeCount => TopologyEdges.Count;

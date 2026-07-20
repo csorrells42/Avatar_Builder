@@ -1,4 +1,6 @@
+using System.IO;
 using AvatarBuilder.Modules.Vision.Common;
+using AvatarBuilder.Modules.Storage.AvatarObservations;
 
 namespace AvatarBuilder.Modules.Vision.Reconstruction;
 
@@ -7,7 +9,9 @@ public static class AvatarModelBuilder
     private const double PoseBucketThresholdDegrees = 10d;
     private const double ExpressionHeavyThresholdPercent = 42d;
 
-    public static AvatarModel Build(AvatarModelObservationSet observationSet)
+    public static AvatarModel Build(
+        AvatarObservationDataset observationSet,
+        AvatarObservationRepository repository)
     {
         var observations = observationSet.Observations
             .Where(HasIdentityGeometry)
@@ -20,6 +24,7 @@ public static class AvatarModelBuilder
             {
                 SubjectId = observationSet.SubjectId,
                 SubjectDisplayName = observationSet.SubjectDisplayName,
+                SourceObservationRevision = observationSet.Revision,
                 Status = "waiting for accepted 3DDFA observations",
                 Findings =
                 [
@@ -28,33 +33,39 @@ public static class AvatarModelBuilder
             };
         }
 
-        var identity = BuildIdentity(observations, observationSet.DenseTopologyEdges);
+        var identity = BuildIdentity(observationSet, observations, repository);
         var expression = BuildExpression(observations);
         var coverage = BuildCoverage(observations);
+        var convergence = BuildConvergence(observations, identity, coverage);
         var findings = BuildFindings(observations, identity, expression, coverage);
 
         return new AvatarModel
         {
             SubjectId = observationSet.SubjectId,
             SubjectDisplayName = observationSet.SubjectDisplayName,
-            Status = identity.SampleCount >= 8 && coverage.CoveragePercent >= 45d
-                ? "avatar model is accumulating useful multi-angle 3DDFA evidence"
-                : "avatar model is started; collect more angles and expressions",
+            SourceObservationRevision = observationSet.Revision,
+            Status = convergence.IsMatureCandidate
+                ? "avatar model is a mature candidate; continue collecting only when new evidence improves it"
+                : "avatar model is accumulating ranked multi-angle 3DDFA evidence",
             Identity = identity,
             Expression = expression,
             PoseCoverage = coverage,
+            Convergence = convergence,
             RecentSamples = observations
                 .OrderByDescending(static observation => observation.CapturedAtUtc)
                 .Take(24)
-                .Select(CreateSampleSummary)
+                .Select(observation => CreateSampleSummary(
+                    observation,
+                    repository.GetImagePath(observationSet, observation)))
                 .ToList(),
             Findings = findings
         };
     }
 
     private static AvatarIdentityModel BuildIdentity(
-        IReadOnlyList<AvatarModelObservation> observations,
-        IReadOnlyList<MeshTopologyEdge> topologyEdges)
+        AvatarObservationDataset dataset,
+        IReadOnlyList<AvatarObservation> observations,
+        AvatarObservationRepository repository)
     {
         var vertexAccumulators = new Dictionary<int, WeightedPointAccumulator>();
         var shapeAccumulators = CreateCoefficientAccumulators(observations.Max(static observation => observation.ShapeCoefficients.Count));
@@ -68,61 +79,16 @@ public static class AvatarModelBuilder
             .Where(static item => item.Weight > 0.001d)
             .ToList();
 
-        var canonicalObservations = weightedObservations
-            .Where(static item => HasCanonicalIdentityGeometry(item.Observation))
-            .ToList();
-        foreach (var item in canonicalObservations)
+        foreach (var item in weightedObservations)
         {
+            var loaded = repository.LoadObservation(dataset, item.Observation);
             AddIdentityGeometry(
-                item,
-                NormalizeIdentityVertices(item.Observation),
+                new WeightedObservation(loaded, item.Weight),
+                NormalizeIdentityVertices(loaded),
                 vertexAccumulators,
                 shapeAccumulators,
                 ref totalWeight,
                 ref confidenceWeight);
-        }
-
-        var legacyObservations = weightedObservations
-            .Where(static item => !HasCanonicalIdentityGeometry(item.Observation))
-            .ToList();
-        if (legacyObservations.Count > 0)
-        {
-            if (canonicalObservations.Count > 0)
-            {
-                var canonicalMean = CreateMeanVertices(vertexAccumulators.Values);
-                foreach (var item in legacyObservations)
-                {
-                    var aligned = DenseMeshRigidAligner.Align(
-                        NormalizeIdentityVertices(item.Observation),
-                        canonicalMean);
-                    AddIdentityGeometry(
-                        item,
-                        aligned,
-                        vertexAccumulators,
-                        shapeAccumulators,
-                        ref totalWeight,
-                        ref confidenceWeight);
-                }
-            }
-            else
-            {
-                var alignedLegacy = AlignLegacyIdentityGeometries(legacyObservations
-                    .Select(item => new WeightedIdentityGeometry(
-                        item.Observation,
-                        item.Weight,
-                        NormalizeIdentityVertices(item.Observation)))
-                    .ToList());
-                foreach (var geometry in alignedLegacy)
-                {
-                    AddIdentityGeometry(
-                        new WeightedObservation(geometry.Observation, geometry.Weight),
-                        geometry.Vertices,
-                        vertexAccumulators,
-                        shapeAccumulators,
-                        ref totalWeight,
-                        ref confidenceWeight);
-                }
-            }
         }
 
         var meanVertices = CreateMeanVertices(vertexAccumulators.Values);
@@ -135,17 +101,17 @@ public static class AvatarModelBuilder
             SampleCount = observations.Count,
             ConfidencePercent = Round(confidence),
             DenseVertexCount = meanVertices.Count,
-            DenseTopologyEdgeCount = topologyEdges.Count,
+            DenseTopologyEdgeCount = dataset.DenseTopologyEdges.Count,
             ShapeCoefficientCount = shapeAccumulators.Count,
             ShapeCoefficientStabilityPercent = Round(CalculateCoefficientStability(shapeAccumulators)),
             MeanShapeCoefficients = shapeAccumulators.Select(static accumulator => Round(accumulator.Mean)).ToList(),
             MeanDenseVertices = meanVertices,
-            TopologyEdges = topologyEdges.ToList(),
+            TopologyEdges = dataset.DenseTopologyEdges.ToList(),
             RegionConfidence = BuildRegionConfidence(observations, confidence)
         };
     }
 
-    private static AvatarExpressionModel BuildExpression(IReadOnlyList<AvatarModelObservation> observations)
+    private static AvatarExpressionModel BuildExpression(IReadOnlyList<AvatarObservation> observations)
     {
         var coefficientCount = observations.Max(static observation => observation.ExpressionCoefficients.Count);
         var accumulators = CreateCoefficientAccumulators(coefficientCount);
@@ -185,7 +151,7 @@ public static class AvatarModelBuilder
         };
     }
 
-    private static AvatarPoseCoverage BuildCoverage(IReadOnlyList<AvatarModelObservation> observations)
+    private static AvatarPoseCoverage BuildCoverage(IReadOnlyList<AvatarObservation> observations)
     {
         var aValues = observations.Select(static observation => observation.ARotationAroundXDegrees).ToList();
         var bValues = observations.Select(static observation => observation.BRotationAroundYDegrees).ToList();
@@ -247,20 +213,55 @@ public static class AvatarModelBuilder
     }
 
     internal static IReadOnlyList<FaceMeshLandmarkPoint> NormalizeIdentityVerticesForAudit(
-        AvatarModelObservation observation,
-        IReadOnlyList<FaceMeshLandmarkPoint> target)
+        AvatarObservation observation)
     {
-        var normalized = NormalizeIdentityVertices(observation);
-        return target.Count == 0 || HasCanonicalIdentityGeometry(observation)
-            ? normalized
-            : DenseMeshRigidAligner.Align(normalized, target);
+        return NormalizeIdentityVertices(observation);
     }
 
-    private static IReadOnlyList<FaceMeshLandmarkPoint> NormalizeIdentityVertices(AvatarModelObservation observation)
+    private static AvatarModelConvergence BuildConvergence(
+        IReadOnlyList<AvatarObservation> observations,
+        AvatarIdentityModel identity,
+        AvatarPoseCoverage coverage)
     {
-        var source = HasCanonicalIdentityGeometry(observation)
-            ? observation.CanonicalIdentityVertices
-            : observation.Vertices;
+        var sampleAdequacy = Math.Clamp(observations.Count / 180d * 100d, 0d, 100d);
+        var quality = observations.Count == 0
+            ? 0d
+            : observations.Average(static observation => observation.RetentionScorePercent);
+        var score = identity.ShapeCoefficientStabilityPercent * 0.35d
+            + coverage.CoveragePercent * 0.25d
+            + quality * 0.20d
+            + sampleAdequacy * 0.20d;
+        var mature = observations.Count >= 120
+            && identity.ShapeCoefficientStabilityPercent >= 75d
+            && coverage.CoveragePercent >= 77d
+            && score >= 82d;
+        var label = mature
+            ? "mature candidate"
+            : observations.Count < 36
+                ? "early collection"
+                : identity.ShapeCoefficientStabilityPercent < 65d
+                    ? "identity still stabilizing"
+                    : coverage.CoveragePercent < 65d
+                        ? "needs broader pose coverage"
+                        : "converging";
+        return new AvatarModelConvergence
+        {
+            ScorePercent = Round(score),
+            SampleAdequacyPercent = Round(sampleAdequacy),
+            QualityPercent = Round(quality),
+            IsMatureCandidate = mature,
+            Label = label,
+            Basis = $"{observations.Count} ranked observations; {identity.ShapeCoefficientStabilityPercent:0.#}% coefficient stability; {coverage.CoveragePercent:0.#}% pose/depth coverage; {quality:0.#}% retained quality."
+        };
+    }
+
+    private static IReadOnlyList<FaceMeshLandmarkPoint> NormalizeIdentityVertices(AvatarObservation observation)
+    {
+        var source = observation.CanonicalIdentityVertices;
+        if (source.Count == 0)
+        {
+            throw new InvalidDataException($"Observation {observation.ObservationId} did not contain canonical identity geometry.");
+        }
         var bounds = Bounds.From(source);
         var centerX = (bounds.MinX + bounds.MaxX) * 0.5d;
         var centerY = (bounds.MinY + bounds.MaxY) * 0.5d;
@@ -279,54 +280,6 @@ public static class AvatarModelBuilder
         }
 
         return normalized;
-    }
-
-    private static List<WeightedIdentityGeometry> AlignLegacyIdentityGeometries(
-        IReadOnlyList<WeightedIdentityGeometry> geometries)
-    {
-        if (geometries.Count <= 1)
-        {
-            return geometries.ToList();
-        }
-
-        IReadOnlyList<FaceMeshLandmarkPoint> mean = geometries[0].Vertices;
-        var aligned = geometries.ToList();
-        for (var iteration = 0; iteration < 4; iteration++)
-        {
-            aligned = geometries
-                .Select(geometry => geometry with
-                {
-                    Vertices = DenseMeshRigidAligner.Align(geometry.Vertices, mean)
-                })
-                .ToList();
-            mean = CalculateWeightedMean(aligned);
-        }
-
-        return aligned;
-    }
-
-    private static IReadOnlyList<FaceMeshLandmarkPoint> CalculateWeightedMean(
-        IReadOnlyList<WeightedIdentityGeometry> geometries)
-    {
-        var accumulators = new Dictionary<int, WeightedPointAccumulator>();
-        foreach (var geometry in geometries)
-        {
-            foreach (var point in geometry.Vertices)
-            {
-                if (!accumulators.TryGetValue(point.Index, out var accumulator))
-                {
-                    accumulator = new WeightedPointAccumulator(point.Index);
-                    accumulators[point.Index] = accumulator;
-                }
-
-                accumulator.Add(point, geometry.Weight);
-            }
-        }
-
-        return accumulators.Values
-            .OrderBy(static accumulator => accumulator.Index)
-            .Select(static accumulator => accumulator.ToPoint())
-            .ToList();
     }
 
     private static void AddIdentityGeometry(
@@ -363,14 +316,9 @@ public static class AvatarModelBuilder
             .ToList();
     }
 
-    private static bool HasIdentityGeometry(AvatarModelObservation observation)
+    private static bool HasIdentityGeometry(AvatarObservation observation)
     {
-        return HasCanonicalIdentityGeometry(observation) || observation.Vertices.Count > 0;
-    }
-
-    private static bool HasCanonicalIdentityGeometry(AvatarModelObservation observation)
-    {
-        return observation.CanonicalIdentityVertices.Count > 0;
+        return observation.CanonicalVertexCount >= 1_000;
     }
 
     private static List<WeightedCoefficientAccumulator> CreateCoefficientAccumulators(int count)
@@ -406,7 +354,7 @@ public static class AvatarModelBuilder
     }
 
     private static List<AvatarRegionConfidence> BuildRegionConfidence(
-        IReadOnlyList<AvatarModelObservation> observations,
+        IReadOnlyList<AvatarObservation> observations,
         double identityConfidencePercent)
     {
         var averageReconstruction = observations.Average(static observation => observation.ReconstructionConfidencePercent);
@@ -420,7 +368,7 @@ public static class AvatarModelBuilder
         ];
     }
 
-    private static List<AvatarExpressionBucket> BuildExpressionBuckets(IReadOnlyList<AvatarModelObservation> observations)
+    private static List<AvatarExpressionBucket> BuildExpressionBuckets(IReadOnlyList<AvatarObservation> observations)
     {
         var relaxed = observations
             .Where(observation => CalculateExpressionEnergy(observation.ExpressionCoefficients) < ExpressionHeavyThresholdPercent)
@@ -441,7 +389,7 @@ public static class AvatarModelBuilder
 
     private static AvatarExpressionBucket CreateBucket(
         string name,
-        IReadOnlyList<AvatarModelObservation> observations,
+        IReadOnlyList<AvatarObservation> observations,
         string meaning)
     {
         return new AvatarExpressionBucket
@@ -456,14 +404,14 @@ public static class AvatarModelBuilder
     }
 
     private static List<string> BuildFindings(
-        IReadOnlyList<AvatarModelObservation> observations,
+        IReadOnlyList<AvatarObservation> observations,
         AvatarIdentityModel identity,
         AvatarExpressionModel expression,
         AvatarPoseCoverage coverage)
     {
         var findings = new List<string>
         {
-            $"Stored {observations.Count} bounded 3DDFA observation(s); identity uses direct canonical expression-free geometry, legacy scans use rigid non-deforming alignment, and the expression model stays separate.",
+            $"Stored {observations.Count} ranked 3DDFA observation(s); identity uses direct canonical expression-free geometry and the expression model stays separate.",
             $"Current dense identity preview has {identity.DenseVertexCount:n0} averaged vertices and {identity.DenseTopologyEdgeCount:n0} topology edges."
         };
         if (observations.Count < 12)
@@ -494,7 +442,9 @@ public static class AvatarModelBuilder
         return findings;
     }
 
-    private static AvatarModelSampleSummary CreateSampleSummary(AvatarModelObservation observation)
+    private static AvatarModelSampleSummary CreateSampleSummary(
+        AvatarObservation observation,
+        string? sourceImagePath)
     {
         return new AvatarModelSampleSummary
         {
@@ -507,14 +457,17 @@ public static class AvatarModelBuilder
             ARotationAroundXDegrees = Round(observation.ARotationAroundXDegrees),
             BRotationAroundYDegrees = Round(observation.BRotationAroundYDegrees),
             CRotationAroundZDegrees = Round(observation.CRotationAroundZDegrees),
-            VertexCount = HasCanonicalIdentityGeometry(observation)
-                ? observation.CanonicalIdentityVertices.Count
-                : observation.Vertices.Count,
-            IdentityUse = observation.IdentityUse
+            VertexCount = observation.CanonicalVertexCount > 0
+                ? observation.CanonicalVertexCount
+                : observation.DenseVertexCount,
+            IdentityUse = observation.IdentityUse,
+            SourceImageUri = string.IsNullOrWhiteSpace(sourceImagePath)
+                ? ""
+                : new Uri(sourceImagePath).AbsoluteUri
         };
     }
 
-    private static bool IsFront(AvatarModelObservation observation)
+    private static bool IsFront(AvatarObservation observation)
     {
         return Math.Abs(observation.ARotationAroundXDegrees) < PoseBucketThresholdDegrees
             && Math.Abs(observation.BRotationAroundYDegrees) < PoseBucketThresholdDegrees
@@ -617,13 +570,8 @@ public static class AvatarModelBuilder
         }
     }
 
-    private sealed record WeightedIdentityGeometry(
-        AvatarModelObservation Observation,
-        double Weight,
-        IReadOnlyList<FaceMeshLandmarkPoint> Vertices);
-
     private sealed record WeightedObservation(
-        AvatarModelObservation Observation,
+        AvatarObservation Observation,
         double Weight);
 
     private readonly record struct Bounds(double MinX, double MaxX, double MinY, double MaxY, double MinZ, double MaxZ)
