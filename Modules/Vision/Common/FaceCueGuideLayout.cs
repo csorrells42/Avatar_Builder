@@ -1,67 +1,61 @@
-using AvatarBuilder.Modules.Vision.Common;
+using System;
 using System.Windows;
 
 namespace AvatarBuilder.Modules.Vision.Common;
 
 public sealed class FaceCueGuideLayout
 {
-    public FaceCueGuideLayout(double centerXPercent, double centerYPercent, double heightPercent)
-    {
-        CenterXPercent = Math.Clamp(centerXPercent, 20d, 80d);
-        CenterYPercent = Math.Clamp(centerYPercent, 20d, 80d);
-        HeightPercent = Math.Clamp(heightPercent, 25d, 90d);
-    }
+	public double CenterXPercent { get; }
 
-    public double CenterXPercent { get; }
+	public double CenterYPercent { get; }
 
-    public double CenterYPercent { get; }
+	public double HeightPercent { get; }
 
-    public double HeightPercent { get; }
+	public FaceCueRelativeRegion Face => new FaceCueRelativeRegion(0.0, 0.0, 1.0, 1.0);
 
-    public FaceCueRelativeRegion Face => new(0d, 0d, 1d, 1d);
+	public FaceCueRelativeRegion LeftEye => new FaceCueRelativeRegion(0.24, 0.24, 0.5, 0.45);
 
-    public FaceCueRelativeRegion LeftEye => new(0.24d, 0.24d, 0.50d, 0.45d);
+	public FaceCueRelativeRegion RightEye => new FaceCueRelativeRegion(0.5, 0.24, 0.76, 0.45);
 
-    public FaceCueRelativeRegion RightEye => new(0.50d, 0.24d, 0.76d, 0.45d);
+	public FaceCueRelativeRegion Eyes => new FaceCueRelativeRegion(0.24, 0.24, 0.76, 0.45);
 
-    public FaceCueRelativeRegion Eyes => new(0.24d, 0.24d, 0.76d, 0.45d);
+	public FaceCueRelativeRegion Jaw => new FaceCueRelativeRegion(0.25, 0.55, 0.75, 0.84);
 
-    public FaceCueRelativeRegion Jaw => new(0.25d, 0.55d, 0.75d, 0.84d);
+	public FaceCueRelativeRegion LeftJaw => new FaceCueRelativeRegion(0.25, 0.55, 0.5, 0.84);
 
-    public FaceCueRelativeRegion LeftJaw => new(0.25d, 0.55d, 0.50d, 0.84d);
+	public FaceCueRelativeRegion RightJaw => new FaceCueRelativeRegion(0.5, 0.55, 0.75, 0.84);
 
-    public FaceCueRelativeRegion RightJaw => new(0.50d, 0.55d, 0.75d, 0.84d);
+	public FaceCueGuideLayout(double centerXPercent, double centerYPercent, double heightPercent)
+	{
+		CenterXPercent = Math.Clamp(centerXPercent, 20.0, 80.0);
+		CenterYPercent = Math.Clamp(centerYPercent, 20.0, 80.0);
+		HeightPercent = Math.Clamp(heightPercent, 25.0, 90.0);
+	}
 
-    public Rect GetFaceBox()
-    {
-        var height = HeightPercent / 100d;
-        var width = height * 0.80d;
-        var centerX = CenterXPercent / 100d;
-        var centerY = CenterYPercent / 100d;
-        var left = Math.Clamp(centerX - width / 2d, 0d, 1d - width);
-        var top = Math.Clamp(centerY - height / 2d, 0d, 1d - height);
-        return new Rect(left, top, width, height);
-    }
+	public Rect GetFaceBox()
+	{
+		double num = HeightPercent / 100.0;
+		double num2 = num * 0.8;
+		double num3 = CenterXPercent / 100.0;
+		double num4 = CenterYPercent / 100.0;
+		double x = Math.Clamp(num3 - num2 / 2.0, 0.0, 1.0 - num2);
+		double y = Math.Clamp(num4 - num / 2.0, 0.0, 1.0 - num);
+		return new Rect(x, y, num2, num);
+	}
 
-    public Rect ToFrameRect(FaceCueRelativeRegion region)
-    {
-        var face = GetFaceBox();
-        return new Rect(
-            face.X + face.Width * region.Left,
-            face.Y + face.Height * region.Top,
-            face.Width * (region.Right - region.Left),
-            face.Height * (region.Bottom - region.Top));
-    }
+	public Rect ToFrameRect(FaceCueRelativeRegion region)
+	{
+		Rect faceBox = GetFaceBox();
+		return new Rect(faceBox.X + faceBox.Width * region.Left, faceBox.Y + faceBox.Height * region.Top, faceBox.Width * (region.Right - region.Left), faceBox.Height * (region.Bottom - region.Top));
+	}
 
-    public Int32Rect ToPixelRegion(int width, int height, FaceCueRelativeRegion region)
-    {
-        var rect = ToFrameRect(region);
-        var x = Math.Clamp((int)(width * rect.X), 0, width - 1);
-        var y = Math.Clamp((int)(height * rect.Y), 0, height - 1);
-        var regionWidth = Math.Clamp((int)(width * rect.Width), 1, width - x);
-        var regionHeight = Math.Clamp((int)(height * rect.Height), 1, height - y);
-        return new Int32Rect(x, y, regionWidth, regionHeight);
-    }
+	public Int32Rect ToPixelRegion(int width, int height, FaceCueRelativeRegion region)
+	{
+		Rect rect = ToFrameRect(region);
+		int num = Math.Clamp((int)((double)width * rect.X), 0, width - 1);
+		int num2 = Math.Clamp((int)((double)height * rect.Y), 0, height - 1);
+		int width2 = Math.Clamp((int)((double)width * rect.Width), 1, width - num);
+		int height2 = Math.Clamp((int)((double)height * rect.Height), 1, height - num2);
+		return new Int32Rect(num, num2, width2, height2);
+	}
 }
-
-public readonly record struct FaceCueRelativeRegion(double Left, double Top, double Right, double Bottom);

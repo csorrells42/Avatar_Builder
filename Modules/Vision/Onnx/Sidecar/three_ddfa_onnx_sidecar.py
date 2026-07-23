@@ -401,6 +401,7 @@ def handle_request(cv2, np, face_boxes, tddfa, calc_pose, parse_param, dense_tri
 
     dense = None
     canonical_identity = None
+    canonical_sparse = None
     dense_count = 0
     dense_ms = 0.0
     if mode in ("preview", "full"):
@@ -419,6 +420,11 @@ def handle_request(cv2, np, face_boxes, tddfa, calc_pose, parse_param, dense_tri
                     "alpha_exp": np.zeros_like(alpha_expression, dtype=np.float32),
                 },
             )[0]
+            canonical_sparse = (
+                tddfa.u_base
+                + tddfa.w_shp_base @ alpha_shape
+                + tddfa.w_exp_base @ np.zeros_like(alpha_expression, dtype=np.float32)
+            ).reshape(3, -1, order="F")
     stride = int(request.get("denseSampleStride", 24) or 24)
     include_topology = bool(request.get("includeTopology", True))
     return_dense_vertices = mode == "full"
@@ -478,6 +484,7 @@ def handle_request(cv2, np, face_boxes, tddfa, calc_pose, parse_param, dense_tri
         "denseEdges": dense_edges,
         "denseVertexCoordinates": dense_vertex_coordinates,
         "canonicalIdentityCoordinates": canonical_identity_coordinates,
+        "canonicalSparseLandmarks": vertices_to_json(canonical_sparse, 1),
         "denseEdgeIndices": dense_edge_indices,
         "sparseLandmarks": vertices_to_json(sparse, 1),
         "cameraMatrixCoefficients": coefficients["camera"],

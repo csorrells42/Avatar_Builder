@@ -1,196 +1,230 @@
+using System;
+using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Text.Json;
 
 namespace AvatarBuilder.Modules.Vision.Onnx;
 
 public sealed class ThreeDdfaOnnxModelInfo
 {
-    private const string RelativeModelDirectory = "dependencies/vision/3ddfa-onnx";
-    private const string DefaultManifestFileName = "three_ddfa_onnx_manifest.json";
-    private const string DefaultPrimaryModelFileName = "3DDFA_V2/TDDFA_ONNX.py";
-    private static readonly JsonSerializerOptions ManifestJsonOptions = new()
-    {
-        PropertyNameCaseInsensitive = true
-    };
+	private sealed class Manifest
+	{
+		public string Backend { get; init; } = "";
 
-    public string ModelDirectory { get; init; } = "";
+		public string BackendId { get; init; } = "";
 
-    public string ManifestPath { get; init; } = "";
+		public string PrimaryModelFile { get; init; } = "";
 
-    public string PrimaryModelPath { get; init; } = "";
+		public IReadOnlyList<string> ModelFiles { get; init; } = Array.Empty<string>();
 
-    public string Backend { get; init; } = "3DDFA/ONNX face reconstruction lane";
+		public IReadOnlyList<IReadOnlyList<string>> AlternativeModelFileGroups { get; init; } = Array.Empty<IReadOnlyList<string>>();
 
-    public string BackendId { get; init; } = "";
+		public string SourceRepository { get; init; } = "";
 
-    public string SourceRepository { get; init; } = "";
+		public string Runtime { get; init; } = "";
 
-    public string Runtime { get; init; } = "";
+		public IReadOnlyList<string> RuntimeFiles { get; init; } = Array.Empty<string>();
 
-    public IReadOnlyList<string> ModelFiles { get; init; } = [];
+		public IReadOnlyList<string> ExpectedOutputs { get; init; } = Array.Empty<string>();
 
-    public IReadOnlyList<IReadOnlyList<string>> AlternativeModelFileGroups { get; init; } = [];
+		public string InferenceImplementationStatus { get; init; } = "";
 
-    public IReadOnlyList<string> RuntimeFiles { get; init; } = [];
+		public string Status { get; init; } = "";
 
-    public IReadOnlyList<string> ExpectedOutputs { get; init; } = [];
+		public string Notes { get; init; } = "";
+	}
 
-    public string InferenceImplementationStatus { get; init; } = "";
+	private const string RelativeModelDirectory = "dependencies/vision/3ddfa-onnx";
 
-    public string ManifestStatus { get; init; } = "";
+	private const string DefaultManifestFileName = "three_ddfa_onnx_manifest.json";
 
-    public string Notes { get; init; } = "";
+	private const string DefaultPrimaryModelFileName = "3DDFA_V2/TDDFA_ONNX.py";
 
-    public bool ManifestExists => File.Exists(ManifestPath);
+	private static readonly JsonSerializerOptions ManifestJsonOptions = new JsonSerializerOptions
+	{
+		PropertyNameCaseInsensitive = true
+	};
 
-    public bool PrimaryModelExists => File.Exists(PrimaryModelPath);
+	public string ModelDirectory { get; init; } = "";
 
-    public bool ModelFilesExist => ModelFiles.Count > 0
-        && ModelFiles.All(file => File.Exists(BuildModelPath(file)))
-        && AlternativeModelFileGroups.All(group => group.Any(file => File.Exists(BuildModelPath(file))));
+	public string ManifestPath { get; init; } = "";
 
-    public bool RuntimeFilesExist => RuntimeFiles.Count == 0
-        || RuntimeFiles.All(file => File.Exists(BuildModelPath(file)));
+	public string PrimaryModelPath { get; init; } = "";
 
-    public bool IsReady => ManifestExists
-        && (ModelFiles.Count > 0 ? ModelFilesExist : PrimaryModelExists);
+	public string Backend { get; init; } = "3DDFA/ONNX face reconstruction lane";
 
-    public bool CanRunInference => IsReady
-        && RuntimeFilesExist
-        && string.Equals(InferenceImplementationStatus, "ready", StringComparison.OrdinalIgnoreCase);
+	public string BackendId { get; init; } = "";
 
-    public string Status
-    {
-        get
-        {
-            if (!ManifestExists)
-            {
-                return "3DDFA/ONNX manifest missing";
-            }
+	public string SourceRepository { get; init; } = "";
 
-            if (!IsReady)
-            {
-                return "3DDFA/ONNX model bundle missing";
-            }
+	public string Runtime { get; init; } = "";
 
-            if (!RuntimeFilesExist)
-            {
-                return "3DDFA/ONNX runtime files missing";
-            }
+	public IReadOnlyList<string> ModelFiles { get; init; } = Array.Empty<string>();
 
-            if (!CanRunInference)
-            {
-                return string.IsNullOrWhiteSpace(InferenceImplementationStatus)
-                    ? "3DDFA/ONNX model present; adapter not ready"
-                    : $"3DDFA/ONNX model present; adapter {FormatStatus(InferenceImplementationStatus)}";
-            }
+	public IReadOnlyList<IReadOnlyList<string>> AlternativeModelFileGroups { get; init; } = Array.Empty<IReadOnlyList<string>>();
 
-            return "3DDFA/ONNX reconstruction lane ready";
-        }
-    }
+	public IReadOnlyList<string> RuntimeFiles { get; init; } = Array.Empty<string>();
 
-    public static ThreeDdfaOnnxModelInfo Load()
-    {
-        var directory = Path.Combine(
-            AppContext.BaseDirectory,
-            RelativeModelDirectory.Replace('/', Path.DirectorySeparatorChar));
-        var manifestPath = Path.Combine(directory, DefaultManifestFileName);
-        var primaryModelPath = BuildModelPath(directory, DefaultPrimaryModelFileName);
-        if (!File.Exists(manifestPath))
-        {
-            return new ThreeDdfaOnnxModelInfo
-            {
-                ModelDirectory = directory,
-                ManifestPath = manifestPath,
-                PrimaryModelPath = primaryModelPath,
-                ModelFiles = [DefaultPrimaryModelFileName]
-            };
-        }
+	public IReadOnlyList<string> ExpectedOutputs { get; init; } = Array.Empty<string>();
 
-        try
-        {
-            var manifest = JsonSerializer.Deserialize<Manifest>(
-                File.ReadAllText(manifestPath),
-                ManifestJsonOptions);
-            var modelFiles = manifest?.ModelFiles?.Where(static file => !string.IsNullOrWhiteSpace(file)).ToList() ?? [];
-            var primaryModel = string.IsNullOrWhiteSpace(manifest?.PrimaryModelFile)
-                ? modelFiles.FirstOrDefault() ?? DefaultPrimaryModelFileName
-                : manifest.PrimaryModelFile;
-            if (modelFiles.Count == 0)
-            {
-                modelFiles.Add(primaryModel);
-            }
+	public string InferenceImplementationStatus { get; init; } = "";
 
-            return new ThreeDdfaOnnxModelInfo
-            {
-                ModelDirectory = directory,
-                ManifestPath = manifestPath,
-                PrimaryModelPath = BuildModelPath(directory, primaryModel),
-                Backend = string.IsNullOrWhiteSpace(manifest?.Backend) ? "3DDFA/ONNX face reconstruction lane" : manifest.Backend,
-                BackendId = manifest?.BackendId ?? "",
-                SourceRepository = manifest?.SourceRepository ?? "",
-                Runtime = manifest?.Runtime ?? "",
-                ModelFiles = modelFiles,
-                AlternativeModelFileGroups = manifest?.AlternativeModelFileGroups ?? [],
-                RuntimeFiles = manifest?.RuntimeFiles ?? [],
-                ExpectedOutputs = manifest?.ExpectedOutputs ?? [],
-                InferenceImplementationStatus = manifest?.InferenceImplementationStatus ?? "",
-                ManifestStatus = manifest?.Status ?? "",
-                Notes = manifest?.Notes ?? ""
-            };
-        }
-        catch (Exception ex)
-        {
-            return new ThreeDdfaOnnxModelInfo
-            {
-                ModelDirectory = directory,
-                ManifestPath = manifestPath,
-                PrimaryModelPath = primaryModelPath,
-                ManifestStatus = $"manifest unreadable: {ex.Message}",
-                ModelFiles = [DefaultPrimaryModelFileName]
-            };
-        }
-    }
+	public string ManifestStatus { get; init; } = "";
 
-    private static string FormatStatus(string status)
-    {
-        return status.Replace('_', ' ').Trim();
-    }
+	public string Notes { get; init; } = "";
 
-    private string BuildModelPath(string relativePath)
-    {
-        return BuildModelPath(ModelDirectory, relativePath);
-    }
+	public bool ManifestExists => File.Exists(ManifestPath);
 
-    private static string BuildModelPath(string directory, string relativePath)
-    {
-        return Path.Combine(directory, relativePath.Replace('/', Path.DirectorySeparatorChar));
-    }
+	public bool PrimaryModelExists => File.Exists(PrimaryModelPath);
 
-    private sealed class Manifest
-    {
-        public string Backend { get; init; } = "";
+	public bool ModelFilesExist
+	{
+		get
+		{
+			if (ModelFiles.Count > 0 && ModelFiles.All((string file) => File.Exists(BuildModelPath(file))))
+			{
+				return AlternativeModelFileGroups.All((IReadOnlyList<string> group) => group.Any((string file) => File.Exists(BuildModelPath(file))));
+			}
+			return false;
+		}
+	}
 
-        public string BackendId { get; init; } = "";
+	public bool RuntimeFilesExist
+	{
+		get
+		{
+			if (RuntimeFiles.Count != 0)
+			{
+				return RuntimeFiles.All((string file) => File.Exists(BuildModelPath(file)));
+			}
+			return true;
+		}
+	}
 
-        public string PrimaryModelFile { get; init; } = "";
+	public bool IsReady
+	{
+		get
+		{
+			if (ManifestExists)
+			{
+				if (ModelFiles.Count <= 0)
+				{
+					return PrimaryModelExists;
+				}
+				return ModelFilesExist;
+			}
+			return false;
+		}
+	}
 
-        public IReadOnlyList<string> ModelFiles { get; init; } = [];
+	public bool CanRunInference
+	{
+		get
+		{
+			if (IsReady && RuntimeFilesExist)
+			{
+				return string.Equals(InferenceImplementationStatus, "ready", StringComparison.OrdinalIgnoreCase);
+			}
+			return false;
+		}
+	}
 
-        public IReadOnlyList<IReadOnlyList<string>> AlternativeModelFileGroups { get; init; } = [];
+	public string Status
+	{
+		get
+		{
+			if (!ManifestExists)
+			{
+				return "3DDFA/ONNX manifest missing";
+			}
+			if (!IsReady)
+			{
+				return "3DDFA/ONNX model bundle missing";
+			}
+			if (!RuntimeFilesExist)
+			{
+				return "3DDFA/ONNX runtime files missing";
+			}
+			if (!CanRunInference)
+			{
+				if (!string.IsNullOrWhiteSpace(InferenceImplementationStatus))
+				{
+					return "3DDFA/ONNX model present; adapter " + FormatStatus(InferenceImplementationStatus);
+				}
+				return "3DDFA/ONNX model present; adapter not ready";
+			}
+			return "3DDFA/ONNX reconstruction lane ready";
+		}
+	}
 
-        public string SourceRepository { get; init; } = "";
+	public static ThreeDdfaOnnxModelInfo Load()
+	{
+		string text = Path.Combine(AppContext.BaseDirectory, "dependencies/vision/3ddfa-onnx".Replace('/', Path.DirectorySeparatorChar));
+		string text2 = Path.Combine(text, "three_ddfa_onnx_manifest.json");
+		string primaryModelPath = BuildModelPath(text, "3DDFA_V2/TDDFA_ONNX.py");
+		if (!File.Exists(text2))
+		{
+			return new ThreeDdfaOnnxModelInfo
+			{
+				ModelDirectory = text,
+				ManifestPath = text2,
+				PrimaryModelPath = primaryModelPath,
+				ModelFiles = new global::_003C_003Ez__ReadOnlySingleElementList<string>("3DDFA_V2/TDDFA_ONNX.py")
+			};
+		}
+		try
+		{
+			Manifest manifest = JsonSerializer.Deserialize<Manifest>(File.ReadAllText(text2), ManifestJsonOptions);
+			List<string> list = manifest?.ModelFiles?.Where((string file) => !string.IsNullOrWhiteSpace(file)).ToList() ?? new List<string>();
+			string text3 = (string.IsNullOrWhiteSpace(manifest?.PrimaryModelFile) ? (list.FirstOrDefault() ?? "3DDFA_V2/TDDFA_ONNX.py") : manifest.PrimaryModelFile);
+			if (list.Count == 0)
+			{
+				list.Add(text3);
+			}
+			return new ThreeDdfaOnnxModelInfo
+			{
+				ModelDirectory = text,
+				ManifestPath = text2,
+				PrimaryModelPath = BuildModelPath(text, text3),
+				Backend = (string.IsNullOrWhiteSpace(manifest?.Backend) ? "3DDFA/ONNX face reconstruction lane" : manifest.Backend),
+				BackendId = (manifest?.BackendId ?? ""),
+				SourceRepository = (manifest?.SourceRepository ?? ""),
+				Runtime = (manifest?.Runtime ?? ""),
+				ModelFiles = list,
+				AlternativeModelFileGroups = (manifest?.AlternativeModelFileGroups ?? Array.Empty<IReadOnlyList<string>>()),
+				RuntimeFiles = (manifest?.RuntimeFiles ?? Array.Empty<string>()),
+				ExpectedOutputs = (manifest?.ExpectedOutputs ?? Array.Empty<string>()),
+				InferenceImplementationStatus = (manifest?.InferenceImplementationStatus ?? ""),
+				ManifestStatus = (manifest?.Status ?? ""),
+				Notes = (manifest?.Notes ?? "")
+			};
+		}
+		catch (Exception ex)
+		{
+			return new ThreeDdfaOnnxModelInfo
+			{
+				ModelDirectory = text,
+				ManifestPath = text2,
+				PrimaryModelPath = primaryModelPath,
+				ManifestStatus = "manifest unreadable: " + ex.Message,
+				ModelFiles = new global::_003C_003Ez__ReadOnlySingleElementList<string>("3DDFA_V2/TDDFA_ONNX.py")
+			};
+		}
+	}
 
-        public string Runtime { get; init; } = "";
+	private static string FormatStatus(string status)
+	{
+		return status.Replace('_', ' ').Trim();
+	}
 
-        public IReadOnlyList<string> RuntimeFiles { get; init; } = [];
+	private string BuildModelPath(string relativePath)
+	{
+		return BuildModelPath(ModelDirectory, relativePath);
+	}
 
-        public IReadOnlyList<string> ExpectedOutputs { get; init; } = [];
-
-        public string InferenceImplementationStatus { get; init; } = "";
-
-        public string Status { get; init; } = "";
-
-        public string Notes { get; init; } = "";
-    }
+	private static string BuildModelPath(string directory, string relativePath)
+	{
+		return Path.Combine(directory, relativePath.Replace('/', Path.DirectorySeparatorChar));
+	}
 }

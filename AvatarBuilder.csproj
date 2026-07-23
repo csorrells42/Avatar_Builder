@@ -3,6 +3,9 @@
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
     <TargetFramework>net10.0-windows</TargetFramework>
+    <LangVersion>preview</LangVersion>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <SelfContained>true</SelfContained>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <UseWPF>true</UseWPF>
@@ -18,25 +21,19 @@
 
   <ItemGroup>
     <Compile Remove="tools\**\*.cs" />
-    <Content Include="dependencies\**\*" Exclude="dependencies\vision\3ddfa-onnx\3DDFA_V2\.git\**\*;dependencies\vision\3ddfa-onnx\3DDFA_V2\.github\**\*;dependencies\vision\3ddfa-onnx\3DDFA_V2\docs\**\*;dependencies\vision\3ddfa-onnx\3DDFA_V2\examples\**\*;dependencies\vision\3ddfa-onnx\3DDFA_V2\**\__pycache__\**\*;dependencies\vision\3ddfa-onnx\3DDFA_V2\demo*.py;dependencies\vision\3ddfa-onnx\3DDFA_V2\demo*.ipynb;dependencies\vision\3ddfa-onnx\3DDFA_V2\gradiodemo.py;dependencies\vision\3ddfa-onnx\3DDFA_V2\latency.py;dependencies\vision\3ddfa-onnx\3DDFA_V2\speed_cpu.py">
+    <Content Include="dependencies\**\*">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
     </Content>
-    <Content Remove="dependencies\vision\3ddfa-onnx\3DDFA_V2\.git\**\*" />
-    <Content Remove="dependencies\vision\3ddfa-onnx\3DDFA_V2\.github\**\*" />
-    <Content Remove="dependencies\vision\3ddfa-onnx\3DDFA_V2\docs\**\*" />
-    <Content Remove="dependencies\vision\3ddfa-onnx\3DDFA_V2\examples\**\*" />
-    <Content Remove="dependencies\vision\3ddfa-onnx\3DDFA_V2\**\__pycache__\**\*" />
-    <Content Remove="dependencies\vision\3ddfa-onnx\3DDFA_V2\demo*.py" />
-    <Content Remove="dependencies\vision\3ddfa-onnx\3DDFA_V2\demo*.ipynb" />
-    <Content Remove="dependencies\vision\3ddfa-onnx\3DDFA_V2\gradiodemo.py" />
-    <Content Remove="dependencies\vision\3ddfa-onnx\3DDFA_V2\latency.py" />
-    <Content Remove="dependencies\vision\3ddfa-onnx\3DDFA_V2\speed_cpu.py" />
     <Content Include="Modules\Vision\MediaPipe\Sidecar\**\*">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
     </Content>
     <Content Include="Modules\Vision\Onnx\Sidecar\**\*">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </Content>
+    <Content Include="Modules\Vision\Deca\Sidecar\**\*">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
     </Content>

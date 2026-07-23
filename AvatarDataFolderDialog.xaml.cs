@@ -1,83 +1,78 @@
+using System;
 using System.IO;
 using System.Windows;
+using System.Windows.Markup;
 using AvatarBuilder.Modules.Infrastructure;
 using Microsoft.Win32;
 
 namespace AvatarBuilder;
 
-public partial class AvatarDataFolderDialog : Window
+public partial class AvatarDataFolderDialog : Window, IComponentConnector
 {
-    public AvatarDataFolderDialog(string initialFolder)
-    {
-        InitializeComponent();
-        SelectedFolder = initialFolder;
-        UpdateFolderDisplay();
-    }
+	public string SelectedFolder { get; private set; }
 
-    public string SelectedFolder { get; private set; }
+	public AvatarDataFolderDialog(string initialFolder)
+	{
+		InitializeComponent();
+		SelectedFolder = initialFolder;
+		UpdateFolderDisplay();
+	}
 
-    private void WindowLoaded(object sender, RoutedEventArgs e)
-    {
-        DarkWindowFrame.Apply(this);
-    }
+	private void WindowLoaded(object sender, RoutedEventArgs e)
+	{
+		DarkWindowFrame.Apply(this);
+	}
 
-    private void ChooseFolderClicked(object sender, RoutedEventArgs e)
-    {
-        var dialog = new OpenFolderDialog
-        {
-            Title = "Choose avatar data folder",
-            InitialDirectory = Directory.Exists(SelectedFolder) ? SelectedFolder : AppContext.BaseDirectory,
-            Multiselect = false
-        };
+	private void ChooseFolderClicked(object sender, RoutedEventArgs e)
+	{
+		OpenFolderDialog openFolderDialog = new OpenFolderDialog
+		{
+			Title = "Choose avatar data folder",
+			InitialDirectory = (Directory.Exists(SelectedFolder) ? SelectedFolder : AppContext.BaseDirectory),
+			Multiselect = false
+		};
+		if (openFolderDialog.ShowDialog(this) == true)
+		{
+			SelectedFolder = openFolderDialog.FolderName;
+			UpdateFolderDisplay();
+		}
+	}
 
-        if (dialog.ShowDialog(this) != true)
-        {
-            return;
-        }
+	private void OkClicked(object sender, RoutedEventArgs e)
+	{
+		base.DialogResult = true;
+	}
 
-        SelectedFolder = dialog.FolderName;
-        UpdateFolderDisplay();
-    }
+	private void UpdateFolderDisplay()
+	{
+		FolderPathTextBox.Text = SelectedFolder;
+		FolderPathTextBox.CaretIndex = FolderPathTextBox.Text.Length;
+		StorageCapacityText.Text = GetStorageCapacityLabel(SelectedFolder);
+	}
 
-    private void OkClicked(object sender, RoutedEventArgs e)
-    {
-        DialogResult = true;
-    }
-
-    private void UpdateFolderDisplay()
-    {
-        FolderPathTextBox.Text = SelectedFolder;
-        FolderPathTextBox.CaretIndex = FolderPathTextBox.Text.Length;
-        StorageCapacityText.Text = GetStorageCapacityLabel(SelectedFolder);
-    }
-
-    private static string GetStorageCapacityLabel(string folder)
-    {
-        try
-        {
-            var root = Path.GetPathRoot(Path.GetFullPath(folder));
-            if (string.IsNullOrWhiteSpace(root))
-            {
-                return "Storage capacity unavailable: unknown drive.";
-            }
-
-            var drive = new DriveInfo(root);
-            if (!drive.IsReady)
-            {
-                return $"Storage capacity unavailable: {root} is not ready.";
-            }
-
-            var freeGb = drive.AvailableFreeSpace / 1024d / 1024d / 1024d;
-            var totalGb = drive.TotalSize / 1024d / 1024d / 1024d;
-            var windowsRoot = Path.GetPathRoot(Environment.GetFolderPath(Environment.SpecialFolder.Windows));
-            var driveType = root.Equals(windowsRoot, StringComparison.OrdinalIgnoreCase)
-                ? "Windows drive"
-                : "off-system drive";
-            return $"Storage: {drive.Name} {freeGb:0.0} GB free of {totalGb:0.0} GB ({driveType}).";
-        }
-        catch (Exception ex)
-        {
-            return $"Storage capacity unavailable: {ex.Message}";
-        }
-    }
+	private static string GetStorageCapacityLabel(string folder)
+	{
+		try
+		{
+			string pathRoot = Path.GetPathRoot(Path.GetFullPath(folder));
+			if (string.IsNullOrWhiteSpace(pathRoot))
+			{
+				return "Storage capacity unavailable: unknown drive.";
+			}
+			DriveInfo driveInfo = new DriveInfo(pathRoot);
+			if (!driveInfo.IsReady)
+			{
+				return "Storage capacity unavailable: " + pathRoot + " is not ready.";
+			}
+			double value = (double)driveInfo.AvailableFreeSpace / 1024.0 / 1024.0 / 1024.0;
+			double value2 = (double)driveInfo.TotalSize / 1024.0 / 1024.0 / 1024.0;
+			string pathRoot2 = Path.GetPathRoot(Environment.GetFolderPath(Environment.SpecialFolder.Windows));
+			string value3 = (pathRoot.Equals(pathRoot2, StringComparison.OrdinalIgnoreCase) ? "Windows drive" : "off-system drive");
+			return $"Storage: {driveInfo.Name} {value:0.0} GB free of {value2:0.0} GB ({value3}).";
+		}
+		catch (Exception ex)
+		{
+			return "Storage capacity unavailable: " + ex.Message;
+		}
+	}
 }

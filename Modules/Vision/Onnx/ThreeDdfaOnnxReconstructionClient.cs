@@ -1,6 +1,10 @@
+using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Text.Json;
+using System.Threading;
+using System.Threading.Tasks;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using AvatarBuilder.Modules.Vision.Diagnostics;
@@ -9,321 +13,311 @@ namespace AvatarBuilder.Modules.Vision.Onnx;
 
 public sealed class ThreeDdfaOnnxReconstructionClient : IDisposable
 {
-    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
-    private readonly ThreeDdfaOnnxSidecarEnvironment _environment;
-    private readonly string _clientSessionId = Guid.NewGuid().ToString("N")[..12];
-    private readonly object _sync = new();
-    private readonly TimeSpan _timeout;
-    private Process? _process;
-    private IReadOnlyList<ThreeDdfaOnnxSidecarEdge> _denseTopology = [];
-    private string _lastStandardError = "";
-    private bool _firstResponseAfterStart;
-    private int _requestNumber;
-    private int _disposed;
+	private static readonly JsonSerializerOptions JsonOptions = new JsonSerializerOptions(JsonSerializerDefaults.Web);
 
-    public ThreeDdfaOnnxReconstructionClient(ThreeDdfaOnnxSidecarEnvironment environment)
-    {
-        _environment = environment;
-        _timeout = TimeSpan.FromMilliseconds(ReadTimeoutMilliseconds());
-    }
+	private readonly ThreeDdfaOnnxSidecarEnvironment _environment;
 
-    public string Status { get; private set; } = "";
+	private readonly string _clientSessionId = Guid.NewGuid().ToString("N").Substring(0, 12);
 
-    public ThreeDdfaOnnxSidecarResponse Reconstruct(
-        BitmapSource bitmap,
-        DateTime capturedAtUtc,
-        ThreeDdfaOnnxSidecarFaceBox? faceBox,
-        ThreeDdfaOnnxRequestMode mode = ThreeDdfaOnnxRequestMode.Tracking,
-        int denseSampleStride = 24)
-    {
-        lock (_sync)
-        {
-            if (Volatile.Read(ref _disposed) != 0)
-            {
-                return Error("3DDFA/ONNX sidecar client is stopped.");
-            }
+	private readonly object _sync = new object();
 
-            if (!_environment.IsReady)
-            {
-                return Error(_environment.Status);
-            }
+	private readonly TimeSpan _timeout;
 
-            if (!EnsureProcess())
-            {
-                return Error(Status);
-            }
+	private Process? _process;
 
-            try
-            {
-                var totalStopwatch = Stopwatch.StartNew();
-                var prepareStopwatch = Stopwatch.StartNew();
-                var jpeg = EncodeJpeg(bitmap);
-                var request = new ThreeDdfaOnnxSidecarRequest
-                {
-                    RequestId = $"{_clientSessionId}-{Interlocked.Increment(ref _requestNumber):D6}",
-                    CapturedAtUtc = capturedAtUtc.ToString("O"),
-                    FaceBox = faceBox,
-                    Mode = ToProtocolMode(mode),
-                    DenseSampleStride = Math.Clamp(denseSampleStride, 1, 200),
-                    IncludeTopology = mode == ThreeDdfaOnnxRequestMode.Full && _denseTopology.Count == 0,
-                    ImageBase64 = Convert.ToBase64String(jpeg)
-                };
-                var line = JsonSerializer.Serialize(request, JsonOptions);
-                prepareStopwatch.Stop();
-                var roundTripStopwatch = Stopwatch.StartNew();
-                _process!.StandardInput.WriteLine(line);
-                _process.StandardInput.Flush();
+	private IReadOnlyList<ThreeDdfaOnnxSidecarEdge> _denseTopology = Array.Empty<ThreeDdfaOnnxSidecarEdge>();
 
-                var responseTask = _process.StandardOutput.ReadLineAsync();
-                var responseTimeout = mode == ThreeDdfaOnnxRequestMode.Full
-                    ? _firstResponseAfterStart
-                        ? TimeSpan.FromSeconds(60)
-                        : TimeSpan.FromSeconds(30)
-                    : _firstResponseAfterStart
-                        ? TimeSpan.FromMilliseconds(ReadStartupTimeoutMilliseconds())
-                        : _timeout;
-                if (!responseTask.Wait(responseTimeout))
-                {
-                    RestartAfterFailure("3DDFA/ONNX sidecar timed out waiting for a reconstruction response.");
-                    return Error(Status);
-                }
-                _firstResponseAfterStart = false;
+	private string _lastStandardError = "";
 
-                var responseLine = responseTask.Result;
-                roundTripStopwatch.Stop();
-                if (string.IsNullOrWhiteSpace(responseLine))
-                {
-                    RestartAfterFailure("3DDFA/ONNX sidecar closed its output stream.");
-                    return Error(Status);
-                }
+	private bool _firstResponseAfterStart;
 
-                var parseStopwatch = Stopwatch.StartNew();
-                var response = JsonSerializer.Deserialize<ThreeDdfaOnnxSidecarResponse>(responseLine, JsonOptions);
-                parseStopwatch.Stop();
-                if (response is null)
-                {
-                    return Error("3DDFA/ONNX sidecar returned an empty response.");
-                }
+	private int _requestNumber;
 
-                response.ExpandCompactMeshData();
-                if (response.DenseEdges.Count > 0)
-                {
-                    _denseTopology = response.DenseEdges;
-                }
-                else if (mode == ThreeDdfaOnnxRequestMode.Full && _denseTopology.Count > 0)
-                {
-                    response.DenseEdges = _denseTopology;
-                }
+	private int _disposed;
 
-                if (!string.Equals(response.RequestId, request.RequestId, StringComparison.Ordinal))
-                {
-                    return Error($"3DDFA/ONNX sidecar response id mismatch: expected {request.RequestId}, got {response.RequestId}.");
-                }
+	public string Status { get; private set; } = "";
 
-                Status = response.Status;
-                totalStopwatch.Stop();
-                response.Diagnostics = new VisionPipelineDiagnostics
-                {
-                    CapturedAtUtc = capturedAtUtc,
-                    Backend = "3DDFA-V2 ONNX",
-                    Mode = request.Mode,
-                    SourceWidth = bitmap.PixelWidth,
-                    SourceHeight = bitmap.PixelHeight,
-                    InputWidth = bitmap.PixelWidth,
-                    InputHeight = bitmap.PixelHeight,
-                    EncodedPayloadBytes = jpeg.Length,
-                    HasFace = response.HasFace,
-                    ClientPrepareMilliseconds = prepareStopwatch.Elapsed.TotalMilliseconds,
-                    SidecarRoundTripMilliseconds = roundTripStopwatch.Elapsed.TotalMilliseconds,
-                    ClientParseMilliseconds = parseStopwatch.Elapsed.TotalMilliseconds,
-                    EndToEndMilliseconds = totalStopwatch.Elapsed.TotalMilliseconds,
-                    SidecarStagesMilliseconds = response.TimingsMilliseconds,
-                    Status = response.Status
-                };
-                return response;
-            }
-            catch (Exception ex)
-            {
-                var sidecarError = Volatile.Read(ref _lastStandardError);
-                var detail = string.IsNullOrWhiteSpace(sidecarError)
-                    ? ex.Message
-                    : $"{ex.Message}. Sidecar: {sidecarError}";
-                RestartAfterFailure($"3DDFA/ONNX sidecar call failed: {detail}");
-                return Error(Status);
-            }
-        }
-    }
+	public ThreeDdfaOnnxReconstructionClient(ThreeDdfaOnnxSidecarEnvironment environment)
+	{
+		_environment = environment;
+		_timeout = TimeSpan.FromMilliseconds(ReadTimeoutMilliseconds());
+	}
 
-    public void Dispose()
-    {
-        if (Interlocked.Exchange(ref _disposed, 1) != 0)
-        {
-            return;
-        }
+	public ThreeDdfaOnnxSidecarResponse Reconstruct(BitmapSource bitmap, DateTime capturedAtUtc, ThreeDdfaOnnxSidecarFaceBox? faceBox, ThreeDdfaOnnxRequestMode mode = ThreeDdfaOnnxRequestMode.Tracking, int denseSampleStride = 24)
+	{
+		lock (_sync)
+		{
+			if (Volatile.Read(in _disposed) != 0)
+			{
+				return Error("3DDFA/ONNX sidecar client is stopped.");
+			}
+			if (!_environment.IsReady)
+			{
+				return Error(_environment.Status);
+			}
+			if (!EnsureProcess())
+			{
+				return Error(Status);
+			}
+			try
+			{
+				Stopwatch stopwatch = Stopwatch.StartNew();
+				Stopwatch stopwatch2 = Stopwatch.StartNew();
+				byte[] array = EncodeJpeg(bitmap);
+				ThreeDdfaOnnxSidecarRequest threeDdfaOnnxSidecarRequest = new ThreeDdfaOnnxSidecarRequest
+				{
+					RequestId = $"{_clientSessionId}-{Interlocked.Increment(ref _requestNumber):D6}",
+					CapturedAtUtc = capturedAtUtc.ToString("O"),
+					FaceBox = faceBox,
+					Mode = ToProtocolMode(mode),
+					DenseSampleStride = Math.Clamp(denseSampleStride, 1, 200),
+					IncludeTopology = (mode == ThreeDdfaOnnxRequestMode.Full && _denseTopology.Count == 0),
+					ImageBase64 = Convert.ToBase64String(array)
+				};
+				string value = JsonSerializer.Serialize(threeDdfaOnnxSidecarRequest, JsonOptions);
+				stopwatch2.Stop();
+				Stopwatch stopwatch3 = Stopwatch.StartNew();
+				_process.StandardInput.WriteLine(value);
+				_process.StandardInput.Flush();
+				Task<string> task = _process.StandardOutput.ReadLineAsync();
+				TimeSpan timeout = ((mode != ThreeDdfaOnnxRequestMode.Full) ? (_firstResponseAfterStart ? TimeSpan.FromMilliseconds(ReadStartupTimeoutMilliseconds()) : _timeout) : (_firstResponseAfterStart ? TimeSpan.FromSeconds(60L) : TimeSpan.FromSeconds(30L)));
+				if (!task.Wait(timeout))
+				{
+					RestartAfterFailure("3DDFA/ONNX sidecar timed out waiting for a reconstruction response.");
+					return Error(Status);
+				}
+				_firstResponseAfterStart = false;
+				string result = task.Result;
+				stopwatch3.Stop();
+				if (string.IsNullOrWhiteSpace(result))
+				{
+					RestartAfterFailure("3DDFA/ONNX sidecar closed its output stream.");
+					return Error(Status);
+				}
+				Stopwatch stopwatch4 = Stopwatch.StartNew();
+				ThreeDdfaOnnxSidecarResponse threeDdfaOnnxSidecarResponse = JsonSerializer.Deserialize<ThreeDdfaOnnxSidecarResponse>(result, JsonOptions);
+				stopwatch4.Stop();
+				if (threeDdfaOnnxSidecarResponse == null)
+				{
+					return Error("3DDFA/ONNX sidecar returned an empty response.");
+				}
+				threeDdfaOnnxSidecarResponse.ExpandCompactMeshData();
+				if (threeDdfaOnnxSidecarResponse.DenseEdges.Count > 0)
+				{
+					_denseTopology = threeDdfaOnnxSidecarResponse.DenseEdges;
+				}
+				else if (mode == ThreeDdfaOnnxRequestMode.Full && _denseTopology.Count > 0)
+				{
+					threeDdfaOnnxSidecarResponse.DenseEdges = _denseTopology;
+				}
+				if (!string.Equals(threeDdfaOnnxSidecarResponse.RequestId, threeDdfaOnnxSidecarRequest.RequestId, StringComparison.Ordinal))
+				{
+					return Error($"3DDFA/ONNX sidecar response id mismatch: expected {threeDdfaOnnxSidecarRequest.RequestId}, got {threeDdfaOnnxSidecarResponse.RequestId}.");
+				}
+				Status = threeDdfaOnnxSidecarResponse.Status;
+				stopwatch.Stop();
+				threeDdfaOnnxSidecarResponse.Diagnostics = new VisionPipelineDiagnostics
+				{
+					CapturedAtUtc = capturedAtUtc,
+					Backend = "3DDFA-V2 ONNX",
+					Mode = threeDdfaOnnxSidecarRequest.Mode,
+					SourceWidth = bitmap.PixelWidth,
+					SourceHeight = bitmap.PixelHeight,
+					InputWidth = bitmap.PixelWidth,
+					InputHeight = bitmap.PixelHeight,
+					EncodedPayloadBytes = array.Length,
+					HasFace = threeDdfaOnnxSidecarResponse.HasFace,
+					ClientPrepareMilliseconds = stopwatch2.Elapsed.TotalMilliseconds,
+					SidecarRoundTripMilliseconds = stopwatch3.Elapsed.TotalMilliseconds,
+					ClientParseMilliseconds = stopwatch4.Elapsed.TotalMilliseconds,
+					EndToEndMilliseconds = stopwatch.Elapsed.TotalMilliseconds,
+					SidecarStagesMilliseconds = threeDdfaOnnxSidecarResponse.TimingsMilliseconds,
+					Status = threeDdfaOnnxSidecarResponse.Status
+				};
+				return threeDdfaOnnxSidecarResponse;
+			}
+			catch (Exception ex)
+			{
+				string text = Volatile.Read(in _lastStandardError);
+				string text2 = (string.IsNullOrWhiteSpace(text) ? ex.Message : (ex.Message + ". Sidecar: " + text));
+				RestartAfterFailure("3DDFA/ONNX sidecar call failed: " + text2);
+				return Error(Status);
+			}
+		}
+	}
 
-        StopProcess();
-    }
+	public void Dispose()
+	{
+		if (Interlocked.Exchange(ref _disposed, 1) == 0)
+		{
+			StopProcess();
+		}
+	}
 
-    private bool EnsureProcess()
-    {
-        if (Volatile.Read(ref _disposed) != 0)
-        {
-            Status = "3DDFA/ONNX sidecar client is stopped.";
-            return false;
-        }
+	private bool EnsureProcess()
+	{
+		if (Volatile.Read(in _disposed) != 0)
+		{
+			Status = "3DDFA/ONNX sidecar client is stopped.";
+			return false;
+		}
+		Process process = _process;
+		if (process != null && !process.HasExited)
+		{
+			return true;
+		}
+		StopProcess();
+		Process process2 = null;
+		try
+		{
+			process2 = new Process
+			{
+				StartInfo = new ProcessStartInfo
+				{
+					FileName = _environment.PythonPath,
+					UseShellExecute = false,
+					RedirectStandardInput = true,
+					RedirectStandardOutput = true,
+					RedirectStandardError = true,
+					CreateNoWindow = true
+				}
+			};
+			process2.StartInfo.ArgumentList.Add(_environment.ScriptPath);
+			process2.StartInfo.ArgumentList.Add("--repo");
+			process2.StartInfo.ArgumentList.Add(_environment.RepositoryPath);
+			process2.StartInfo.ArgumentList.Add("--config");
+			process2.StartInfo.ArgumentList.Add(_environment.ConfigPath);
+			if (!process2.Start())
+			{
+				Status = "3DDFA/ONNX sidecar process did not start.";
+				return false;
+			}
+			_process = process2;
+			Process runningProcess = process2;
+			process2 = null;
+			_firstResponseAfterStart = true;
+			Volatile.Write(ref _lastStandardError, "");
+			Task.Run(delegate
+			{
+				ReadErrors(runningProcess);
+			});
+			Status = "3DDFA/ONNX sidecar process started.";
+			return true;
+		}
+		catch (Exception ex)
+		{
+			Status = "3DDFA/ONNX sidecar process failed to start: " + ex.Message;
+			return false;
+		}
+		finally
+		{
+			process2?.Dispose();
+		}
+	}
 
-        if (_process is { HasExited: false })
-        {
-            return true;
-        }
+	private static byte[] EncodeJpeg(BitmapSource bitmap)
+	{
+		FormatConvertedBitmap source = new FormatConvertedBitmap(bitmap, PixelFormats.Bgra32, null, 0.0);
+		JpegBitmapEncoder jpegBitmapEncoder = new JpegBitmapEncoder
+		{
+			QualityLevel = 90
+		};
+		jpegBitmapEncoder.Frames.Add(BitmapFrame.Create(source));
+		using MemoryStream memoryStream = new MemoryStream();
+		jpegBitmapEncoder.Save(memoryStream);
+		return memoryStream.ToArray();
+	}
 
-        StopProcess();
-        Process? process = null;
-        try
-        {
-            process = new Process
-            {
-                StartInfo = new ProcessStartInfo
-                {
-                    FileName = _environment.PythonPath,
-                    UseShellExecute = false,
-                    RedirectStandardInput = true,
-                    RedirectStandardOutput = true,
-                    RedirectStandardError = true,
-                    CreateNoWindow = true
-                }
-            };
-            process.StartInfo.ArgumentList.Add(_environment.ScriptPath);
-            process.StartInfo.ArgumentList.Add("--repo");
-            process.StartInfo.ArgumentList.Add(_environment.RepositoryPath);
-            process.StartInfo.ArgumentList.Add("--config");
-            process.StartInfo.ArgumentList.Add(_environment.ConfigPath);
+	private void RestartAfterFailure(string status)
+	{
+		Status = status;
+		StopProcess();
+	}
 
-            if (!process.Start())
-            {
-                Status = "3DDFA/ONNX sidecar process did not start.";
-                return false;
-            }
+	private void StopProcess()
+	{
+		Process process = Interlocked.Exchange(ref _process, null);
+		if (process == null)
+		{
+			return;
+		}
+		try
+		{
+			if (!process.HasExited)
+			{
+				process.Kill(entireProcessTree: true);
+			}
+		}
+		catch
+		{
+		}
+		finally
+		{
+			process.Dispose();
+		}
+	}
 
-            _process = process;
-            var runningProcess = process;
-            process = null;
-            _firstResponseAfterStart = true;
-            Volatile.Write(ref _lastStandardError, "");
-            _ = Task.Run(() => ReadErrors(runningProcess));
-            Status = "3DDFA/ONNX sidecar process started.";
-            return true;
-        }
-        catch (Exception ex)
-        {
-            Status = $"3DDFA/ONNX sidecar process failed to start: {ex.Message}";
-            return false;
-        }
-        finally
-        {
-            process?.Dispose();
-        }
-    }
+	private void ReadErrors(Process process)
+	{
+		try
+		{
+			while (!process.HasExited)
+			{
+				string text = process.StandardError.ReadLine();
+				if (text != null)
+				{
+					if (!string.IsNullOrWhiteSpace(text))
+					{
+						string text2 = text.Trim();
+						Volatile.Write(ref _lastStandardError, text2);
+						Status = text2;
+					}
+					continue;
+				}
+				break;
+			}
+		}
+		catch
+		{
+		}
+	}
 
-    private static byte[] EncodeJpeg(BitmapSource bitmap)
-    {
-        var converted = new FormatConvertedBitmap(bitmap, PixelFormats.Bgra32, null, 0);
-        var encoder = new JpegBitmapEncoder { QualityLevel = 90 };
-        encoder.Frames.Add(BitmapFrame.Create(converted));
-        using var stream = new MemoryStream();
-        encoder.Save(stream);
-        return stream.ToArray();
-    }
+	private static ThreeDdfaOnnxSidecarResponse Error(string status)
+	{
+		return new ThreeDdfaOnnxSidecarResponse
+		{
+			Ok = false,
+			Status = status,
+			TrustDecision = "3DDFA/ONNX reconstruction unavailable for this frame."
+		};
+	}
 
-    private void RestartAfterFailure(string status)
-    {
-        Status = status;
-        StopProcess();
-    }
+	private static string ToProtocolMode(ThreeDdfaOnnxRequestMode mode)
+	{
+		return mode switch
+		{
+			ThreeDdfaOnnxRequestMode.FaceBoxOnly => "faceBoxOnly", 
+			ThreeDdfaOnnxRequestMode.Preview => "preview", 
+			ThreeDdfaOnnxRequestMode.Full => "full", 
+			_ => "tracking", 
+		};
+	}
 
-    private void StopProcess()
-    {
-        var process = Interlocked.Exchange(ref _process, null);
-        if (process is null)
-        {
-            return;
-        }
+	private static int ReadTimeoutMilliseconds()
+	{
+		if (!int.TryParse(Environment.GetEnvironmentVariable("AVATAR_BUILDER_3DDFA_TIMEOUT_MS"), out var result))
+		{
+			return 4500;
+		}
+		return Math.Clamp(result, 500, 30000);
+	}
 
-        try
-        {
-            if (!process.HasExited)
-            {
-                process.Kill(entireProcessTree: true);
-            }
-        }
-        catch
-        {
-        }
-        finally
-        {
-            process.Dispose();
-        }
-    }
-
-    private void ReadErrors(Process process)
-    {
-        try
-        {
-            while (!process.HasExited)
-            {
-                var line = process.StandardError.ReadLine();
-                if (line is null)
-                {
-                    break;
-                }
-
-                if (!string.IsNullOrWhiteSpace(line))
-                {
-                    var detail = line.Trim();
-                    Volatile.Write(ref _lastStandardError, detail);
-                    Status = detail;
-                }
-            }
-        }
-        catch
-        {
-        }
-    }
-
-    private static ThreeDdfaOnnxSidecarResponse Error(string status)
-    {
-        return new ThreeDdfaOnnxSidecarResponse
-        {
-            Ok = false,
-            Status = status,
-            TrustDecision = "3DDFA/ONNX reconstruction unavailable for this frame."
-        };
-    }
-
-    private static string ToProtocolMode(ThreeDdfaOnnxRequestMode mode)
-    {
-        return mode switch
-        {
-            ThreeDdfaOnnxRequestMode.FaceBoxOnly => "faceBoxOnly",
-            ThreeDdfaOnnxRequestMode.Preview => "preview",
-            ThreeDdfaOnnxRequestMode.Full => "full",
-            _ => "tracking"
-        };
-    }
-
-    private static int ReadTimeoutMilliseconds()
-    {
-        var configured = Environment.GetEnvironmentVariable("AVATAR_BUILDER_3DDFA_TIMEOUT_MS");
-        return int.TryParse(configured, out var milliseconds)
-            ? Math.Clamp(milliseconds, 500, 30000)
-            : 4500;
-    }
-
-    private static int ReadStartupTimeoutMilliseconds()
-    {
-        var configured = Environment.GetEnvironmentVariable("AVATAR_BUILDER_3DDFA_STARTUP_TIMEOUT_MS");
-        return int.TryParse(configured, out var milliseconds)
-            ? Math.Clamp(milliseconds, 1000, 60000)
-            : 25000;
-    }
+	private static int ReadStartupTimeoutMilliseconds()
+	{
+		if (!int.TryParse(Environment.GetEnvironmentVariable("AVATAR_BUILDER_3DDFA_STARTUP_TIMEOUT_MS"), out var result))
+		{
+			return 25000;
+		}
+		return Math.Clamp(result, 1000, 60000);
+	}
 }

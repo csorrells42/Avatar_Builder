@@ -1,6 +1,6 @@
 import argparse
-import base64
 import json
+import mmap
 import sys
 import time
 import traceback
@@ -28,23 +28,77 @@ def load_runtime(model_path):
     return mp, cv2, np, landmarker
 
 
-def image_from_base64(mp, cv2, np, image_base64):
-    image_bytes = base64.b64decode(image_base64)
-    buffer = np.frombuffer(image_bytes, dtype=np.uint8)
-    bgr = cv2.imdecode(buffer, cv2.IMREAD_COLOR)
-    if bgr is None:
-        raise ValueError("OpenCV could not decode the input image")
+class SharedMemoryFrameReader:
+    def __init__(self):
+        self._mapping = None
+        self._mapping_name = ""
+        self._capacity_bytes = 0
 
-    rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-    return mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+    def read_image(self, mp, cv2, np, request):
+        name = str(request.get("sharedMemoryName", ""))
+        capacity_bytes = int(request.get("sharedMemoryCapacityBytes", 0))
+        image_byte_length = int(request.get("imageByteLength", 0))
+        width = int(request.get("imageWidth", 0))
+        height = int(request.get("imageHeight", 0))
+        stride = int(request.get("imageStride", 0))
+        pixel_format = str(request.get("imagePixelFormat", ""))
+
+        if not name:
+            raise ValueError("shared memory name is missing")
+        if capacity_bytes <= 0 or capacity_bytes > 512 * 1024 * 1024:
+            raise ValueError(f"invalid shared memory capacity: {capacity_bytes}")
+        if width <= 0 or height <= 0 or stride < width * 4:
+            raise ValueError(f"invalid BGRA dimensions: {width}x{height}, stride {stride}")
+        if image_byte_length != stride * height or image_byte_length > capacity_bytes:
+            raise ValueError(
+                f"invalid shared image length: {image_byte_length}, expected {stride * height}"
+            )
+        if pixel_format.upper() != "BGRA32":
+            raise ValueError(f"unsupported shared image format: {pixel_format}")
+
+        self._ensure_mapping(name, capacity_bytes)
+        pixel_rows = np.ndarray(
+            shape=(height, stride),
+            dtype=np.uint8,
+            buffer=self._mapping,
+            offset=0,
+        )
+        bgra = pixel_rows[:, : width * 4].reshape((height, width, 4))
+        rgb = cv2.cvtColor(bgra, cv2.COLOR_BGRA2RGB)
+        return mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+
+    def close(self):
+        if self._mapping is not None:
+            self._mapping.close()
+            self._mapping = None
+        self._mapping_name = ""
+        self._capacity_bytes = 0
+
+    def _ensure_mapping(self, name, capacity_bytes):
+        if (
+            self._mapping is not None
+            and self._mapping_name == name
+            and self._capacity_bytes == capacity_bytes
+        ):
+            return
+
+        self.close()
+        self._mapping = mmap.mmap(
+            -1,
+            capacity_bytes,
+            tagname=name,
+            access=mmap.ACCESS_READ,
+        )
+        self._mapping_name = name
+        self._capacity_bytes = capacity_bytes
 
 
-def handle_request(mp, cv2, np, landmarker, request):
+def handle_request(mp, cv2, np, landmarker, frame_reader, request):
     total_started = time.perf_counter()
     request_id = request.get("requestId", "")
-    decode_started = time.perf_counter()
-    image = image_from_base64(mp, cv2, np, request.get("imageBase64", ""))
-    decode_ms = elapsed_ms(decode_started)
+    transport_started = time.perf_counter()
+    image = frame_reader.read_image(mp, cv2, np, request)
+    transport_ms = elapsed_ms(transport_started)
     inference_started = time.perf_counter()
     timestamp_ms = int(request.get("timestampMilliseconds", 0))
     result = landmarker.detect_for_video(image, timestamp_ms)
@@ -57,7 +111,8 @@ def handle_request(mp, cv2, np, landmarker, request):
             "status": "MediaPipe sidecar searching",
             "landmarks": [],
             "timingsMilliseconds": {
-                "decode": decode_ms,
+                "decode": transport_ms,
+                "sharedMemoryRead": transport_ms,
                 "inference": inference_ms,
                 "total": elapsed_ms(total_started),
             },
@@ -95,7 +150,8 @@ def handle_request(mp, cv2, np, landmarker, request):
         "blendshapes": blendshapes,
         "facialTransformationMatrix": facial_transformation_matrix,
         "timingsMilliseconds": {
-            "decode": decode_ms,
+            "decode": transport_ms,
+            "sharedMemoryRead": transport_ms,
             "inference": inference_ms,
             "total": elapsed_ms(total_started),
         },
@@ -124,26 +180,31 @@ def main():
         sys.stderr.flush()
         return 3
 
-    for line in sys.stdin:
-        line = line.strip()
-        if not line:
-            continue
+    frame_reader = SharedMemoryFrameReader()
+    try:
+        for line in sys.stdin:
+            line = line.strip()
+            if not line:
+                continue
 
-        request_id = ""
-        try:
-            request = json.loads(line)
-            request_id = request.get("requestId", "")
-            write_response(handle_request(mp, cv2, np, landmarker, request))
-        except Exception as exc:
-            write_response(
-                {
-                    "requestId": request_id,
-                    "ok": False,
-                    "hasFace": False,
-                    "status": f"MediaPipe sidecar request failed: {exc}",
-                    "landmarks": [],
-                }
-            )
+            request_id = ""
+            try:
+                request = json.loads(line)
+                request_id = request.get("requestId", "")
+                write_response(handle_request(mp, cv2, np, landmarker, frame_reader, request))
+            except Exception as exc:
+                write_response(
+                    {
+                        "requestId": request_id,
+                        "ok": False,
+                        "hasFace": False,
+                        "status": f"MediaPipe sidecar request failed: {exc}",
+                        "landmarks": [],
+                    }
+                )
+    finally:
+        frame_reader.close()
+        landmarker.close()
 
     return 0
 

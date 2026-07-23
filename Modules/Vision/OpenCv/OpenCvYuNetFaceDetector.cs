@@ -1,167 +1,137 @@
-using AvatarBuilder.Modules.Vision.Analysis;
-using AvatarBuilder.Modules.Vision.Common;
+using System;
+using System.Collections.Generic;
+using System.Linq;
 using OpenCvSharp;
-using OpenCvSharp.Dnn;
-using CvRect = OpenCvSharp.Rect;
 
 namespace AvatarBuilder.Modules.Vision.OpenCv;
 
 public sealed class OpenCvYuNetFaceDetector : IDisposable
 {
-    private readonly OpenCvYuNetModelInfo _modelInfo = OpenCvYuNetModelInfo.Load();
-    private FaceDetectorYN? _detector;
-    private OpenCvSharp.Size _inputSize;
-    private string _initializationStatus = "";
+	private readonly OpenCvYuNetModelInfo _modelInfo = OpenCvYuNetModelInfo.Load();
 
-    public bool IsAvailable => _modelInfo.IsReady && EnsureDetector(new OpenCvSharp.Size(320, 320));
+	private FaceDetectorYN? _detector;
 
-    public string Status
-    {
-        get
-        {
-            if (!_modelInfo.IsReady)
-            {
-                return _modelInfo.Status;
-            }
+	private Size _inputSize;
 
-            return string.IsNullOrWhiteSpace(_initializationStatus)
-                ? "OpenCV YuNet face detector waiting"
-                : _initializationStatus;
-        }
-    }
+	private string _initializationStatus = "";
 
-    public YuNetFaceDetection? Detect(Mat gray)
-    {
-        return DetectAll(gray)
-            .OrderByDescending(static face => face.Score)
-            .FirstOrDefault();
-    }
+	public bool IsAvailable
+	{
+		get
+		{
+			if (_modelInfo.IsReady)
+			{
+				return EnsureDetector(new Size(320, 320));
+			}
+			return false;
+		}
+	}
 
-    public IReadOnlyList<YuNetFaceDetection> DetectAll(Mat gray)
-    {
-        if (!_modelInfo.IsReady || gray.Empty())
-        {
-            return [];
-        }
+	public string Status
+	{
+		get
+		{
+			if (!_modelInfo.IsReady)
+			{
+				return _modelInfo.Status;
+			}
+			if (!string.IsNullOrWhiteSpace(_initializationStatus))
+			{
+				return _initializationStatus;
+			}
+			return "OpenCV YuNet face detector waiting";
+		}
+	}
 
-        var inputSize = new OpenCvSharp.Size(gray.Width, gray.Height);
-        if (!EnsureDetector(inputSize))
-        {
-            return [];
-        }
+	public YuNetFaceDetection? Detect(Mat gray)
+	{
+		return (from face in DetectAll(gray)
+			orderby face.Score descending
+			select face).FirstOrDefault();
+	}
 
-        using var bgr = new Mat();
-        Cv2.CvtColor(gray, bgr, ColorConversionCodes.GRAY2BGR);
-        using var faces = new Mat();
-        _detector!.Detect(bgr, faces);
-        return ParseFaces(faces, gray.Width, gray.Height);
-    }
+	public IReadOnlyList<YuNetFaceDetection> DetectAll(Mat gray)
+	{
+		if (!_modelInfo.IsReady || gray.Empty())
+		{
+			return Array.Empty<YuNetFaceDetection>();
+		}
+		Size inputSize = new Size(gray.Width, gray.Height);
+		if (!EnsureDetector(inputSize))
+		{
+			return Array.Empty<YuNetFaceDetection>();
+		}
+		using Mat mat = new Mat();
+		Cv2.CvtColor(gray, mat, ColorConversionCodes.GRAY2BGR);
+		using Mat faces = new Mat();
+		_detector.Detect(mat, faces);
+		return ParseFaces(faces, gray.Width, gray.Height);
+	}
 
-    public void Dispose()
-    {
-        _detector?.Dispose();
-    }
+	public void Dispose()
+	{
+		_detector?.Dispose();
+	}
 
-    private bool EnsureDetector(OpenCvSharp.Size inputSize)
-    {
-        if (!_modelInfo.IsReady)
-        {
-            _initializationStatus = _modelInfo.Status;
-            return false;
-        }
+	private bool EnsureDetector(Size inputSize)
+	{
+		if (!_modelInfo.IsReady)
+		{
+			_initializationStatus = _modelInfo.Status;
+			return false;
+		}
+		if (_detector != null && _inputSize == inputSize)
+		{
+			return true;
+		}
+		try
+		{
+			_detector?.Dispose();
+			_detector = FaceDetectorYN.Create(_modelInfo.ModelPath, "", inputSize, 0.7f);
+			_inputSize = inputSize;
+			_initializationStatus = "OpenCV YuNet face detector loaded";
+			return true;
+		}
+		catch (Exception ex)
+		{
+			_detector?.Dispose();
+			_detector = null;
+			_inputSize = default(Size);
+			_initializationStatus = "OpenCV YuNet face detector failed to load: " + ex.Message;
+			return false;
+		}
+	}
 
-        if (_detector is not null && _inputSize == inputSize)
-        {
-            return true;
-        }
+	private static IReadOnlyList<YuNetFaceDetection> ParseFaces(Mat faces, int width, int height)
+	{
+		int rows = faces.Rows;
+		int cols = faces.Cols;
+		if (faces.Empty() || rows <= 0 || cols < 15)
+		{
+			return Array.Empty<YuNetFaceDetection>();
+		}
+		List<YuNetFaceDetection> list = new List<YuNetFaceDetection>(rows);
+		for (int i = 0; i < rows; i++)
+		{
+			float num = faces.At<float>(i, 14);
+			float num2 = faces.At<float>(i, 0);
+			float num3 = faces.At<float>(i, 1);
+			float num4 = faces.At<float>(i, 2);
+			Rect faceBox = ClampRect(new Rect(Height: (int)Math.Round(faces.At<float>(i, 3)), X: (int)Math.Round(num2), Y: (int)Math.Round(num3), Width: (int)Math.Round(num4)), width, height);
+			if (faceBox.Width > 0 && faceBox.Height > 0)
+			{
+				list.Add(new YuNetFaceDetection(faceBox, new Point2f(faces.At<float>(i, 4), faces.At<float>(i, 5)), new Point2f(faces.At<float>(i, 6), faces.At<float>(i, 7)), new Point2f(faces.At<float>(i, 8), faces.At<float>(i, 9)), new Point2f(faces.At<float>(i, 10), faces.At<float>(i, 11)), new Point2f(faces.At<float>(i, 12), faces.At<float>(i, 13)), Math.Clamp(num, 0.0, 1.0)));
+			}
+		}
+		return list.OrderByDescending((YuNetFaceDetection detection) => detection.Score).ToList();
+	}
 
-        try
-        {
-            _detector?.Dispose();
-            _detector = FaceDetectorYN.Create(
-                _modelInfo.ModelPath,
-                "",
-                inputSize,
-                0.70f,
-                0.30f,
-                5000,
-                (Backend)0,
-                (Target)0);
-            _inputSize = inputSize;
-            _initializationStatus = "OpenCV YuNet face detector loaded";
-            return true;
-        }
-        catch (Exception ex)
-        {
-            _detector?.Dispose();
-            _detector = null;
-            _inputSize = default;
-            _initializationStatus = $"OpenCV YuNet face detector failed to load: {ex.Message}";
-            return false;
-        }
-    }
-
-    private static IReadOnlyList<YuNetFaceDetection> ParseFaces(Mat faces, int width, int height)
-    {
-        var rows = faces.Rows;
-        var cols = faces.Cols;
-        if (faces.Empty() || rows <= 0 || cols < 15)
-        {
-            return [];
-        }
-
-        var detections = new List<YuNetFaceDetection>(rows);
-        for (var row = 0; row < rows; row++)
-        {
-            var score = faces.At<float>(row, 14);
-            var x = faces.At<float>(row, 0);
-            var y = faces.At<float>(row, 1);
-            var w = faces.At<float>(row, 2);
-            var h = faces.At<float>(row, 3);
-            var rect = ClampRect(
-                new CvRect(
-                    (int)Math.Round(x),
-                    (int)Math.Round(y),
-                    (int)Math.Round(w),
-                    (int)Math.Round(h)),
-                width,
-                height);
-
-            if (rect.Width <= 0 || rect.Height <= 0)
-            {
-                continue;
-            }
-
-            detections.Add(new YuNetFaceDetection(
-                rect,
-                new Point2f(faces.At<float>(row, 4), faces.At<float>(row, 5)),
-                new Point2f(faces.At<float>(row, 6), faces.At<float>(row, 7)),
-                new Point2f(faces.At<float>(row, 8), faces.At<float>(row, 9)),
-                new Point2f(faces.At<float>(row, 10), faces.At<float>(row, 11)),
-                new Point2f(faces.At<float>(row, 12), faces.At<float>(row, 13)),
-                Math.Clamp(score, 0d, 1d)));
-        }
-
-        return detections
-            .OrderByDescending(static detection => detection.Score)
-            .ToList();
-    }
-
-    private static CvRect ClampRect(CvRect rect, int width, int height)
-    {
-        var x = Math.Clamp(rect.X, 0, Math.Max(0, width - 1));
-        var y = Math.Clamp(rect.Y, 0, Math.Max(0, height - 1));
-        var right = Math.Clamp(rect.Right, x + 1, width);
-        var bottom = Math.Clamp(rect.Bottom, y + 1, height);
-        return new CvRect(x, y, right - x, bottom - y);
-    }
+	private static Rect ClampRect(Rect rect, int width, int height)
+	{
+		int num = Math.Clamp(rect.X, 0, Math.Max(0, width - 1));
+		int num2 = Math.Clamp(rect.Y, 0, Math.Max(0, height - 1));
+		int num3 = Math.Clamp(rect.Right, num + 1, width);
+		int num4 = Math.Clamp(rect.Bottom, num2 + 1, height);
+		return new Rect(num, num2, num3 - num, num4 - num2);
+	}
 }
-
-public sealed record YuNetFaceDetection(
-    CvRect FaceBox,
-    Point2f RightEye,
-    Point2f LeftEye,
-    Point2f NoseTip,
-    Point2f RightMouthCorner,
-    Point2f LeftMouthCorner,
-    double Score);

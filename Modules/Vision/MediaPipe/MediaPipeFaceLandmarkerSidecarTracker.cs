@@ -1,182 +1,164 @@
-using System.Windows.Media.Imaging;
+using System;
 using System.Windows;
 using System.Windows.Media;
+using System.Windows.Media.Imaging;
 using AvatarBuilder.Modules.Vision.Common;
 
 namespace AvatarBuilder.Modules.Vision.MediaPipe;
 
-public sealed class MediaPipeFaceLandmarkerSidecarTracker : IStatefulFaceLandmarkTracker, IFaceLandmarkCropRefiner
+public sealed class MediaPipeFaceLandmarkerSidecarTracker : IStatefulFaceLandmarkTracker, IFaceLandmarkTracker, IDisposable, IFaceLandmarkCropRefiner
 {
-    private readonly DenseFaceLandmarkModelInfo _modelInfo = DenseFaceLandmarkModelInfo.Load();
-    private readonly Lazy<MediaPipeSidecarPythonEnvironment> _environment;
-    private MediaPipeFaceLandmarkerSidecarClient? _client;
-    private string _lastStatus = "MediaPipe sidecar not checked";
+	private readonly DenseFaceLandmarkModelInfo _modelInfo = DenseFaceLandmarkModelInfo.Load();
 
-    public MediaPipeFaceLandmarkerSidecarTracker()
-    {
-        _environment = new Lazy<MediaPipeSidecarPythonEnvironment>(() =>
-        {
-            var environment = MediaPipeSidecarPythonEnvironment.Detect(_modelInfo);
-            _lastStatus = environment.Status;
-            return environment;
-        });
-    }
+	private readonly Lazy<MediaPipeSidecarPythonEnvironment> _environment;
 
-    public string Name => "MediaPipe Face Landmarker sidecar";
+	private MediaPipeFaceLandmarkerSidecarClient? _client;
 
-    public bool IsAvailable => _environment.Value.IsReady;
+	private string _lastStatus = "MediaPipe sidecar not checked";
 
-    public int MaxDetectionDimension { get; set; } = 1920;
+	public string Name => "MediaPipe Face Landmarker sidecar";
 
-    public FaceLandmarkTrackingResult Detect(BitmapSource bitmap, DateTime capturedAtUtc)
-    {
-        if (!IsAvailable)
-        {
-            return new FaceLandmarkTrackingResult
-            {
-                BackendName = Name,
-                BackendStatus = _lastStatus
-            };
-        }
+	public bool IsAvailable => _environment.Value.IsReady;
 
-        _client ??= new MediaPipeFaceLandmarkerSidecarClient(_environment.Value);
-        var input = ResizeForDetection(bitmap, MaxDetectionDimension);
-        var response = _client.Analyze(input, capturedAtUtc, bitmap.PixelWidth, bitmap.PixelHeight);
-        _lastStatus = string.IsNullOrWhiteSpace(response.Status)
-            ? _client.Status
-            : response.Status;
-        return MediaPipeFaceLandmarkerMapper.ToTrackingResult(response, capturedAtUtc, Name);
-    }
+	public int MaxDetectionDimension { get; set; } = 1920;
 
-    public FaceLandmarkTrackingResult DetectFaceCrop(
-        BitmapSource bitmap,
-        Rect normalizedFaceHint,
-        DateTime capturedAtUtc)
-    {
-        if (!IsAvailable)
-        {
-            return new FaceLandmarkTrackingResult
-            {
-                BackendName = Name,
-                BackendStatus = _lastStatus
-            };
-        }
+	public MediaPipeFaceLandmarkerSidecarTracker()
+	{
+		_environment = new Lazy<MediaPipeSidecarPythonEnvironment>(delegate
+		{
+			MediaPipeSidecarPythonEnvironment mediaPipeSidecarPythonEnvironment = MediaPipeSidecarPythonEnvironment.Detect(_modelInfo);
+			_lastStatus = mediaPipeSidecarPythonEnvironment.Status;
+			return mediaPipeSidecarPythonEnvironment;
+		});
+	}
 
-        if (!TryCreateFaceCrop(bitmap, normalizedFaceHint, out var cropBitmap, out var normalizedCrop))
-        {
-            return new FaceLandmarkTrackingResult
-            {
-                BackendName = Name,
-                BackendStatus = "MediaPipe sidecar crop refinement skipped; face hint was outside the frame."
-            };
-        }
+	public FaceLandmarkTrackingResult Detect(BitmapSource bitmap, DateTime capturedAtUtc)
+	{
+		if (!IsAvailable)
+		{
+			return new FaceLandmarkTrackingResult
+			{
+				BackendName = Name,
+				BackendStatus = _lastStatus
+			};
+		}
+		if (_client == null)
+		{
+			_client = new MediaPipeFaceLandmarkerSidecarClient(_environment.Value);
+		}
+		BitmapSource bitmap2 = ResizeForDetection(bitmap, MaxDetectionDimension);
+		MediaPipeSidecarResponse mediaPipeSidecarResponse = _client.Analyze(bitmap2, capturedAtUtc, bitmap.PixelWidth, bitmap.PixelHeight);
+		_lastStatus = (string.IsNullOrWhiteSpace(mediaPipeSidecarResponse.Status) ? _client.Status : mediaPipeSidecarResponse.Status);
+		return MediaPipeFaceLandmarkerMapper.ToTrackingResult(mediaPipeSidecarResponse, capturedAtUtc, Name);
+	}
 
-        _client ??= new MediaPipeFaceLandmarkerSidecarClient(_environment.Value);
-        var input = ResizeForDetection(cropBitmap, MaxDetectionDimension);
-        var response = _client.Analyze(input, capturedAtUtc, cropBitmap.PixelWidth, cropBitmap.PixelHeight);
-        _lastStatus = string.IsNullOrWhiteSpace(response.Status)
-            ? _client.Status
-            : response.Status;
-        var cropResult = MediaPipeFaceLandmarkerMapper.ToTrackingResult(response, capturedAtUtc, Name);
-        return FaceLandmarkCropMapper.MapToFrame(
-            cropResult,
-            normalizedCrop,
-            $"crop refined from face hint {FormatCrop(normalizedCrop)}");
-    }
+	public FaceLandmarkTrackingResult DetectFaceCrop(BitmapSource bitmap, Rect normalizedFaceHint, DateTime capturedAtUtc)
+	{
+		if (!IsAvailable)
+		{
+			return new FaceLandmarkTrackingResult
+			{
+				BackendName = Name,
+				BackendStatus = _lastStatus
+			};
+		}
+		if (!TryCreateFaceCrop(bitmap, normalizedFaceHint, out BitmapSource cropBitmap, out Rect normalizedCrop))
+		{
+			return new FaceLandmarkTrackingResult
+			{
+				BackendName = Name,
+				BackendStatus = "MediaPipe sidecar crop refinement skipped; face hint was outside the frame."
+			};
+		}
+		if (_client == null)
+		{
+			_client = new MediaPipeFaceLandmarkerSidecarClient(_environment.Value);
+		}
+		BitmapSource bitmap2 = ResizeForDetection(cropBitmap, MaxDetectionDimension);
+		MediaPipeSidecarResponse mediaPipeSidecarResponse = _client.Analyze(bitmap2, capturedAtUtc, cropBitmap.PixelWidth, cropBitmap.PixelHeight);
+		_lastStatus = (string.IsNullOrWhiteSpace(mediaPipeSidecarResponse.Status) ? _client.Status : mediaPipeSidecarResponse.Status);
+		return FaceLandmarkCropMapper.MapToFrame(MediaPipeFaceLandmarkerMapper.ToTrackingResult(mediaPipeSidecarResponse, capturedAtUtc, Name), normalizedCrop, "crop refined from face hint " + FormatCrop(normalizedCrop));
+	}
 
-    public void Reset()
-    {
-        _client?.Dispose();
-        _client = null;
-    }
+	public void Reset()
+	{
+		_client?.Dispose();
+		_client = null;
+	}
 
-    public void Dispose()
-    {
-        _client?.Dispose();
-        _client = null;
-    }
+	public void Dispose()
+	{
+		_client?.Dispose();
+		_client = null;
+	}
 
-    private static BitmapSource ResizeForDetection(BitmapSource bitmap, int maximumDimension)
-    {
-        var largestDimension = Math.Max(bitmap.PixelWidth, bitmap.PixelHeight);
-        if (maximumDimension <= 0 || largestDimension <= maximumDimension)
-        {
-            return bitmap;
-        }
+	private static BitmapSource ResizeForDetection(BitmapSource bitmap, int maximumDimension)
+	{
+		int num = Math.Max(bitmap.PixelWidth, bitmap.PixelHeight);
+		if (maximumDimension <= 0 || num <= maximumDimension)
+		{
+			return bitmap;
+		}
+		double num2 = (double)maximumDimension / (double)num;
+		BitmapSource bitmapSource = new TransformedBitmap(bitmap, new ScaleTransform(num2, num2));
+		if (bitmapSource.CanFreeze)
+		{
+			bitmapSource.Freeze();
+		}
+		return bitmapSource;
+	}
 
-        var scale = maximumDimension / (double)largestDimension;
-        BitmapSource resized = new TransformedBitmap(bitmap, new ScaleTransform(scale, scale));
-        if (resized.CanFreeze)
-        {
-            resized.Freeze();
-        }
+	private static bool TryCreateFaceCrop(BitmapSource bitmap, Rect normalizedFaceHint, out BitmapSource cropBitmap, out Rect normalizedCrop)
+	{
+		cropBitmap = BitmapSource.Create(1, 1, 96.0, 96.0, PixelFormats.Bgra32, null, new byte[4], 4);
+		normalizedCrop = Rect.Empty;
+		if (bitmap.PixelWidth <= 0 || bitmap.PixelHeight <= 0 || normalizedFaceHint.Width <= 0.0 || normalizedFaceHint.Height <= 0.0)
+		{
+			return false;
+		}
+		Rect rect = ExpandAndClamp(normalizedFaceHint, 0.45, 0.6);
+		int value = (int)Math.Floor(rect.Left * (double)bitmap.PixelWidth);
+		int value2 = (int)Math.Floor(rect.Top * (double)bitmap.PixelHeight);
+		int value3 = (int)Math.Ceiling(rect.Right * (double)bitmap.PixelWidth);
+		int value4 = (int)Math.Ceiling(rect.Bottom * (double)bitmap.PixelHeight);
+		value = Math.Clamp(value, 0, Math.Max(0, bitmap.PixelWidth - 1));
+		value2 = Math.Clamp(value2, 0, Math.Max(0, bitmap.PixelHeight - 1));
+		value3 = Math.Clamp(value3, value + 1, bitmap.PixelWidth);
+		value4 = Math.Clamp(value4, value2 + 1, bitmap.PixelHeight);
+		Int32Rect sourceRect = new Int32Rect(value, value2, value3 - value, value4 - value2);
+		if (sourceRect.Width < 24 || sourceRect.Height < 24)
+		{
+			return false;
+		}
+		normalizedCrop = new Rect((double)sourceRect.X / (double)bitmap.PixelWidth, (double)sourceRect.Y / (double)bitmap.PixelHeight, (double)sourceRect.Width / (double)bitmap.PixelWidth, (double)sourceRect.Height / (double)bitmap.PixelHeight);
+		BitmapSource bitmapSource = new CroppedBitmap(bitmap, sourceRect);
+		int num = Math.Min(bitmapSource.PixelWidth, bitmapSource.PixelHeight);
+		if (num > 0 && num < 320)
+		{
+			double num2 = Math.Min(4.0, 320.0 / (double)num);
+			bitmapSource = new TransformedBitmap(bitmapSource, new ScaleTransform(num2, num2));
+		}
+		if (bitmapSource.CanFreeze)
+		{
+			bitmapSource.Freeze();
+		}
+		cropBitmap = bitmapSource;
+		return true;
+	}
 
-        return resized;
-    }
+	private static Rect ExpandAndClamp(Rect rect, double horizontalPadding, double verticalPadding)
+	{
+		double num = rect.Width * horizontalPadding;
+		double num2 = rect.Height * verticalPadding;
+		double num3 = Math.Clamp(rect.Left - num, 0.0, 1.0);
+		double num4 = Math.Clamp(rect.Top - num2, 0.0, 1.0);
+		double num5 = Math.Clamp(rect.Right + num, 0.0, 1.0);
+		double num6 = Math.Clamp(rect.Bottom + num2, 0.0, 1.0);
+		return new Rect(num3, num4, Math.Max(0.0, num5 - num3), Math.Max(0.0, num6 - num4));
+	}
 
-    private static bool TryCreateFaceCrop(
-        BitmapSource bitmap,
-        Rect normalizedFaceHint,
-        out BitmapSource cropBitmap,
-        out Rect normalizedCrop)
-    {
-        cropBitmap = BitmapSource.Create(1, 1, 96, 96, System.Windows.Media.PixelFormats.Bgra32, null, new byte[4], 4);
-        normalizedCrop = Rect.Empty;
-        if (bitmap.PixelWidth <= 0 || bitmap.PixelHeight <= 0 || normalizedFaceHint.Width <= 0d || normalizedFaceHint.Height <= 0d)
-        {
-            return false;
-        }
-
-        var expanded = ExpandAndClamp(normalizedFaceHint, horizontalPadding: 0.45d, verticalPadding: 0.60d);
-        var x = (int)Math.Floor(expanded.Left * bitmap.PixelWidth);
-        var y = (int)Math.Floor(expanded.Top * bitmap.PixelHeight);
-        var right = (int)Math.Ceiling(expanded.Right * bitmap.PixelWidth);
-        var bottom = (int)Math.Ceiling(expanded.Bottom * bitmap.PixelHeight);
-        x = Math.Clamp(x, 0, Math.Max(0, bitmap.PixelWidth - 1));
-        y = Math.Clamp(y, 0, Math.Max(0, bitmap.PixelHeight - 1));
-        right = Math.Clamp(right, x + 1, bitmap.PixelWidth);
-        bottom = Math.Clamp(bottom, y + 1, bitmap.PixelHeight);
-        var pixelRect = new Int32Rect(x, y, right - x, bottom - y);
-        if (pixelRect.Width < 24 || pixelRect.Height < 24)
-        {
-            return false;
-        }
-
-        normalizedCrop = new Rect(
-            pixelRect.X / (double)bitmap.PixelWidth,
-            pixelRect.Y / (double)bitmap.PixelHeight,
-            pixelRect.Width / (double)bitmap.PixelWidth,
-            pixelRect.Height / (double)bitmap.PixelHeight);
-        BitmapSource crop = new CroppedBitmap(bitmap, pixelRect);
-        var smallestSide = Math.Min(crop.PixelWidth, crop.PixelHeight);
-        if (smallestSide > 0 && smallestSide < 320)
-        {
-            var scale = Math.Min(4d, 320d / smallestSide);
-            crop = new TransformedBitmap(crop, new ScaleTransform(scale, scale));
-        }
-
-        if (crop.CanFreeze)
-        {
-            crop.Freeze();
-        }
-
-        cropBitmap = crop;
-        return true;
-    }
-
-    private static Rect ExpandAndClamp(Rect rect, double horizontalPadding, double verticalPadding)
-    {
-        var padX = rect.Width * horizontalPadding;
-        var padY = rect.Height * verticalPadding;
-        var left = Math.Clamp(rect.Left - padX, 0d, 1d);
-        var top = Math.Clamp(rect.Top - padY, 0d, 1d);
-        var right = Math.Clamp(rect.Right + padX, 0d, 1d);
-        var bottom = Math.Clamp(rect.Bottom + padY, 0d, 1d);
-        return new Rect(left, top, Math.Max(0d, right - left), Math.Max(0d, bottom - top));
-    }
-
-    private static string FormatCrop(Rect rect)
-    {
-        return $"{rect.Left:0.###},{rect.Top:0.###},{rect.Width:0.###}x{rect.Height:0.###}";
-    }
+	private static string FormatCrop(Rect rect)
+	{
+		return $"{rect.Left:0.###},{rect.Top:0.###},{rect.Width:0.###}x{rect.Height:0.###}";
+	}
 }

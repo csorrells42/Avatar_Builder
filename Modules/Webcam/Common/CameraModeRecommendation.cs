@@ -1,62 +1,81 @@
+using System;
+using System.Collections.Generic;
+using System.Linq;
+
 namespace AvatarBuilder.Modules.Webcam.Common;
 
 public static class CameraModeRecommendation
 {
-    public static CameraVideoMode? FindRecommendedMode(
-        IReadOnlyList<CameraVideoMode> modes,
-        int maximumWidth,
-        double targetFramesPerSecond)
-    {
-        var concreteModes = modes
-            .Where(mode => !mode.IsAuto && mode.Width is > 0 && mode.Height is > 0)
-            .ToList();
-        if (concreteModes.Count == 0)
-        {
-            return modes.FirstOrDefault(mode => mode.IsAuto) ?? modes.FirstOrDefault();
-        }
+	public static CameraVideoMode? FindRecommendedMode(IReadOnlyList<CameraVideoMode> modes, int maximumWidth, double targetFramesPerSecond)
+	{
+		List<CameraVideoMode> list = modes.Where(delegate(CameraVideoMode mode)
+		{
+			if (!mode.IsAuto)
+			{
+				int? width = mode.Width;
+				if (width.HasValue && width.GetValueOrDefault() > 0)
+				{
+					width = mode.Height;
+					if (width.HasValue)
+					{
+						return width.GetValueOrDefault() > 0;
+					}
+					return false;
+				}
+			}
+			return false;
+		}).ToList();
+		if (list.Count == 0)
+		{
+			return modes.FirstOrDefault((CameraVideoMode mode) => mode.IsAuto) ?? modes.FirstOrDefault();
+		}
+		List<CameraVideoMode> list2 = list.Where((CameraVideoMode mode) => mode.Width.GetValueOrDefault() <= maximumWidth).ToList();
+		if (list2.Count == 0)
+		{
+			return (from mode in list
+				orderby mode.Width.GetValueOrDefault() * mode.Height.GetValueOrDefault(), FrameRateLoadPriority(mode.FramesPerSecond, targetFramesPerSecond), CaptureFormatPriority(mode.InputFormat)
+				select mode).FirstOrDefault();
+		}
+		return (from mode in list2
+			orderby mode.Width.GetValueOrDefault() * mode.Height.GetValueOrDefault() descending, FrameRateLoadPriority(mode.FramesPerSecond, targetFramesPerSecond), CaptureFormatPriority(mode.InputFormat)
+			select mode).FirstOrDefault();
+	}
 
-        var matchingFidelity = concreteModes
-            .Where(mode => mode.Width.GetValueOrDefault() <= maximumWidth)
-            .ToList();
-        if (matchingFidelity.Count == 0)
-        {
-            return concreteModes
-                .OrderBy(mode => mode.Width.GetValueOrDefault() * mode.Height.GetValueOrDefault())
-                .ThenBy(mode => FrameRateLoadPriority(mode.FramesPerSecond, targetFramesPerSecond))
-                .ThenBy(mode => CaptureFormatPriority(mode.InputFormat))
-                .FirstOrDefault();
-        }
+	public static double FrameRateLoadPriority(double? framesPerSecond, double targetFramesPerSecond)
+	{
+		if (framesPerSecond.HasValue)
+		{
+			double valueOrDefault = framesPerSecond.GetValueOrDefault();
+			if (!(valueOrDefault <= 0.0))
+			{
+				double num = Math.Clamp(targetFramesPerSecond, 1.0, 60.0);
+				if (!(valueOrDefault <= num + 0.25))
+				{
+					return 1000.0 + valueOrDefault - num;
+				}
+				return num - valueOrDefault;
+			}
+		}
+		return double.MaxValue;
+	}
 
-        return matchingFidelity
-            .OrderByDescending(mode => mode.Width.GetValueOrDefault() * mode.Height.GetValueOrDefault())
-            .ThenBy(mode => FrameRateLoadPriority(mode.FramesPerSecond, targetFramesPerSecond))
-            .ThenBy(mode => CaptureFormatPriority(mode.InputFormat))
-            .FirstOrDefault();
-    }
-
-    public static double FrameRateLoadPriority(double? framesPerSecond, double targetFramesPerSecond)
-    {
-        if (framesPerSecond is not double fps || fps <= 0)
-        {
-            return double.MaxValue;
-        }
-
-        var target = Math.Clamp(targetFramesPerSecond, 1d, 60d);
-        return fps <= target + 0.25d
-            ? target - fps
-            : 1000d + fps - target;
-    }
-
-    public static int CaptureFormatPriority(string? format)
-    {
-        return format?.ToLowerInvariant() switch
-        {
-            "mjpeg" or "mjpg" => 0,
-            "h264" => 1,
-            "nv12" => 2,
-            "rgb32" => 3,
-            null => 4,
-            _ => 5
-        };
-    }
+	public static int CaptureFormatPriority(string? format)
+	{
+		switch (format?.ToLowerInvariant())
+		{
+		case "mjpeg":
+		case "mjpg":
+			return 0;
+		case "h264":
+			return 1;
+		case "nv12":
+			return 2;
+		case "rgb32":
+			return 3;
+		case null:
+			return 4;
+		default:
+			return 5;
+		}
+	}
 }

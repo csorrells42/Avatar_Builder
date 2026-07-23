@@ -1,33 +1,32 @@
+using System;
 using System.IO;
+using System.Linq;
 
 namespace AvatarBuilder.Modules.Infrastructure;
 
 public static class FfmpegLocator
 {
-    public static string? FindFfmpeg()
-    {
-        var dependencyRoot = Path.Combine(AppContext.BaseDirectory, "dependencies");
-        var candidate = Path.Combine(dependencyRoot, "ffmpeg", "win-x64", "ffmpeg.exe");
-        if (File.Exists(candidate))
-        {
-            return candidate;
-        }
-
-        if (!Directory.Exists(dependencyRoot))
-        {
-            return null;
-        }
-
-        try
-        {
-            return Directory.EnumerateFiles(dependencyRoot, "ffmpeg.exe", SearchOption.AllDirectories)
-                .OrderBy(path => path.Length)
-                .FirstOrDefault();
-        }
-        catch
-        {
-            return null;
-        }
-    }
+	public static string? FindFfmpeg()
+	{
+		string text = Path.Combine(AppContext.BaseDirectory, "dependencies");
+		string text2 = Path.Combine(text, "ffmpeg", "win-x64", "ffmpeg.exe");
+		if (File.Exists(text2))
+		{
+			return text2;
+		}
+		if (!Directory.Exists(text))
+		{
+			return null;
+		}
+		try
+		{
+			return (from path in Directory.EnumerateFiles(text, "ffmpeg.exe", SearchOption.AllDirectories)
+				orderby path.Length
+				select path).FirstOrDefault();
+		}
+		catch
+		{
+			return null;
+		}
+	}
 }
-

@@ -1,254 +1,221 @@
+using System;
+using System.Collections.Generic;
+using System.Linq;
 using AvatarBuilder.Modules.Vision.Common;
 
 namespace AvatarBuilder.Modules.Vision.MediaPipe;
 
 internal static class MediaPipeBrowOutlineGeometry
 {
-    private const double GeometryEpsilon = 1e-10;
+	private readonly record struct IndexedPoint(int Index, double X, double Y);
 
-    internal static readonly int[] BrowAIndices = [70, 63, 105, 66, 107, 55, 65, 52, 53, 46];
-    internal static readonly int[] BrowBIndices = [336, 296, 334, 293, 300, 285, 295, 282, 283, 276];
+	private const double GeometryEpsilon = 1E-10;
 
-    public static IReadOnlyList<int> BuildClosedOutlineIndices(
-        IReadOnlyList<FaceMeshLandmarkPoint> meshPoints,
-        IReadOnlyList<int> candidateIndices)
-    {
-        if (meshPoints.Count < 3 || candidateIndices.Count < 3)
-        {
-            return [];
-        }
+	internal static readonly int[] BrowAIndices = new int[10] { 70, 63, 105, 66, 107, 55, 65, 52, 53, 46 };
 
-        var pointsByIndex = new Dictionary<int, FaceMeshLandmarkPoint>(meshPoints.Count);
-        foreach (var point in meshPoints)
-        {
-            if (double.IsFinite(point.X) && double.IsFinite(point.Y))
-            {
-                pointsByIndex[point.Index] = point;
-            }
-        }
+	internal static readonly int[] BrowBIndices = new int[10] { 336, 296, 334, 293, 300, 285, 295, 282, 283, 276 };
 
-        var candidates = new List<IndexedPoint>(candidateIndices.Count);
-        foreach (var pointIndex in candidateIndices)
-        {
-            if (pointsByIndex.TryGetValue(pointIndex, out var point))
-            {
-                candidates.Add(new IndexedPoint(pointIndex, point.X, point.Y));
-            }
-        }
+	public static IReadOnlyList<int> BuildClosedOutlineIndices(IReadOnlyList<FaceMeshLandmarkPoint> meshPoints, IReadOnlyList<int> candidateIndices)
+	{
+		if (meshPoints.Count < 3 || candidateIndices.Count < 3)
+		{
+			return Array.Empty<int>();
+		}
+		Dictionary<int, FaceMeshLandmarkPoint> dictionary = new Dictionary<int, FaceMeshLandmarkPoint>(meshPoints.Count);
+		foreach (FaceMeshLandmarkPoint meshPoint in meshPoints)
+		{
+			if (double.IsFinite(meshPoint.X) && double.IsFinite(meshPoint.Y))
+			{
+				dictionary[meshPoint.Index] = meshPoint;
+			}
+		}
+		List<IndexedPoint> list = new List<IndexedPoint>(candidateIndices.Count);
+		foreach (int candidateIndex in candidateIndices)
+		{
+			if (dictionary.TryGetValue(candidateIndex, out var value))
+			{
+				list.Add(new IndexedPoint(candidateIndex, value.X, value.Y));
+			}
+		}
+		list.Sort(delegate(IndexedPoint left, IndexedPoint right)
+		{
+			int num4 = left.X.CompareTo(right.X);
+			if (num4 != 0)
+			{
+				return num4;
+			}
+			int num5 = left.Y.CompareTo(right.Y);
+			return (num5 == 0) ? left.Index.CompareTo(right.Index) : num5;
+		});
+		RemoveDuplicateCoordinates(list);
+		if (list.Count < 3)
+		{
+			return Array.Empty<int>();
+		}
+		IndexedPoint[] array = new IndexedPoint[list.Count * 2];
+		int count = 0;
+		foreach (IndexedPoint item in list)
+		{
+			AppendHullPoint(array, ref count, item);
+		}
+		int num = count;
+		for (int num2 = list.Count - 2; num2 >= 0; num2--)
+		{
+			while (count > num && count >= 2 && Cross(array[count - 2], array[count - 1], list[num2]) <= 1E-10)
+			{
+				count--;
+			}
+			array[count++] = list[num2];
+		}
+		count--;
+		if (count < 3)
+		{
+			return Array.Empty<int>();
+		}
+		int[] array2 = new int[count];
+		for (int num3 = 0; num3 < count; num3++)
+		{
+			array2[num3] = array[num3].Index;
+		}
+		if (!TryValidateClosedOutline(meshPoints, array2, closed: true, out string _))
+		{
+			return Array.Empty<int>();
+		}
+		return array2;
+	}
 
-        candidates.Sort(static (left, right) =>
-        {
-            var xOrder = left.X.CompareTo(right.X);
-            if (xOrder != 0)
-            {
-                return xOrder;
-            }
+	public static bool TryValidateClosedOutline(IReadOnlyList<FaceMeshLandmarkPoint> meshPoints, IReadOnlyList<int> outlineIndices, bool closed, out string failureReason)
+	{
+		if (!closed)
+		{
+			failureReason = "The eyebrow outline is open.";
+			return false;
+		}
+		if (outlineIndices.Count < 3 || outlineIndices.Distinct().Count() != outlineIndices.Count)
+		{
+			failureReason = "The eyebrow outline needs at least three unique vertices.";
+			return false;
+		}
+		Dictionary<int, FaceMeshLandmarkPoint> dictionary = new Dictionary<int, FaceMeshLandmarkPoint>(meshPoints.Count);
+		foreach (FaceMeshLandmarkPoint meshPoint in meshPoints)
+		{
+			dictionary[meshPoint.Index] = meshPoint;
+		}
+		IndexedPoint[] array = new IndexedPoint[outlineIndices.Count];
+		for (int i = 0; i < outlineIndices.Count; i++)
+		{
+			if (!dictionary.TryGetValue(outlineIndices[i], out var value) || !double.IsFinite(value.X) || !double.IsFinite(value.Y))
+			{
+				failureReason = $"Eyebrow vertex {outlineIndices[i]} is missing or invalid.";
+				return false;
+			}
+			array[i] = new IndexedPoint(value.Index, value.X, value.Y);
+			IndexedPoint left = array[(i + array.Length - 1) % array.Length];
+			if (i > 0 && SamePoint(left, array[i]))
+			{
+				failureReason = "The eyebrow outline contains a zero-length edge.";
+				return false;
+			}
+		}
+		if (SamePoint(array[^1], array[0]))
+		{
+			failureReason = "The eyebrow outline contains a zero-length closing edge.";
+			return false;
+		}
+		for (int j = 0; j < array.Length; j++)
+		{
+			int num = (j + 1) % array.Length;
+			for (int k = j + 1; k < array.Length; k++)
+			{
+				int num2 = (k + 1) % array.Length;
+				if (j != k && num != k && num2 != j && SegmentsIntersect(array[j], array[num], array[k], array[num2]))
+				{
+					failureReason = $"Eyebrow edges {j} and {k} cross.";
+					return false;
+				}
+			}
+		}
+		double num3 = 0.0;
+		for (int l = 0; l < array.Length; l++)
+		{
+			IndexedPoint indexedPoint = array[(l + 1) % array.Length];
+			num3 += array[l].X * indexedPoint.Y - indexedPoint.X * array[l].Y;
+		}
+		if (Math.Abs(num3) <= 1E-10)
+		{
+			failureReason = "The eyebrow outline has no enclosed area.";
+			return false;
+		}
+		failureReason = string.Empty;
+		return true;
+	}
 
-            var yOrder = left.Y.CompareTo(right.Y);
-            return yOrder != 0 ? yOrder : left.Index.CompareTo(right.Index);
-        });
-        RemoveDuplicateCoordinates(candidates);
-        if (candidates.Count < 3)
-        {
-            return [];
-        }
+	private static void RemoveDuplicateCoordinates(List<IndexedPoint> points)
+	{
+		int num = 1;
+		for (int i = 1; i < points.Count; i++)
+		{
+			if (!SamePoint(points[i], points[num - 1]))
+			{
+				points[num++] = points[i];
+			}
+		}
+		if (num < points.Count)
+		{
+			points.RemoveRange(num, points.Count - num);
+		}
+	}
 
-        var hull = new IndexedPoint[candidates.Count * 2];
-        var hullCount = 0;
-        foreach (var point in candidates)
-        {
-            AppendHullPoint(hull, ref hullCount, point);
-        }
+	private static void AppendHullPoint(IndexedPoint[] hull, ref int count, IndexedPoint point)
+	{
+		while (count >= 2 && Cross(hull[count - 2], hull[count - 1], point) <= 1E-10)
+		{
+			count--;
+		}
+		hull[count++] = point;
+	}
 
-        var lowerCount = hullCount;
-        for (var index = candidates.Count - 2; index >= 0; index--)
-        {
-            while (hullCount > lowerCount
-                   && hullCount >= 2
-                   && Cross(hull[hullCount - 2], hull[hullCount - 1], candidates[index]) <= GeometryEpsilon)
-            {
-                hullCount--;
-            }
+	private static double Cross(IndexedPoint origin, IndexedPoint a, IndexedPoint b)
+	{
+		return (a.X - origin.X) * (b.Y - origin.Y) - (a.Y - origin.Y) * (b.X - origin.X);
+	}
 
-            hull[hullCount++] = candidates[index];
-        }
+	private static bool SegmentsIntersect(IndexedPoint a, IndexedPoint b, IndexedPoint c, IndexedPoint d)
+	{
+		double num = Cross(a, b, c);
+		double num2 = Cross(a, b, d);
+		double num3 = Cross(c, d, a);
+		double num4 = Cross(c, d, b);
+		if (((num > 1E-10 && num2 < -1E-10) || (num < -1E-10 && num2 > 1E-10)) && ((num3 > 1E-10 && num4 < -1E-10) || (num3 < -1E-10 && num4 > 1E-10)))
+		{
+			return true;
+		}
+		if ((!(Math.Abs(num) <= 1E-10) || !IsOnSegment(a, b, c)) && (!(Math.Abs(num2) <= 1E-10) || !IsOnSegment(a, b, d)) && (!(Math.Abs(num3) <= 1E-10) || !IsOnSegment(c, d, a)))
+		{
+			if (Math.Abs(num4) <= 1E-10)
+			{
+				return IsOnSegment(c, d, b);
+			}
+			return false;
+		}
+		return true;
+	}
 
-        hullCount--;
-        if (hullCount < 3)
-        {
-            return [];
-        }
+	private static bool IsOnSegment(IndexedPoint start, IndexedPoint end, IndexedPoint point)
+	{
+		if (point.X >= Math.Min(start.X, end.X) - 1E-10 && point.X <= Math.Max(start.X, end.X) + 1E-10 && point.Y >= Math.Min(start.Y, end.Y) - 1E-10)
+		{
+			return point.Y <= Math.Max(start.Y, end.Y) + 1E-10;
+		}
+		return false;
+	}
 
-        var outline = new int[hullCount];
-        for (var index = 0; index < hullCount; index++)
-        {
-            outline[index] = hull[index].Index;
-        }
-
-        return TryValidateClosedOutline(meshPoints, outline, closed: true, out _)
-            ? outline
-            : [];
-    }
-
-    public static bool TryValidateClosedOutline(
-        IReadOnlyList<FaceMeshLandmarkPoint> meshPoints,
-        IReadOnlyList<int> outlineIndices,
-        bool closed,
-        out string failureReason)
-    {
-        if (!closed)
-        {
-            failureReason = "The eyebrow outline is open.";
-            return false;
-        }
-
-        if (outlineIndices.Count < 3 || outlineIndices.Distinct().Count() != outlineIndices.Count)
-        {
-            failureReason = "The eyebrow outline needs at least three unique vertices.";
-            return false;
-        }
-
-        var pointsByIndex = new Dictionary<int, FaceMeshLandmarkPoint>(meshPoints.Count);
-        foreach (var point in meshPoints)
-        {
-            pointsByIndex[point.Index] = point;
-        }
-
-        var polygon = new IndexedPoint[outlineIndices.Count];
-        for (var index = 0; index < outlineIndices.Count; index++)
-        {
-            if (!pointsByIndex.TryGetValue(outlineIndices[index], out var point)
-                || !double.IsFinite(point.X)
-                || !double.IsFinite(point.Y))
-            {
-                failureReason = $"Eyebrow vertex {outlineIndices[index]} is missing or invalid.";
-                return false;
-            }
-
-            polygon[index] = new IndexedPoint(point.Index, point.X, point.Y);
-            var previous = polygon[(index + polygon.Length - 1) % polygon.Length];
-            if (index > 0 && SamePoint(previous, polygon[index]))
-            {
-                failureReason = "The eyebrow outline contains a zero-length edge.";
-                return false;
-            }
-        }
-
-        if (SamePoint(polygon[^1], polygon[0]))
-        {
-            failureReason = "The eyebrow outline contains a zero-length closing edge.";
-            return false;
-        }
-
-        for (var firstEdge = 0; firstEdge < polygon.Length; firstEdge++)
-        {
-            var firstNext = (firstEdge + 1) % polygon.Length;
-            for (var secondEdge = firstEdge + 1; secondEdge < polygon.Length; secondEdge++)
-            {
-                var secondNext = (secondEdge + 1) % polygon.Length;
-                if (firstEdge == secondEdge
-                    || firstNext == secondEdge
-                    || secondNext == firstEdge)
-                {
-                    continue;
-                }
-
-                if (SegmentsIntersect(
-                        polygon[firstEdge],
-                        polygon[firstNext],
-                        polygon[secondEdge],
-                        polygon[secondNext]))
-                {
-                    failureReason = $"Eyebrow edges {firstEdge} and {secondEdge} cross.";
-                    return false;
-                }
-            }
-        }
-
-        var signedAreaTwice = 0d;
-        for (var index = 0; index < polygon.Length; index++)
-        {
-            var next = polygon[(index + 1) % polygon.Length];
-            signedAreaTwice += polygon[index].X * next.Y - next.X * polygon[index].Y;
-        }
-
-        if (Math.Abs(signedAreaTwice) <= GeometryEpsilon)
-        {
-            failureReason = "The eyebrow outline has no enclosed area.";
-            return false;
-        }
-
-        failureReason = string.Empty;
-        return true;
-    }
-
-    private static void RemoveDuplicateCoordinates(List<IndexedPoint> points)
-    {
-        var writeIndex = 1;
-        for (var readIndex = 1; readIndex < points.Count; readIndex++)
-        {
-            if (!SamePoint(points[readIndex], points[writeIndex - 1]))
-            {
-                points[writeIndex++] = points[readIndex];
-            }
-        }
-
-        if (writeIndex < points.Count)
-        {
-            points.RemoveRange(writeIndex, points.Count - writeIndex);
-        }
-    }
-
-    private static void AppendHullPoint(IndexedPoint[] hull, ref int count, IndexedPoint point)
-    {
-        while (count >= 2 && Cross(hull[count - 2], hull[count - 1], point) <= GeometryEpsilon)
-        {
-            count--;
-        }
-
-        hull[count++] = point;
-    }
-
-    private static double Cross(IndexedPoint origin, IndexedPoint a, IndexedPoint b)
-    {
-        return (a.X - origin.X) * (b.Y - origin.Y)
-            - (a.Y - origin.Y) * (b.X - origin.X);
-    }
-
-    private static bool SegmentsIntersect(IndexedPoint a, IndexedPoint b, IndexedPoint c, IndexedPoint d)
-    {
-        var abC = Cross(a, b, c);
-        var abD = Cross(a, b, d);
-        var cdA = Cross(c, d, a);
-        var cdB = Cross(c, d, b);
-
-        if (((abC > GeometryEpsilon && abD < -GeometryEpsilon)
-             || (abC < -GeometryEpsilon && abD > GeometryEpsilon))
-            && ((cdA > GeometryEpsilon && cdB < -GeometryEpsilon)
-                || (cdA < -GeometryEpsilon && cdB > GeometryEpsilon)))
-        {
-            return true;
-        }
-
-        return (Math.Abs(abC) <= GeometryEpsilon && IsOnSegment(a, b, c))
-            || (Math.Abs(abD) <= GeometryEpsilon && IsOnSegment(a, b, d))
-            || (Math.Abs(cdA) <= GeometryEpsilon && IsOnSegment(c, d, a))
-            || (Math.Abs(cdB) <= GeometryEpsilon && IsOnSegment(c, d, b));
-    }
-
-    private static bool IsOnSegment(IndexedPoint start, IndexedPoint end, IndexedPoint point)
-    {
-        return point.X >= Math.Min(start.X, end.X) - GeometryEpsilon
-            && point.X <= Math.Max(start.X, end.X) + GeometryEpsilon
-            && point.Y >= Math.Min(start.Y, end.Y) - GeometryEpsilon
-            && point.Y <= Math.Max(start.Y, end.Y) + GeometryEpsilon;
-    }
-
-    private static bool SamePoint(IndexedPoint left, IndexedPoint right)
-    {
-        return Math.Abs(left.X - right.X) <= GeometryEpsilon
-            && Math.Abs(left.Y - right.Y) <= GeometryEpsilon;
-    }
-
-    private readonly record struct IndexedPoint(int Index, double X, double Y);
+	private static bool SamePoint(IndexedPoint left, IndexedPoint right)
+	{
+		if (Math.Abs(left.X - right.X) <= 1E-10)
+		{
+			return Math.Abs(left.Y - right.Y) <= 1E-10;
+		}
+		return false;
+	}
 }

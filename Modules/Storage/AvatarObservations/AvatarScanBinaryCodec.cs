@@ -1,3 +1,5 @@
+using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Text;
 using AvatarBuilder.Modules.Vision.Common;
@@ -7,196 +9,215 @@ namespace AvatarBuilder.Modules.Storage.AvatarObservations;
 
 public static class AvatarScanBinaryCodec
 {
-    private static readonly byte[] Magic = "AVSCAN01"u8.ToArray();
-    private const int Version = 1;
+	private static readonly byte[] Magic = "AVSCAN01"u8.ToArray();
 
-    public static string WriteObject(string storageRoot, ThreeDdfaReconstructionSnapshot snapshot)
-    {
-        var objectFolder = AvatarStorageLayout.GetScanObjectFolder(storageRoot);
-        Directory.CreateDirectory(objectFolder);
-        var temporaryPath = Path.Combine(objectFolder, $".{Guid.NewGuid():N}.tmp");
-        try
-        {
-            using (var stream = new FileStream(
-                       temporaryPath,
-                       FileMode.CreateNew,
-                       FileAccess.Write,
-                       FileShare.None,
-                       1 << 20,
-                       FileOptions.SequentialScan))
-            using (var writer = new BinaryWriter(stream, Encoding.UTF8, leaveOpen: true))
-            {
-                writer.Write(Magic);
-                writer.Write(Version);
-                WriteDensePoints(writer, snapshot.Vertices);
-                WriteDensePoints(writer, snapshot.CanonicalIdentityVertices);
-                WriteIndexedPoints(writer, snapshot.SparseLandmarks);
-                WriteDoubles(writer, snapshot.CameraMatrixCoefficients);
-                WriteDoubles(writer, snapshot.ShapeCoefficients);
-                WriteDoubles(writer, snapshot.ExpressionCoefficients);
-                writer.Flush();
-                stream.Flush(flushToDisk: true);
-            }
+	private const int Version = 2;
 
-            return AvatarStorageLayout.PromoteContentAddressedObject(temporaryPath, objectFolder, ".avscan");
-        }
-        catch
-        {
-            TryDelete(temporaryPath);
-            throw;
-        }
-    }
+	public static string WriteObject(string storageRoot, AvatarReconstructionSnapshot snapshot)
+	{
+		string scanObjectFolder = AvatarStorageLayout.GetScanObjectFolder(storageRoot);
+		Directory.CreateDirectory(scanObjectFolder);
+		string text = Path.Combine(scanObjectFolder, $".{Guid.NewGuid():N}.tmp");
+		try
+		{
+			using (FileStream fileStream = new FileStream(text, FileMode.CreateNew, FileAccess.Write, FileShare.None, 1048576, FileOptions.SequentialScan))
+			{
+				using BinaryWriter binaryWriter = new BinaryWriter(fileStream, Encoding.UTF8, leaveOpen: true);
+				binaryWriter.Write(Magic);
+				binaryWriter.Write(2);
+				WriteDensePoints(binaryWriter, snapshot.Vertices);
+				WriteDensePoints(binaryWriter, snapshot.CanonicalIdentityVertices);
+				WriteIndexedPoints(binaryWriter, snapshot.SparseLandmarks);
+				WriteDoubles(binaryWriter, snapshot.CameraMatrixCoefficients);
+				WriteDoubles(binaryWriter, snapshot.ShapeCoefficients);
+				WriteDoubles(binaryWriter, snapshot.ExpressionCoefficients);
+				WriteDoubles(binaryWriter, snapshot.PoseCoefficients);
+				WriteIndexedPoints(binaryWriter, snapshot.ObservedLandmarks);
+				binaryWriter.Write(snapshot.SourceFrameWidthPixels);
+				binaryWriter.Write(snapshot.SourceFrameHeightPixels);
+				WriteFaceBox(binaryWriter, snapshot.InputFaceBox);
+				binaryWriter.Flush();
+				fileStream.Flush(flushToDisk: true);
+			}
+			return AvatarStorageLayout.PromoteContentAddressedObject(text, scanObjectFolder, ".avscan");
+		}
+		catch
+		{
+			TryDelete(text);
+			throw;
+		}
+	}
 
-    public static AvatarScanGeometry Read(string path)
-    {
-        using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 1 << 20, FileOptions.SequentialScan);
-        using var reader = new BinaryReader(stream, Encoding.UTF8, leaveOpen: false);
-        var magic = reader.ReadBytes(Magic.Length);
-        if (!magic.AsSpan().SequenceEqual(Magic))
-        {
-            throw new InvalidDataException($"Avatar scan has an unknown signature: {path}");
-        }
+	public static AvatarScanGeometry Read(string path)
+	{
+		using FileStream input = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 1048576, FileOptions.SequentialScan);
+		using BinaryReader binaryReader = new BinaryReader(input, Encoding.UTF8, leaveOpen: false);
+		if (!((ReadOnlySpan<byte>)binaryReader.ReadBytes(Magic.Length).AsSpan()).SequenceEqual((ReadOnlySpan<byte>)Magic))
+		{
+			throw new InvalidDataException("Avatar scan has an unknown signature: " + path);
+		}
+		int num = binaryReader.ReadInt32();
+		if ((num < 1 || num > 2) ? true : false)
+		{
+			throw new InvalidDataException($"Avatar scan version {num} is not supported: {path}");
+		}
+		AvatarScanGeometry avatarScanGeometry = new AvatarScanGeometry
+		{
+			Vertices = ReadDensePoints(binaryReader),
+			CanonicalIdentityVertices = ReadDensePoints(binaryReader),
+			SparseLandmarks = ReadIndexedPoints(binaryReader),
+			CameraMatrixCoefficients = ReadDoubles(binaryReader),
+			ShapeCoefficients = ReadDoubles(binaryReader),
+			ExpressionCoefficients = ReadDoubles(binaryReader)
+		};
+		if (num == 1)
+		{
+			return avatarScanGeometry;
+		}
+		return avatarScanGeometry with
+		{
+			PoseCoefficients = ReadDoubles(binaryReader),
+			ObservedLandmarks = ReadIndexedPoints(binaryReader),
+			SourceFrameWidthPixels = binaryReader.ReadInt32(),
+			SourceFrameHeightPixels = binaryReader.ReadInt32(),
+			InputFaceBox = ReadFaceBox(binaryReader)
+		};
+	}
 
-        var version = reader.ReadInt32();
-        if (version != Version)
-        {
-            throw new InvalidDataException($"Avatar scan version {version} is not supported: {path}");
-        }
+	private static void WriteDensePoints(BinaryWriter writer, IReadOnlyList<FaceMeshLandmarkPoint> points)
+	{
+		writer.Write(points.Count);
+		for (int i = 0; i < points.Count; i++)
+		{
+			FaceMeshLandmarkPoint faceMeshLandmarkPoint = points[i];
+			if (faceMeshLandmarkPoint.Index != i)
+			{
+				throw new InvalidDataException($"Dense scan point {i} had non-canonical index {faceMeshLandmarkPoint.Index}.");
+			}
+			writer.Write((float)faceMeshLandmarkPoint.X);
+			writer.Write((float)faceMeshLandmarkPoint.Y);
+			writer.Write((float)faceMeshLandmarkPoint.Z);
+		}
+	}
 
-        return new AvatarScanGeometry
-        {
-            Vertices = ReadDensePoints(reader),
-            CanonicalIdentityVertices = ReadDensePoints(reader),
-            SparseLandmarks = ReadIndexedPoints(reader),
-            CameraMatrixCoefficients = ReadDoubles(reader),
-            ShapeCoefficients = ReadDoubles(reader),
-            ExpressionCoefficients = ReadDoubles(reader)
-        };
-    }
+	private static List<FaceMeshLandmarkPoint> ReadDensePoints(BinaryReader reader)
+	{
+		int num = ReadCount(reader, 1000000, "dense point");
+		List<FaceMeshLandmarkPoint> list = new List<FaceMeshLandmarkPoint>(num);
+		for (int i = 0; i < num; i++)
+		{
+			list.Add(new FaceMeshLandmarkPoint
+			{
+				Index = i,
+				X = reader.ReadSingle(),
+				Y = reader.ReadSingle(),
+				Z = reader.ReadSingle()
+			});
+		}
+		return list;
+	}
 
-    private static void WriteDensePoints(BinaryWriter writer, IReadOnlyList<FaceMeshLandmarkPoint> points)
-    {
-        writer.Write(points.Count);
-        for (var index = 0; index < points.Count; index++)
-        {
-            var point = points[index];
-            if (point.Index != index)
-            {
-                throw new InvalidDataException($"Dense scan point {index} had non-canonical index {point.Index}.");
-            }
+	private static void WriteIndexedPoints(BinaryWriter writer, IReadOnlyList<FaceMeshLandmarkPoint> points)
+	{
+		writer.Write(points.Count);
+		foreach (FaceMeshLandmarkPoint point in points)
+		{
+			writer.Write(point.Index);
+			writer.Write((float)point.X);
+			writer.Write((float)point.Y);
+			writer.Write((float)point.Z);
+		}
+	}
 
-            writer.Write((float)point.X);
-            writer.Write((float)point.Y);
-            writer.Write((float)point.Z);
-        }
-    }
+	private static List<FaceMeshLandmarkPoint> ReadIndexedPoints(BinaryReader reader)
+	{
+		int num = ReadCount(reader, 100000, "indexed point");
+		List<FaceMeshLandmarkPoint> list = new List<FaceMeshLandmarkPoint>(num);
+		for (int i = 0; i < num; i++)
+		{
+			list.Add(new FaceMeshLandmarkPoint
+			{
+				Index = reader.ReadInt32(),
+				X = reader.ReadSingle(),
+				Y = reader.ReadSingle(),
+				Z = reader.ReadSingle()
+			});
+		}
+		return list;
+	}
 
-    private static List<FaceMeshLandmarkPoint> ReadDensePoints(BinaryReader reader)
-    {
-        var count = ReadCount(reader, 1_000_000, "dense point");
-        var points = new List<FaceMeshLandmarkPoint>(count);
-        for (var index = 0; index < count; index++)
-        {
-            points.Add(new FaceMeshLandmarkPoint
-            {
-                Index = index,
-                X = reader.ReadSingle(),
-                Y = reader.ReadSingle(),
-                Z = reader.ReadSingle()
-            });
-        }
+	private static void WriteDoubles(BinaryWriter writer, IReadOnlyList<double> values)
+	{
+		writer.Write(values.Count);
+		foreach (double value in values)
+		{
+			writer.Write(double.IsFinite(value) ? value : 0.0);
+		}
+	}
 
-        return points;
-    }
+	private static List<double> ReadDoubles(BinaryReader reader)
+	{
+		int num = ReadCount(reader, 10000, "coefficient");
+		List<double> list = new List<double>(num);
+		for (int i = 0; i < num; i++)
+		{
+			list.Add(reader.ReadDouble());
+		}
+		return list;
+	}
 
-    private static void WriteIndexedPoints(BinaryWriter writer, IReadOnlyList<FaceMeshLandmarkPoint> points)
-    {
-        writer.Write(points.Count);
-        foreach (var point in points)
-        {
-            writer.Write(point.Index);
-            writer.Write((float)point.X);
-            writer.Write((float)point.Y);
-            writer.Write((float)point.Z);
-        }
-    }
+	private static void WriteFaceBox(BinaryWriter writer, ReconstructionInputFaceBox? faceBox)
+	{
+		writer.Write(faceBox != null);
+		if (faceBox != null)
+		{
+			writer.Write(faceBox.Left);
+			writer.Write(faceBox.Top);
+			writer.Write(faceBox.Right);
+			writer.Write(faceBox.Bottom);
+			writer.Write(faceBox.Normalized);
+			writer.Write(faceBox.Confidence);
+		}
+	}
 
-    private static List<FaceMeshLandmarkPoint> ReadIndexedPoints(BinaryReader reader)
-    {
-        var count = ReadCount(reader, 100_000, "indexed point");
-        var points = new List<FaceMeshLandmarkPoint>(count);
-        for (var index = 0; index < count; index++)
-        {
-            points.Add(new FaceMeshLandmarkPoint
-            {
-                Index = reader.ReadInt32(),
-                X = reader.ReadSingle(),
-                Y = reader.ReadSingle(),
-                Z = reader.ReadSingle()
-            });
-        }
+	private static ReconstructionInputFaceBox? ReadFaceBox(BinaryReader reader)
+	{
+		if (!reader.ReadBoolean())
+		{
+			return null;
+		}
+		return new ReconstructionInputFaceBox
+		{
+			Left = reader.ReadDouble(),
+			Top = reader.ReadDouble(),
+			Right = reader.ReadDouble(),
+			Bottom = reader.ReadDouble(),
+			Normalized = reader.ReadBoolean(),
+			Confidence = reader.ReadDouble()
+		};
+	}
 
-        return points;
-    }
+	private static int ReadCount(BinaryReader reader, int maximum, string label)
+	{
+		int num = reader.ReadInt32();
+		if (num < 0 || num > maximum)
+		{
+			throw new InvalidDataException($"Avatar scan {label} count {num} is invalid.");
+		}
+		return num;
+	}
 
-    private static void WriteDoubles(BinaryWriter writer, IReadOnlyList<double> values)
-    {
-        writer.Write(values.Count);
-        foreach (var value in values)
-        {
-            writer.Write(double.IsFinite(value) ? value : 0d);
-        }
-    }
-
-    private static List<double> ReadDoubles(BinaryReader reader)
-    {
-        var count = ReadCount(reader, 10_000, "coefficient");
-        var values = new List<double>(count);
-        for (var index = 0; index < count; index++)
-        {
-            values.Add(reader.ReadDouble());
-        }
-
-        return values;
-    }
-
-    private static int ReadCount(BinaryReader reader, int maximum, string label)
-    {
-        var count = reader.ReadInt32();
-        if (count < 0 || count > maximum)
-        {
-            throw new InvalidDataException($"Avatar scan {label} count {count} is invalid.");
-        }
-
-        return count;
-    }
-
-    private static void TryDelete(string path)
-    {
-        try
-        {
-            if (File.Exists(path))
-            {
-                File.Delete(path);
-            }
-        }
-        catch
-        {
-        }
-    }
-}
-
-public sealed class AvatarScanGeometry
-{
-    public List<FaceMeshLandmarkPoint> Vertices { get; init; } = [];
-
-    public List<FaceMeshLandmarkPoint> CanonicalIdentityVertices { get; init; } = [];
-
-    public List<FaceMeshLandmarkPoint> SparseLandmarks { get; init; } = [];
-
-    public List<double> CameraMatrixCoefficients { get; init; } = [];
-
-    public List<double> ShapeCoefficients { get; init; } = [];
-
-    public List<double> ExpressionCoefficients { get; init; } = [];
+	private static void TryDelete(string path)
+	{
+		try
+		{
+			if (File.Exists(path))
+			{
+				File.Delete(path);
+			}
+		}
+		catch
+		{
+		}
+	}
 }

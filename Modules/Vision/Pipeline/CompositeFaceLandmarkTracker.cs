@@ -1,588 +1,564 @@
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Windows;
+using System.Windows.Media.Imaging;
+using AvatarBuilder.Modules.Vision.Common;
 using AvatarBuilder.Modules.Vision.MediaPipe;
 using AvatarBuilder.Modules.Vision.OpenCv;
-using AvatarBuilder.Modules.Vision.Common;
-using System.Windows.Media.Imaging;
-using System.Windows;
 
 namespace AvatarBuilder.Modules.Vision.Pipeline;
 
-public sealed class CompositeFaceLandmarkTracker : IStatefulFaceLandmarkTracker
+public sealed class CompositeFaceLandmarkTracker : IStatefulFaceLandmarkTracker, IFaceLandmarkTracker, IDisposable
 {
-    private static readonly TimeSpan PreviousFaceRecoveryWindow = TimeSpan.FromSeconds(2.5d);
-
-    private readonly IReadOnlyList<IFaceLandmarkTracker> _trackers;
-    private string _lastBackendStatus = "waiting";
-    private Rect? _lastFusedFace;
-    private DateTime _lastFusedFaceCapturedAtUtc = DateTime.MinValue;
-
-    public CompositeFaceLandmarkTracker()
-        : this(CreateDefaultTrackers())
-    {
-    }
-
-    public CompositeFaceLandmarkTracker(IReadOnlyList<IFaceLandmarkTracker> trackers)
-    {
-        _trackers = trackers;
-    }
-
-    public string Name => "Composite landmark tracker";
-
-    public bool IsAvailable => _trackers.Any(tracker => tracker.IsAvailable);
-
-    public string LastBackendStatus => _lastBackendStatus;
-
-    public int MaxDetectionDimension
-    {
-        get => _trackers.Count == 0 ? 960 : _trackers.Max(tracker => tracker.MaxDetectionDimension);
-        set
-        {
-            foreach (var tracker in _trackers)
-            {
-                tracker.MaxDetectionDimension = value;
-            }
-        }
-    }
-
-    public FaceLandmarkTrackingResult Detect(BitmapSource bitmap, DateTime capturedAtUtc)
-    {
-        var statuses = new List<string>();
-        FaceLandmarkTrackingResult? fused = null;
-        IFaceLandmarkCropRefiner? cropRefiner = null;
-        foreach (var tracker in _trackers)
-        {
-            if (cropRefiner is null && tracker is IFaceLandmarkCropRefiner refiner && refiner.IsAvailable)
-            {
-                cropRefiner = refiner;
-            }
-
-            if (!tracker.IsAvailable)
-            {
-                var skipped = tracker.Detect(bitmap, capturedAtUtc);
-                if (!string.IsNullOrWhiteSpace(skipped.BackendStatus))
-                {
-                    statuses.Add($"{tracker.Name}: {skipped.BackendStatus}");
-                }
-
-                continue;
-            }
-
-            var result = tracker.Detect(bitmap, capturedAtUtc);
-            if (result.HasFace)
-            {
-                statuses.Add($"{result.BackendName}: {result.BackendStatus}");
-                if (HasMediaPipeDenseLock(result) && HasUsableFaceCueGeometry(result))
-                {
-                    _lastBackendStatus = string.Join(" | ", statuses);
-                    _lastFusedFace = GetFaceBounds(result) ?? _lastFusedFace;
-                    _lastFusedFaceCapturedAtUtc = capturedAtUtc;
-                    return new FaceLandmarkTrackingResult
-                    {
-                        BackendName = result.BackendName,
-                        BackendStatus = _lastBackendStatus,
-                        FeatureDetection = result.FeatureDetection,
-                        LandmarkFrame = result.LandmarkFrame,
-                        Diagnostics = result.Diagnostics
-                    };
-                }
-
-                fused = fused is null ? result : FuseResults(fused, result, capturedAtUtc, _lastFusedFace);
-                continue;
-            }
-
-            if (!string.IsNullOrWhiteSpace(result.BackendStatus))
-            {
-                statuses.Add($"{result.BackendName}: {result.BackendStatus}");
-            }
-        }
-
-        if (fused is not null)
-        {
-            fused = TryRefineWithFaceCrop(bitmap, capturedAtUtc, fused, cropRefiner, statuses);
-            _lastBackendStatus = string.Join(" | ", statuses);
-            _lastFusedFace = GetFaceBounds(fused) ?? _lastFusedFace;
-            _lastFusedFaceCapturedAtUtc = capturedAtUtc;
-            return new FaceLandmarkTrackingResult
-            {
-                BackendName = fused.BackendName,
-                BackendStatus = _lastBackendStatus,
-                FeatureDetection = fused.FeatureDetection,
-                LandmarkFrame = fused.LandmarkFrame,
-                Diagnostics = fused.Diagnostics
-            };
-        }
-
-        var recovered = TryRecoverWithPreviousFaceCrop(bitmap, capturedAtUtc, cropRefiner, statuses);
-        if (recovered is not null)
-        {
-            _lastBackendStatus = string.Join(" | ", statuses);
-            _lastFusedFace = GetFaceBounds(recovered) ?? _lastFusedFace;
-            _lastFusedFaceCapturedAtUtc = capturedAtUtc;
-            return new FaceLandmarkTrackingResult
-            {
-                BackendName = recovered.BackendName,
-                BackendStatus = _lastBackendStatus,
-                FeatureDetection = recovered.FeatureDetection,
-                LandmarkFrame = recovered.LandmarkFrame,
-                Diagnostics = recovered.Diagnostics
-            };
-        }
-
-        _lastBackendStatus = statuses.Count == 0
-            ? (IsAvailable ? "all trackers searching" : "no landmark backend available")
-            : string.Join(" | ", statuses);
-        if (capturedAtUtc - _lastFusedFaceCapturedAtUtc > PreviousFaceRecoveryWindow)
-        {
-            _lastFusedFace = null;
-            _lastFusedFaceCapturedAtUtc = DateTime.MinValue;
-        }
-
-        return new FaceLandmarkTrackingResult
-        {
-            BackendName = Name,
-            BackendStatus = _lastBackendStatus
-        };
-    }
-
-    public void Dispose()
-    {
-        foreach (var tracker in _trackers)
-        {
-            tracker.Dispose();
-        }
-    }
-
-    private static IReadOnlyList<IFaceLandmarkTracker> CreateDefaultTrackers()
-    {
-        var trackers = new List<IFaceLandmarkTracker>(3);
-        try
-        {
-            AddOwnedTracker(trackers, static () => new MediaPipeFaceLandmarkerSidecarTracker());
-            AddOwnedTracker(trackers, static () => new OpenCvFacemarkLandmarkTracker());
-            AddOwnedTracker(trackers, static () => new OpenCvApertureLandmarkTracker());
-            return trackers;
-        }
-        catch
-        {
-            foreach (var tracker in trackers)
-            {
-                tracker.Dispose();
-            }
-
-            throw;
-        }
-    }
-
-    private static void AddOwnedTracker(
-        ICollection<IFaceLandmarkTracker> trackers,
-        Func<IFaceLandmarkTracker> createTracker)
-    {
-        IFaceLandmarkTracker? tracker = null;
-        try
-        {
-            tracker = createTracker();
-            trackers.Add(tracker);
-            tracker = null;
-        }
-        finally
-        {
-            tracker?.Dispose();
-        }
-    }
-
-    private static FaceLandmarkTrackingResult TryRefineWithFaceCrop(
-        BitmapSource bitmap,
-        DateTime capturedAtUtc,
-        FaceLandmarkTrackingResult fused,
-        IFaceLandmarkCropRefiner? cropRefiner,
-        List<string> statuses)
-    {
-        if (cropRefiner is null || HasMediaPipeDenseLock(fused))
-        {
-            return fused;
-        }
-
-        var faceHint = GetFaceBounds(fused);
-        if (faceHint is not Rect face || face.Width <= 0d || face.Height <= 0d)
-        {
-            return fused;
-        }
-
-        var cropResult = cropRefiner.DetectFaceCrop(bitmap, face, capturedAtUtc);
-        if (!string.IsNullOrWhiteSpace(cropResult.BackendStatus))
-        {
-            statuses.Add($"{cropResult.BackendName}: {cropResult.BackendStatus}");
-        }
-
-        if (!cropResult.HasFace || !HasMediaPipeDenseLock(cropResult) || !FacesAgree(cropResult, fused))
-        {
-            return fused;
-        }
-
-        return FuseResults(cropResult, fused, capturedAtUtc, previousFusedFace: null);
-    }
-
-    private FaceLandmarkTrackingResult? TryRecoverWithPreviousFaceCrop(
-        BitmapSource bitmap,
-        DateTime capturedAtUtc,
-        IFaceLandmarkCropRefiner? cropRefiner,
-        List<string> statuses)
-    {
-        if (cropRefiner is null
-            || _lastFusedFace is not Rect previousFace
-            || previousFace.Width <= 0d
-            || previousFace.Height <= 0d)
-        {
-            return null;
-        }
-
-        var previousAge = capturedAtUtc - _lastFusedFaceCapturedAtUtc;
-        if (previousAge < TimeSpan.Zero || previousAge > PreviousFaceRecoveryWindow)
-        {
-            return null;
-        }
-
-        var cropResult = cropRefiner.DetectFaceCrop(bitmap, previousFace, capturedAtUtc);
-        if (!string.IsNullOrWhiteSpace(cropResult.BackendStatus))
-        {
-            statuses.Add($"{cropResult.BackendName}: {cropResult.BackendStatus}");
-        }
-
-        if (!cropResult.HasFace
-            || !HasMediaPipeDenseLock(cropResult)
-            || !HasUsableFaceCueGeometry(cropResult))
-        {
-            return null;
-        }
-
-        statuses.Add($"{cropResult.BackendName}: temporal recovery from previous face hint ({previousAge.TotalSeconds:0.00}s old)");
-        return new FaceLandmarkTrackingResult
-        {
-            BackendName = cropResult.BackendName,
-            BackendStatus = $"{cropResult.BackendStatus}; temporal recovery from previous face hint ({previousAge.TotalSeconds:0.00}s old)",
-            FeatureDetection = cropResult.FeatureDetection,
-            LandmarkFrame = cropResult.LandmarkFrame
-        };
-    }
-
-    private static FaceLandmarkTrackingResult FuseResults(
-        FaceLandmarkTrackingResult primary,
-        FaceLandmarkTrackingResult candidate,
-        DateTime capturedAtUtc,
-        Rect? previousFusedFace)
-    {
-        if (!primary.HasFace)
-        {
-            return candidate;
-        }
-
-        if (!candidate.HasFace || !FacesAgree(primary, candidate))
-        {
-            return ChooseDisagreementResult(primary, candidate, previousFusedFace);
-        }
-
-        var primaryFrame = primary.LandmarkFrame;
-        var candidateFrame = candidate.LandmarkFrame;
-        var useCandidateEyes = ShouldUseCandidateEyes(primaryFrame, candidateFrame, candidate.BackendName);
-        var useCandidateMouth = ShouldUseCandidateMouth(primaryFrame, candidateFrame, candidate.BackendName);
-        if (!useCandidateEyes && !useCandidateMouth)
-        {
-            return primary;
-        }
-
-        var primaryFeature = primary.FeatureDetection;
-        var candidateFeature = candidate.FeatureDetection;
-        var fusedFrame = new FaceLandmarkFrame
-        {
-            HasFace = true,
-            Source = $"{primaryFrame.Source}; fused {candidateFrame.Source}",
-            CapturedAtUtc = capturedAtUtc,
-            TrackingConfidence = Math.Max(primaryFrame.TrackingConfidence, candidateFrame.TrackingConfidence * 0.92d),
-            EyeConfidence = useCandidateEyes ? candidateFrame.EyeConfidence : primaryFrame.EyeConfidence,
-            MouthConfidence = useCandidateMouth ? candidateFrame.MouthConfidence : primaryFrame.MouthConfidence,
-            EyeImageQualityAvailable = useCandidateEyes ? candidateFrame.EyeImageQualityAvailable : primaryFrame.EyeImageQualityAvailable,
-            MouthImageQualityAvailable = useCandidateMouth ? candidateFrame.MouthImageQualityAvailable : primaryFrame.MouthImageQualityAvailable,
-            EyeGlarePercent = useCandidateEyes ? candidateFrame.EyeGlarePercent : primaryFrame.EyeGlarePercent,
-            MouthGlarePercent = useCandidateMouth ? candidateFrame.MouthGlarePercent : primaryFrame.MouthGlarePercent,
-            EyeContrastPercent = useCandidateEyes ? candidateFrame.EyeContrastPercent : primaryFrame.EyeContrastPercent,
-            MouthContrastPercent = useCandidateMouth ? candidateFrame.MouthContrastPercent : primaryFrame.MouthContrastPercent,
-            EyeSharpnessPercent = useCandidateEyes ? candidateFrame.EyeSharpnessPercent : primaryFrame.EyeSharpnessPercent,
-            MouthSharpnessPercent = useCandidateMouth ? candidateFrame.MouthSharpnessPercent : primaryFrame.MouthSharpnessPercent,
-            EyeDarkCoveragePercent = useCandidateEyes ? candidateFrame.EyeDarkCoveragePercent : primaryFrame.EyeDarkCoveragePercent,
-            MouthDarkCoveragePercent = useCandidateMouth ? candidateFrame.MouthDarkCoveragePercent : primaryFrame.MouthDarkCoveragePercent,
-            LeftEyeReconstructed = useCandidateEyes ? candidateFrame.LeftEyeReconstructed : primaryFrame.LeftEyeReconstructed,
-            RightEyeReconstructed = useCandidateEyes ? candidateFrame.RightEyeReconstructed : primaryFrame.RightEyeReconstructed,
-            MouthReconstructed = useCandidateMouth ? candidateFrame.MouthReconstructed : primaryFrame.MouthReconstructed,
-            EyeArtifactSuppressed = useCandidateEyes ? candidateFrame.EyeArtifactSuppressed : primaryFrame.EyeArtifactSuppressed,
-            HeadYawDegrees = primaryFrame.HeadYawDegrees,
-            HeadPitchDegrees = primaryFrame.HeadPitchDegrees,
-            HeadRollDegrees = primaryFrame.HeadRollDegrees,
-            BlendshapeScores = primaryFrame.BlendshapeScores.Count > 0 ? primaryFrame.BlendshapeScores : candidateFrame.BlendshapeScores,
-            DenseMeshTopology = primaryFrame.DenseMeshPoints.Count > 0 ? primaryFrame.DenseMeshTopology : candidateFrame.DenseMeshTopology,
-            DenseMeshPoints = primaryFrame.DenseMeshPoints.Count > 0 ? primaryFrame.DenseMeshPoints : candidateFrame.DenseMeshPoints,
-            FacialTransformationMatrix = primaryFrame.FacialTransformationMatrix.Count > 0 ? primaryFrame.FacialTransformationMatrix : candidateFrame.FacialTransformationMatrix,
-            FaceContour = primaryFrame.FaceContour.Count > 0 ? primaryFrame.FaceContour : candidateFrame.FaceContour,
-            LeftEyeContour = useCandidateEyes ? candidateFrame.LeftEyeContour : primaryFrame.LeftEyeContour,
-            RightEyeContour = useCandidateEyes ? candidateFrame.RightEyeContour : primaryFrame.RightEyeContour,
-            LeftBrowContour = useCandidateEyes && candidateFrame.LeftBrowContour.Count > 0 ? candidateFrame.LeftBrowContour : primaryFrame.LeftBrowContour.Count > 0 ? primaryFrame.LeftBrowContour : candidateFrame.LeftBrowContour,
-            RightBrowContour = useCandidateEyes && candidateFrame.RightBrowContour.Count > 0 ? candidateFrame.RightBrowContour : primaryFrame.RightBrowContour.Count > 0 ? primaryFrame.RightBrowContour : candidateFrame.RightBrowContour,
-            OuterLipContour = useCandidateMouth ? candidateFrame.OuterLipContour : primaryFrame.OuterLipContour,
-            InnerLipContour = useCandidateMouth ? candidateFrame.InnerLipContour : primaryFrame.InnerLipContour,
-            JawContour = primaryFrame.JawContour.Count > 0 ? primaryFrame.JawContour : candidateFrame.JawContour
-        };
-
-        var fusedFeature = new FaceFeatureDetection
-        {
-            HasFace = true,
-            Source = $"{primaryFeature.Source}; fused {candidateFeature.Source}",
-            FaceBox = primaryFeature.HasFace ? primaryFeature.FaceBox : candidateFeature.FaceBox,
-            LeftEyeBox = useCandidateEyes ? candidateFeature.LeftEyeBox ?? primaryFeature.LeftEyeBox : primaryFeature.LeftEyeBox,
-            RightEyeBox = useCandidateEyes ? candidateFeature.RightEyeBox ?? primaryFeature.RightEyeBox : primaryFeature.RightEyeBox,
-            MouthBox = useCandidateMouth ? candidateFeature.MouthBox ?? primaryFeature.MouthBox : primaryFeature.MouthBox,
-            TrackingConfidence = fusedFrame.TrackingConfidence,
-            EyeConfidence = fusedFrame.EyeConfidence,
-            MouthConfidence = fusedFrame.MouthConfidence,
-            EyeImageQualityAvailable = fusedFrame.EyeImageQualityAvailable,
-            MouthImageQualityAvailable = fusedFrame.MouthImageQualityAvailable,
-            EyeGlarePercent = fusedFrame.EyeGlarePercent,
-            MouthGlarePercent = fusedFrame.MouthGlarePercent,
-            EyeContrastPercent = fusedFrame.EyeContrastPercent,
-            MouthContrastPercent = fusedFrame.MouthContrastPercent,
-            EyeSharpnessPercent = fusedFrame.EyeSharpnessPercent,
-            MouthSharpnessPercent = fusedFrame.MouthSharpnessPercent,
-            EyeDarkCoveragePercent = fusedFrame.EyeDarkCoveragePercent,
-            MouthDarkCoveragePercent = fusedFrame.MouthDarkCoveragePercent,
-            FaceContour = fusedFrame.FaceContour,
-            LeftEyeContour = fusedFrame.LeftEyeContour,
-            RightEyeContour = fusedFrame.RightEyeContour,
-            OuterLipContour = fusedFrame.OuterLipContour,
-            InnerLipContour = fusedFrame.InnerLipContour,
-            JawContour = fusedFrame.JawContour
-        };
-
-        return new FaceLandmarkTrackingResult
-        {
-            BackendName = "Composite landmark fusion",
-            BackendStatus = $"{primary.BackendStatus}; fused {candidate.BackendStatus}",
-            FeatureDetection = fusedFeature,
-            LandmarkFrame = fusedFrame
-        };
-    }
-
-    private static bool ShouldUseCandidateEyes(FaceLandmarkFrame primary, FaceLandmarkFrame candidate, string candidateBackend)
-    {
-        if (!candidate.HasEyeContours || candidate.EyeConfidence < 0.20d)
-        {
-            return false;
-        }
-
-        if (!primary.HasEyeContours)
-        {
-            return true;
-        }
-
-        if (IsHighFidelityLandmarkSource(primary.Source)
-            && candidateBackend.Contains("aperture", StringComparison.OrdinalIgnoreCase))
-        {
-            return primary.EyeConfidence < 0.55d
-                || candidate.EyeConfidence >= primary.EyeConfidence + 0.16d
-                || primary.EyeArtifactSuppressed
-                || !primary.HasEyeContours;
-        }
-
-        return candidateBackend.Contains("aperture", StringComparison.OrdinalIgnoreCase)
-            || candidate.EyeConfidence >= primary.EyeConfidence + 0.08d;
-    }
-
-    private static bool ShouldUseCandidateMouth(FaceLandmarkFrame primary, FaceLandmarkFrame candidate, string candidateBackend)
-    {
-        if (!candidate.HasMouthContours || candidate.MouthConfidence < 0.18d)
-        {
-            return false;
-        }
-
-        if (!primary.HasMouthContours)
-        {
-            return true;
-        }
-
-        if (IsHighFidelityLandmarkSource(primary.Source)
-            && candidateBackend.Contains("aperture", StringComparison.OrdinalIgnoreCase))
-        {
-            return primary.MouthConfidence < 0.52d
-                || candidate.MouthConfidence >= primary.MouthConfidence + 0.16d
-                || primary.MouthReconstructed
-                || !primary.HasMouthContours;
-        }
-
-        return candidateBackend.Contains("aperture", StringComparison.OrdinalIgnoreCase)
-            || candidate.MouthConfidence >= primary.MouthConfidence + 0.08d;
-    }
-
-    private static bool IsHighFidelityLandmarkSource(string source)
-    {
-        return source.Contains("MediaPipe", StringComparison.OrdinalIgnoreCase)
-            || source.Contains("Face Landmarker", StringComparison.OrdinalIgnoreCase)
-            || source.Contains("dense", StringComparison.OrdinalIgnoreCase)
-            || source.Contains("face mesh", StringComparison.OrdinalIgnoreCase);
-    }
-
-    private static bool HasMediaPipeDenseLock(FaceLandmarkTrackingResult result)
-    {
-        return result.BackendStatus.Contains("MediaPipe dense landmark lock", StringComparison.OrdinalIgnoreCase)
-            || result.LandmarkFrame.Source.Contains("MediaPipe", StringComparison.OrdinalIgnoreCase)
-            || result.LandmarkFrame.Source.Contains("Face Landmarker", StringComparison.OrdinalIgnoreCase);
-    }
-
-    private static bool HasUsableFaceCueGeometry(FaceLandmarkTrackingResult result)
-    {
-        return result.LandmarkFrame.HasEyeContours || result.LandmarkFrame.HasMouthContours;
-    }
-
-    private static FaceLandmarkTrackingResult ChooseDisagreementResult(
-        FaceLandmarkTrackingResult primary,
-        FaceLandmarkTrackingResult candidate,
-        Rect? previousFusedFace)
-    {
-        if (!candidate.HasFace)
-        {
-            return primary;
-        }
-
-        if (previousFusedFace is Rect previous)
-        {
-            var primaryContinuity = CalculateContinuityScore(GetFaceBounds(primary), previous);
-            var candidateContinuity = CalculateContinuityScore(GetFaceBounds(candidate), previous);
-            if (candidateContinuity >= primaryContinuity + 0.18d)
-            {
-                return new FaceLandmarkTrackingResult
-                {
-                    BackendName = candidate.BackendName,
-                    BackendStatus = $"{candidate.BackendStatus}; selected over disagreeing {primary.BackendName} by temporal face continuity",
-                    FeatureDetection = candidate.FeatureDetection,
-                    LandmarkFrame = candidate.LandmarkFrame
-                };
-            }
-
-            if (primaryContinuity >= candidateContinuity + 0.08d)
-            {
-                return primary;
-            }
-        }
-
-        if (candidate.BackendName.Contains("aperture", StringComparison.OrdinalIgnoreCase)
-            && !primary.BackendName.Contains("dense", StringComparison.OrdinalIgnoreCase)
-            && candidate.LandmarkFrame.TrackingConfidence >= primary.LandmarkFrame.TrackingConfidence - 0.20d
-            && (candidate.LandmarkFrame.EyeConfidence >= primary.LandmarkFrame.EyeConfidence
-                || candidate.LandmarkFrame.MouthConfidence >= primary.LandmarkFrame.MouthConfidence))
-        {
-            return new FaceLandmarkTrackingResult
-            {
-                BackendName = candidate.BackendName,
-                BackendStatus = $"{candidate.BackendStatus}; selected over disagreeing {primary.BackendName} by aperture cue confidence",
-                FeatureDetection = candidate.FeatureDetection,
-                LandmarkFrame = candidate.LandmarkFrame
-            };
-        }
-
-        return primary;
-    }
-
-    private static double CalculateContinuityScore(Rect? face, Rect previous)
-    {
-        if (face is not Rect current || current.Width <= 0d || current.Height <= 0d)
-        {
-            return 0d;
-        }
-
-        var currentCenter = new Point(current.Left + current.Width / 2d, current.Top + current.Height / 2d);
-        var previousCenter = new Point(previous.Left + previous.Width / 2d, previous.Top + previous.Height / 2d);
-        var distance = Math.Sqrt(Math.Pow(currentCenter.X - previousCenter.X, 2d) + Math.Pow(currentCenter.Y - previousCenter.Y, 2d));
-        var previousDiagonal = Math.Sqrt(previous.Width * previous.Width + previous.Height * previous.Height);
-        var proximity = 1d - Math.Clamp(distance / Math.Max(0.001d, previousDiagonal * 1.20d), 0d, 1d);
-        var overlap = OverlapOverSmaller(current, previous);
-        var scaleSimilarity = LogSimilarity(
-            current.Width * current.Height,
-            Math.Max(0.000001d, previous.Width * previous.Height),
-            toleranceFactor: 4d);
-        return proximity * 0.42d + overlap * 0.42d + scaleSimilarity * 0.16d;
-    }
-
-    private static bool FacesAgree(FaceLandmarkTrackingResult primary, FaceLandmarkTrackingResult candidate)
-    {
-        var primaryBox = GetFaceBounds(primary);
-        var candidateBox = GetFaceBounds(candidate);
-        if (primaryBox is null || candidateBox is null)
-        {
-            return true;
-        }
-
-        var intersection = Rect.Intersect(primaryBox.Value, candidateBox.Value);
-        var intersectionArea = Math.Max(0d, intersection.Width) * Math.Max(0d, intersection.Height);
-        var smallerArea = Math.Min(primaryBox.Value.Width * primaryBox.Value.Height, candidateBox.Value.Width * candidateBox.Value.Height);
-        if (smallerArea > 0d && intersectionArea / smallerArea >= 0.20d)
-        {
-            return true;
-        }
-
-        var primaryCenter = new Point(primaryBox.Value.Left + primaryBox.Value.Width / 2d, primaryBox.Value.Top + primaryBox.Value.Height / 2d);
-        var candidateCenter = new Point(candidateBox.Value.Left + candidateBox.Value.Width / 2d, candidateBox.Value.Top + candidateBox.Value.Height / 2d);
-        var distance = Math.Sqrt(Math.Pow(primaryCenter.X - candidateCenter.X, 2d) + Math.Pow(primaryCenter.Y - candidateCenter.Y, 2d));
-        return distance <= Math.Max(primaryBox.Value.Height, candidateBox.Value.Height) * 0.45d;
-    }
-
-    private static double OverlapOverSmaller(Rect first, Rect second)
-    {
-        var intersection = Rect.Intersect(first, second);
-        var intersectionArea = Math.Max(0d, intersection.Width) * Math.Max(0d, intersection.Height);
-        var smallerArea = Math.Min(first.Width * first.Height, second.Width * second.Height);
-        return smallerArea <= 0d ? 0d : intersectionArea / smallerArea;
-    }
-
-    private static double LogSimilarity(double value, double target, double toleranceFactor)
-    {
-        if (value <= 0d || target <= 0d)
-        {
-            return 0d;
-        }
-
-        var distance = Math.Abs(Math.Log(value / target));
-        return 1d - Math.Clamp(distance / Math.Log(Math.Max(1.01d, toleranceFactor)), 0d, 1d);
-    }
-
-    private static Rect? GetFaceBounds(FaceLandmarkTrackingResult result)
-    {
-        if (result.FeatureDetection.HasFace && result.FeatureDetection.FaceBox.Width > 0d && result.FeatureDetection.FaceBox.Height > 0d)
-        {
-            return result.FeatureDetection.FaceBox;
-        }
-
-        return Bounds(result.LandmarkFrame.FaceContour);
-    }
-
-    private static Rect? Bounds(IReadOnlyList<Point> points)
-    {
-        if (points.Count == 0)
-        {
-            return null;
-        }
-
-        var minX = points.Min(static point => point.X);
-        var maxX = points.Max(static point => point.X);
-        var minY = points.Min(static point => point.Y);
-        var maxY = points.Max(static point => point.Y);
-        return maxX <= minX || maxY <= minY
-            ? null
-            : new Rect(minX, minY, maxX - minX, maxY - minY);
-    }
-
-    public void Reset()
-    {
-        _lastBackendStatus = "waiting";
-        _lastFusedFace = null;
-        _lastFusedFaceCapturedAtUtc = DateTime.MinValue;
-        foreach (var tracker in _trackers.OfType<IStatefulFaceLandmarkTracker>())
-        {
-            tracker.Reset();
-        }
-    }
+	private static readonly TimeSpan PreviousFaceRecoveryWindow = TimeSpan.FromSeconds(2.5);
+
+	private readonly IReadOnlyList<IFaceLandmarkTracker> _trackers;
+
+	private string _lastBackendStatus = "waiting";
+
+	private Rect? _lastFusedFace;
+
+	private DateTime _lastFusedFaceCapturedAtUtc = DateTime.MinValue;
+
+	public string Name => "Composite landmark tracker";
+
+	public bool IsAvailable => _trackers.Any((IFaceLandmarkTracker tracker) => tracker.IsAvailable);
+
+	public string LastBackendStatus => _lastBackendStatus;
+
+	public int MaxDetectionDimension
+	{
+		get
+		{
+			if (_trackers.Count != 0)
+			{
+				return _trackers.Max((IFaceLandmarkTracker tracker) => tracker.MaxDetectionDimension);
+			}
+			return 960;
+		}
+		set
+		{
+			foreach (IFaceLandmarkTracker tracker in _trackers)
+			{
+				tracker.MaxDetectionDimension = value;
+			}
+		}
+	}
+
+	public CompositeFaceLandmarkTracker()
+		: this(CreateDefaultTrackers())
+	{
+	}
+
+	public CompositeFaceLandmarkTracker(IReadOnlyList<IFaceLandmarkTracker> trackers)
+	{
+		_trackers = trackers;
+	}
+
+	public FaceLandmarkTrackingResult Detect(BitmapSource bitmap, DateTime capturedAtUtc)
+	{
+		List<string> list = new List<string>();
+		FaceLandmarkTrackingResult faceLandmarkTrackingResult = null;
+		IFaceLandmarkCropRefiner faceLandmarkCropRefiner = null;
+		foreach (IFaceLandmarkTracker tracker in _trackers)
+		{
+			if (faceLandmarkCropRefiner == null && tracker is IFaceLandmarkCropRefiner { IsAvailable: not false } faceLandmarkCropRefiner2)
+			{
+				faceLandmarkCropRefiner = faceLandmarkCropRefiner2;
+			}
+			if (!tracker.IsAvailable)
+			{
+				FaceLandmarkTrackingResult faceLandmarkTrackingResult2 = tracker.Detect(bitmap, capturedAtUtc);
+				if (!string.IsNullOrWhiteSpace(faceLandmarkTrackingResult2.BackendStatus))
+				{
+					list.Add(tracker.Name + ": " + faceLandmarkTrackingResult2.BackendStatus);
+				}
+				continue;
+			}
+			FaceLandmarkTrackingResult faceLandmarkTrackingResult3 = tracker.Detect(bitmap, capturedAtUtc);
+			if (faceLandmarkTrackingResult3.HasFace)
+			{
+				list.Add(faceLandmarkTrackingResult3.BackendName + ": " + faceLandmarkTrackingResult3.BackendStatus);
+				if (HasMediaPipeDenseLock(faceLandmarkTrackingResult3) && HasUsableFaceCueGeometry(faceLandmarkTrackingResult3))
+				{
+					_lastBackendStatus = string.Join(" | ", list);
+					_lastFusedFace = GetFaceBounds(faceLandmarkTrackingResult3) ?? _lastFusedFace;
+					_lastFusedFaceCapturedAtUtc = capturedAtUtc;
+					return new FaceLandmarkTrackingResult
+					{
+						BackendName = faceLandmarkTrackingResult3.BackendName,
+						BackendStatus = _lastBackendStatus,
+						FeatureDetection = faceLandmarkTrackingResult3.FeatureDetection,
+						LandmarkFrame = faceLandmarkTrackingResult3.LandmarkFrame,
+						Diagnostics = faceLandmarkTrackingResult3.Diagnostics
+					};
+				}
+				faceLandmarkTrackingResult = ((faceLandmarkTrackingResult == null) ? faceLandmarkTrackingResult3 : FuseResults(faceLandmarkTrackingResult, faceLandmarkTrackingResult3, capturedAtUtc, _lastFusedFace));
+			}
+			else if (!string.IsNullOrWhiteSpace(faceLandmarkTrackingResult3.BackendStatus))
+			{
+				list.Add(faceLandmarkTrackingResult3.BackendName + ": " + faceLandmarkTrackingResult3.BackendStatus);
+			}
+		}
+		if (faceLandmarkTrackingResult != null)
+		{
+			faceLandmarkTrackingResult = TryRefineWithFaceCrop(bitmap, capturedAtUtc, faceLandmarkTrackingResult, faceLandmarkCropRefiner, list);
+			_lastBackendStatus = string.Join(" | ", list);
+			_lastFusedFace = GetFaceBounds(faceLandmarkTrackingResult) ?? _lastFusedFace;
+			_lastFusedFaceCapturedAtUtc = capturedAtUtc;
+			return new FaceLandmarkTrackingResult
+			{
+				BackendName = faceLandmarkTrackingResult.BackendName,
+				BackendStatus = _lastBackendStatus,
+				FeatureDetection = faceLandmarkTrackingResult.FeatureDetection,
+				LandmarkFrame = faceLandmarkTrackingResult.LandmarkFrame,
+				Diagnostics = faceLandmarkTrackingResult.Diagnostics
+			};
+		}
+		FaceLandmarkTrackingResult faceLandmarkTrackingResult4 = TryRecoverWithPreviousFaceCrop(bitmap, capturedAtUtc, faceLandmarkCropRefiner, list);
+		if (faceLandmarkTrackingResult4 != null)
+		{
+			_lastBackendStatus = string.Join(" | ", list);
+			_lastFusedFace = GetFaceBounds(faceLandmarkTrackingResult4) ?? _lastFusedFace;
+			_lastFusedFaceCapturedAtUtc = capturedAtUtc;
+			return new FaceLandmarkTrackingResult
+			{
+				BackendName = faceLandmarkTrackingResult4.BackendName,
+				BackendStatus = _lastBackendStatus,
+				FeatureDetection = faceLandmarkTrackingResult4.FeatureDetection,
+				LandmarkFrame = faceLandmarkTrackingResult4.LandmarkFrame,
+				Diagnostics = faceLandmarkTrackingResult4.Diagnostics
+			};
+		}
+		_lastBackendStatus = ((list.Count != 0) ? string.Join(" | ", list) : (IsAvailable ? "all trackers searching" : "no landmark backend available"));
+		if (capturedAtUtc - _lastFusedFaceCapturedAtUtc > PreviousFaceRecoveryWindow)
+		{
+			_lastFusedFace = null;
+			_lastFusedFaceCapturedAtUtc = DateTime.MinValue;
+		}
+		return new FaceLandmarkTrackingResult
+		{
+			BackendName = Name,
+			BackendStatus = _lastBackendStatus
+		};
+	}
+
+	public void Dispose()
+	{
+		foreach (IFaceLandmarkTracker tracker in _trackers)
+		{
+			tracker.Dispose();
+		}
+	}
+
+	private static IReadOnlyList<IFaceLandmarkTracker> CreateDefaultTrackers()
+	{
+		List<IFaceLandmarkTracker> list = new List<IFaceLandmarkTracker>(3);
+		try
+		{
+			AddOwnedTracker(list, () => new MediaPipeFaceLandmarkerSidecarTracker());
+			AddOwnedTracker(list, () => new OpenCvFacemarkLandmarkTracker());
+			AddOwnedTracker(list, () => new OpenCvApertureLandmarkTracker());
+			return list;
+		}
+		catch
+		{
+			foreach (IFaceLandmarkTracker item in list)
+			{
+				item.Dispose();
+			}
+			throw;
+		}
+	}
+
+	private static void AddOwnedTracker(ICollection<IFaceLandmarkTracker> trackers, Func<IFaceLandmarkTracker> createTracker)
+	{
+		IFaceLandmarkTracker faceLandmarkTracker = null;
+		try
+		{
+			faceLandmarkTracker = createTracker();
+			trackers.Add(faceLandmarkTracker);
+			faceLandmarkTracker = null;
+		}
+		finally
+		{
+			faceLandmarkTracker?.Dispose();
+		}
+	}
+
+	private static FaceLandmarkTrackingResult TryRefineWithFaceCrop(BitmapSource bitmap, DateTime capturedAtUtc, FaceLandmarkTrackingResult fused, IFaceLandmarkCropRefiner? cropRefiner, List<string> statuses)
+	{
+		if (cropRefiner == null || HasMediaPipeDenseLock(fused))
+		{
+			return fused;
+		}
+		Rect? faceBounds = GetFaceBounds(fused);
+		if (faceBounds.HasValue)
+		{
+			Rect valueOrDefault = faceBounds.GetValueOrDefault();
+			if (!(valueOrDefault.Width <= 0.0) && !(valueOrDefault.Height <= 0.0))
+			{
+				FaceLandmarkTrackingResult faceLandmarkTrackingResult = cropRefiner.DetectFaceCrop(bitmap, valueOrDefault, capturedAtUtc);
+				if (!string.IsNullOrWhiteSpace(faceLandmarkTrackingResult.BackendStatus))
+				{
+					statuses.Add(faceLandmarkTrackingResult.BackendName + ": " + faceLandmarkTrackingResult.BackendStatus);
+				}
+				if (!faceLandmarkTrackingResult.HasFace || !HasMediaPipeDenseLock(faceLandmarkTrackingResult) || !FacesAgree(faceLandmarkTrackingResult, fused))
+				{
+					return fused;
+				}
+				return FuseResults(faceLandmarkTrackingResult, fused, capturedAtUtc, null);
+			}
+		}
+		return fused;
+	}
+
+	private FaceLandmarkTrackingResult? TryRecoverWithPreviousFaceCrop(BitmapSource bitmap, DateTime capturedAtUtc, IFaceLandmarkCropRefiner? cropRefiner, List<string> statuses)
+	{
+		if (cropRefiner != null)
+		{
+			Rect? lastFusedFace = _lastFusedFace;
+			if (lastFusedFace.HasValue)
+			{
+				Rect valueOrDefault = lastFusedFace.GetValueOrDefault();
+				if (!(valueOrDefault.Width <= 0.0) && !(valueOrDefault.Height <= 0.0))
+				{
+					TimeSpan timeSpan = capturedAtUtc - _lastFusedFaceCapturedAtUtc;
+					if (timeSpan < TimeSpan.Zero || timeSpan > PreviousFaceRecoveryWindow)
+					{
+						return null;
+					}
+					FaceLandmarkTrackingResult faceLandmarkTrackingResult = cropRefiner.DetectFaceCrop(bitmap, valueOrDefault, capturedAtUtc);
+					if (!string.IsNullOrWhiteSpace(faceLandmarkTrackingResult.BackendStatus))
+					{
+						statuses.Add(faceLandmarkTrackingResult.BackendName + ": " + faceLandmarkTrackingResult.BackendStatus);
+					}
+					if (!faceLandmarkTrackingResult.HasFace || !HasMediaPipeDenseLock(faceLandmarkTrackingResult) || !HasUsableFaceCueGeometry(faceLandmarkTrackingResult))
+					{
+						return null;
+					}
+					statuses.Add($"{faceLandmarkTrackingResult.BackendName}: temporal recovery from previous face hint ({timeSpan.TotalSeconds:0.00}s old)");
+					return new FaceLandmarkTrackingResult
+					{
+						BackendName = faceLandmarkTrackingResult.BackendName,
+						BackendStatus = $"{faceLandmarkTrackingResult.BackendStatus}; temporal recovery from previous face hint ({timeSpan.TotalSeconds:0.00}s old)",
+						FeatureDetection = faceLandmarkTrackingResult.FeatureDetection,
+						LandmarkFrame = faceLandmarkTrackingResult.LandmarkFrame
+					};
+				}
+			}
+		}
+		return null;
+	}
+
+	private static FaceLandmarkTrackingResult FuseResults(FaceLandmarkTrackingResult primary, FaceLandmarkTrackingResult candidate, DateTime capturedAtUtc, Rect? previousFusedFace)
+	{
+		if (!primary.HasFace)
+		{
+			return candidate;
+		}
+		if (!candidate.HasFace || !FacesAgree(primary, candidate))
+		{
+			return ChooseDisagreementResult(primary, candidate, previousFusedFace);
+		}
+		FaceLandmarkFrame landmarkFrame = primary.LandmarkFrame;
+		FaceLandmarkFrame landmarkFrame2 = candidate.LandmarkFrame;
+		bool flag = ShouldUseCandidateEyes(landmarkFrame, landmarkFrame2, candidate.BackendName);
+		bool flag2 = ShouldUseCandidateMouth(landmarkFrame, landmarkFrame2, candidate.BackendName);
+		if (!flag && !flag2)
+		{
+			return primary;
+		}
+		FaceFeatureDetection featureDetection = primary.FeatureDetection;
+		FaceFeatureDetection featureDetection2 = candidate.FeatureDetection;
+		FaceLandmarkFrame faceLandmarkFrame = new FaceLandmarkFrame
+		{
+			HasFace = true,
+			Source = landmarkFrame.Source + "; fused " + landmarkFrame2.Source,
+			CapturedAtUtc = capturedAtUtc,
+			TrackingConfidence = Math.Max(landmarkFrame.TrackingConfidence, landmarkFrame2.TrackingConfidence * 0.92),
+			EyeConfidence = (flag ? landmarkFrame2.EyeConfidence : landmarkFrame.EyeConfidence),
+			MouthConfidence = (flag2 ? landmarkFrame2.MouthConfidence : landmarkFrame.MouthConfidence),
+			EyeImageQualityAvailable = (flag ? landmarkFrame2.EyeImageQualityAvailable : landmarkFrame.EyeImageQualityAvailable),
+			MouthImageQualityAvailable = (flag2 ? landmarkFrame2.MouthImageQualityAvailable : landmarkFrame.MouthImageQualityAvailable),
+			EyeGlarePercent = (flag ? landmarkFrame2.EyeGlarePercent : landmarkFrame.EyeGlarePercent),
+			MouthGlarePercent = (flag2 ? landmarkFrame2.MouthGlarePercent : landmarkFrame.MouthGlarePercent),
+			EyeContrastPercent = (flag ? landmarkFrame2.EyeContrastPercent : landmarkFrame.EyeContrastPercent),
+			MouthContrastPercent = (flag2 ? landmarkFrame2.MouthContrastPercent : landmarkFrame.MouthContrastPercent),
+			EyeSharpnessPercent = (flag ? landmarkFrame2.EyeSharpnessPercent : landmarkFrame.EyeSharpnessPercent),
+			MouthSharpnessPercent = (flag2 ? landmarkFrame2.MouthSharpnessPercent : landmarkFrame.MouthSharpnessPercent),
+			EyeDarkCoveragePercent = (flag ? landmarkFrame2.EyeDarkCoveragePercent : landmarkFrame.EyeDarkCoveragePercent),
+			MouthDarkCoveragePercent = (flag2 ? landmarkFrame2.MouthDarkCoveragePercent : landmarkFrame.MouthDarkCoveragePercent),
+			LeftEyeReconstructed = (flag ? landmarkFrame2.LeftEyeReconstructed : landmarkFrame.LeftEyeReconstructed),
+			RightEyeReconstructed = (flag ? landmarkFrame2.RightEyeReconstructed : landmarkFrame.RightEyeReconstructed),
+			MouthReconstructed = (flag2 ? landmarkFrame2.MouthReconstructed : landmarkFrame.MouthReconstructed),
+			EyeArtifactSuppressed = (flag ? landmarkFrame2.EyeArtifactSuppressed : landmarkFrame.EyeArtifactSuppressed),
+			HeadYawDegrees = landmarkFrame.HeadYawDegrees,
+			HeadPitchDegrees = landmarkFrame.HeadPitchDegrees,
+			HeadRollDegrees = landmarkFrame.HeadRollDegrees,
+			BlendshapeScores = ((landmarkFrame.BlendshapeScores.Count > 0) ? landmarkFrame.BlendshapeScores : landmarkFrame2.BlendshapeScores),
+			DenseMeshTopology = ((landmarkFrame.DenseMeshPoints.Count > 0) ? landmarkFrame.DenseMeshTopology : landmarkFrame2.DenseMeshTopology),
+			DenseMeshPoints = ((landmarkFrame.DenseMeshPoints.Count > 0) ? landmarkFrame.DenseMeshPoints : landmarkFrame2.DenseMeshPoints),
+			FacialTransformationMatrix = ((landmarkFrame.FacialTransformationMatrix.Count > 0) ? landmarkFrame.FacialTransformationMatrix : landmarkFrame2.FacialTransformationMatrix),
+			FaceContour = ((landmarkFrame.FaceContour.Count > 0) ? landmarkFrame.FaceContour : landmarkFrame2.FaceContour),
+			LeftEyeContour = (flag ? landmarkFrame2.LeftEyeContour : landmarkFrame.LeftEyeContour),
+			RightEyeContour = (flag ? landmarkFrame2.RightEyeContour : landmarkFrame.RightEyeContour),
+			LeftBrowContour = ((flag && landmarkFrame2.LeftBrowContour.Count > 0) ? landmarkFrame2.LeftBrowContour : ((landmarkFrame.LeftBrowContour.Count > 0) ? landmarkFrame.LeftBrowContour : landmarkFrame2.LeftBrowContour)),
+			RightBrowContour = ((flag && landmarkFrame2.RightBrowContour.Count > 0) ? landmarkFrame2.RightBrowContour : ((landmarkFrame.RightBrowContour.Count > 0) ? landmarkFrame.RightBrowContour : landmarkFrame2.RightBrowContour)),
+			OuterLipContour = (flag2 ? landmarkFrame2.OuterLipContour : landmarkFrame.OuterLipContour),
+			InnerLipContour = (flag2 ? landmarkFrame2.InnerLipContour : landmarkFrame.InnerLipContour),
+			JawContour = ((landmarkFrame.JawContour.Count > 0) ? landmarkFrame.JawContour : landmarkFrame2.JawContour)
+		};
+		FaceFeatureDetection featureDetection3 = new FaceFeatureDetection
+		{
+			HasFace = true,
+			Source = featureDetection.Source + "; fused " + featureDetection2.Source,
+			FaceBox = (featureDetection.HasFace ? featureDetection.FaceBox : featureDetection2.FaceBox),
+			LeftEyeBox = ((!flag) ? featureDetection.LeftEyeBox : (featureDetection2.LeftEyeBox ?? featureDetection.LeftEyeBox)),
+			RightEyeBox = ((!flag) ? featureDetection.RightEyeBox : (featureDetection2.RightEyeBox ?? featureDetection.RightEyeBox)),
+			MouthBox = ((!flag2) ? featureDetection.MouthBox : (featureDetection2.MouthBox ?? featureDetection.MouthBox)),
+			TrackingConfidence = faceLandmarkFrame.TrackingConfidence,
+			EyeConfidence = faceLandmarkFrame.EyeConfidence,
+			MouthConfidence = faceLandmarkFrame.MouthConfidence,
+			EyeImageQualityAvailable = faceLandmarkFrame.EyeImageQualityAvailable,
+			MouthImageQualityAvailable = faceLandmarkFrame.MouthImageQualityAvailable,
+			EyeGlarePercent = faceLandmarkFrame.EyeGlarePercent,
+			MouthGlarePercent = faceLandmarkFrame.MouthGlarePercent,
+			EyeContrastPercent = faceLandmarkFrame.EyeContrastPercent,
+			MouthContrastPercent = faceLandmarkFrame.MouthContrastPercent,
+			EyeSharpnessPercent = faceLandmarkFrame.EyeSharpnessPercent,
+			MouthSharpnessPercent = faceLandmarkFrame.MouthSharpnessPercent,
+			EyeDarkCoveragePercent = faceLandmarkFrame.EyeDarkCoveragePercent,
+			MouthDarkCoveragePercent = faceLandmarkFrame.MouthDarkCoveragePercent,
+			FaceContour = faceLandmarkFrame.FaceContour,
+			LeftEyeContour = faceLandmarkFrame.LeftEyeContour,
+			RightEyeContour = faceLandmarkFrame.RightEyeContour,
+			OuterLipContour = faceLandmarkFrame.OuterLipContour,
+			InnerLipContour = faceLandmarkFrame.InnerLipContour,
+			JawContour = faceLandmarkFrame.JawContour
+		};
+		return new FaceLandmarkTrackingResult
+		{
+			BackendName = "Composite landmark fusion",
+			BackendStatus = primary.BackendStatus + "; fused " + candidate.BackendStatus,
+			FeatureDetection = featureDetection3,
+			LandmarkFrame = faceLandmarkFrame
+		};
+	}
+
+	private static bool ShouldUseCandidateEyes(FaceLandmarkFrame primary, FaceLandmarkFrame candidate, string candidateBackend)
+	{
+		if (!candidate.HasEyeContours || candidate.EyeConfidence < 0.2)
+		{
+			return false;
+		}
+		if (!primary.HasEyeContours)
+		{
+			return true;
+		}
+		if (IsHighFidelityLandmarkSource(primary.Source) && candidateBackend.Contains("aperture", StringComparison.OrdinalIgnoreCase))
+		{
+			if (!(primary.EyeConfidence < 0.55) && !(candidate.EyeConfidence >= primary.EyeConfidence + 0.16) && !primary.EyeArtifactSuppressed)
+			{
+				return !primary.HasEyeContours;
+			}
+			return true;
+		}
+		if (!candidateBackend.Contains("aperture", StringComparison.OrdinalIgnoreCase))
+		{
+			return candidate.EyeConfidence >= primary.EyeConfidence + 0.08;
+		}
+		return true;
+	}
+
+	private static bool ShouldUseCandidateMouth(FaceLandmarkFrame primary, FaceLandmarkFrame candidate, string candidateBackend)
+	{
+		if (!candidate.HasMouthContours || candidate.MouthConfidence < 0.18)
+		{
+			return false;
+		}
+		if (!primary.HasMouthContours)
+		{
+			return true;
+		}
+		if (IsHighFidelityLandmarkSource(primary.Source) && candidateBackend.Contains("aperture", StringComparison.OrdinalIgnoreCase))
+		{
+			if (!(primary.MouthConfidence < 0.52) && !(candidate.MouthConfidence >= primary.MouthConfidence + 0.16) && !primary.MouthReconstructed)
+			{
+				return !primary.HasMouthContours;
+			}
+			return true;
+		}
+		if (!candidateBackend.Contains("aperture", StringComparison.OrdinalIgnoreCase))
+		{
+			return candidate.MouthConfidence >= primary.MouthConfidence + 0.08;
+		}
+		return true;
+	}
+
+	private static bool IsHighFidelityLandmarkSource(string source)
+	{
+		if (!source.Contains("MediaPipe", StringComparison.OrdinalIgnoreCase) && !source.Contains("Face Landmarker", StringComparison.OrdinalIgnoreCase) && !source.Contains("dense", StringComparison.OrdinalIgnoreCase))
+		{
+			return source.Contains("face mesh", StringComparison.OrdinalIgnoreCase);
+		}
+		return true;
+	}
+
+	private static bool HasMediaPipeDenseLock(FaceLandmarkTrackingResult result)
+	{
+		if (!result.BackendStatus.Contains("MediaPipe dense landmark lock", StringComparison.OrdinalIgnoreCase) && !result.LandmarkFrame.Source.Contains("MediaPipe", StringComparison.OrdinalIgnoreCase))
+		{
+			return result.LandmarkFrame.Source.Contains("Face Landmarker", StringComparison.OrdinalIgnoreCase);
+		}
+		return true;
+	}
+
+	private static bool HasUsableFaceCueGeometry(FaceLandmarkTrackingResult result)
+	{
+		if (!result.LandmarkFrame.HasEyeContours)
+		{
+			return result.LandmarkFrame.HasMouthContours;
+		}
+		return true;
+	}
+
+	private static FaceLandmarkTrackingResult ChooseDisagreementResult(FaceLandmarkTrackingResult primary, FaceLandmarkTrackingResult candidate, Rect? previousFusedFace)
+	{
+		if (!candidate.HasFace)
+		{
+			return primary;
+		}
+		if (previousFusedFace.HasValue)
+		{
+			Rect valueOrDefault = previousFusedFace.GetValueOrDefault();
+			double num = CalculateContinuityScore(GetFaceBounds(primary), valueOrDefault);
+			double num2 = CalculateContinuityScore(GetFaceBounds(candidate), valueOrDefault);
+			if (num2 >= num + 0.18)
+			{
+				return new FaceLandmarkTrackingResult
+				{
+					BackendName = candidate.BackendName,
+					BackendStatus = candidate.BackendStatus + "; selected over disagreeing " + primary.BackendName + " by temporal face continuity",
+					FeatureDetection = candidate.FeatureDetection,
+					LandmarkFrame = candidate.LandmarkFrame
+				};
+			}
+			if (num >= num2 + 0.08)
+			{
+				return primary;
+			}
+		}
+		if (candidate.BackendName.Contains("aperture", StringComparison.OrdinalIgnoreCase) && !primary.BackendName.Contains("dense", StringComparison.OrdinalIgnoreCase) && candidate.LandmarkFrame.TrackingConfidence >= primary.LandmarkFrame.TrackingConfidence - 0.2 && (candidate.LandmarkFrame.EyeConfidence >= primary.LandmarkFrame.EyeConfidence || candidate.LandmarkFrame.MouthConfidence >= primary.LandmarkFrame.MouthConfidence))
+		{
+			return new FaceLandmarkTrackingResult
+			{
+				BackendName = candidate.BackendName,
+				BackendStatus = candidate.BackendStatus + "; selected over disagreeing " + primary.BackendName + " by aperture cue confidence",
+				FeatureDetection = candidate.FeatureDetection,
+				LandmarkFrame = candidate.LandmarkFrame
+			};
+		}
+		return primary;
+	}
+
+	private static double CalculateContinuityScore(Rect? face, Rect previous)
+	{
+		if (face.HasValue)
+		{
+			Rect valueOrDefault = face.GetValueOrDefault();
+			if (!(valueOrDefault.Width <= 0.0) && !(valueOrDefault.Height <= 0.0))
+			{
+				Point point = new Point(valueOrDefault.Left + valueOrDefault.Width / 2.0, valueOrDefault.Top + valueOrDefault.Height / 2.0);
+				Point point2 = new Point(previous.Left + previous.Width / 2.0, previous.Top + previous.Height / 2.0);
+				double num = Math.Sqrt(Math.Pow(point.X - point2.X, 2.0) + Math.Pow(point.Y - point2.Y, 2.0));
+				double num2 = Math.Sqrt(previous.Width * previous.Width + previous.Height * previous.Height);
+				double num3 = 1.0 - Math.Clamp(num / Math.Max(0.001, num2 * 1.2), 0.0, 1.0);
+				double num4 = OverlapOverSmaller(valueOrDefault, previous);
+				double num5 = LogSimilarity(valueOrDefault.Width * valueOrDefault.Height, Math.Max(1E-06, previous.Width * previous.Height), 4.0);
+				return num3 * 0.42 + num4 * 0.42 + num5 * 0.16;
+			}
+		}
+		return 0.0;
+	}
+
+	private static bool FacesAgree(FaceLandmarkTrackingResult primary, FaceLandmarkTrackingResult candidate)
+	{
+		Rect? faceBounds = GetFaceBounds(primary);
+		Rect? faceBounds2 = GetFaceBounds(candidate);
+		if (!faceBounds.HasValue || !faceBounds2.HasValue)
+		{
+			return true;
+		}
+		Rect rect = Rect.Intersect(faceBounds.Value, faceBounds2.Value);
+		double num = Math.Max(0.0, rect.Width) * Math.Max(0.0, rect.Height);
+		double num2 = Math.Min(faceBounds.Value.Width * faceBounds.Value.Height, faceBounds2.Value.Width * faceBounds2.Value.Height);
+		if (num2 > 0.0 && num / num2 >= 0.2)
+		{
+			return true;
+		}
+		Point point = new Point(faceBounds.Value.Left + faceBounds.Value.Width / 2.0, faceBounds.Value.Top + faceBounds.Value.Height / 2.0);
+		Point point2 = new Point(faceBounds2.Value.Left + faceBounds2.Value.Width / 2.0, faceBounds2.Value.Top + faceBounds2.Value.Height / 2.0);
+		return Math.Sqrt(Math.Pow(point.X - point2.X, 2.0) + Math.Pow(point.Y - point2.Y, 2.0)) <= Math.Max(faceBounds.Value.Height, faceBounds2.Value.Height) * 0.45;
+	}
+
+	private static double OverlapOverSmaller(Rect first, Rect second)
+	{
+		Rect rect = Rect.Intersect(first, second);
+		double num = Math.Max(0.0, rect.Width) * Math.Max(0.0, rect.Height);
+		double num2 = Math.Min(first.Width * first.Height, second.Width * second.Height);
+		if (!(num2 <= 0.0))
+		{
+			return num / num2;
+		}
+		return 0.0;
+	}
+
+	private static double LogSimilarity(double value, double target, double toleranceFactor)
+	{
+		if (value <= 0.0 || target <= 0.0)
+		{
+			return 0.0;
+		}
+		double num = Math.Abs(Math.Log(value / target));
+		return 1.0 - Math.Clamp(num / Math.Log(Math.Max(1.01, toleranceFactor)), 0.0, 1.0);
+	}
+
+	private static Rect? GetFaceBounds(FaceLandmarkTrackingResult result)
+	{
+		if (result.FeatureDetection.HasFace && result.FeatureDetection.FaceBox.Width > 0.0 && result.FeatureDetection.FaceBox.Height > 0.0)
+		{
+			return result.FeatureDetection.FaceBox;
+		}
+		return Bounds(result.LandmarkFrame.FaceContour);
+	}
+
+	private static Rect? Bounds(IReadOnlyList<Point> points)
+	{
+		if (points.Count == 0)
+		{
+			return null;
+		}
+		double num = points.Min((Point point) => point.X);
+		double num2 = points.Max((Point point) => point.X);
+		double num3 = points.Min((Point point) => point.Y);
+		double num4 = points.Max((Point point) => point.Y);
+		if (!(num2 <= num) && !(num4 <= num3))
+		{
+			return new Rect(num, num3, num2 - num, num4 - num3);
+		}
+		return null;
+	}
+
+	public void Reset()
+	{
+		_lastBackendStatus = "waiting";
+		_lastFusedFace = null;
+		_lastFusedFaceCapturedAtUtc = DateTime.MinValue;
+		foreach (IStatefulFaceLandmarkTracker item in _trackers.OfType<IStatefulFaceLandmarkTracker>())
+		{
+			item.Reset();
+		}
+	}
 }

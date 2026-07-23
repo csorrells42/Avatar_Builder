@@ -1,14 +1,15 @@
+using System;
 using System.Windows.Media.Imaging;
 
 namespace AvatarBuilder.Modules.Vision.Common;
 
 public interface IFaceLandmarkTracker : IDisposable
 {
-    string Name { get; }
+	string Name { get; }
 
-    bool IsAvailable { get; }
+	bool IsAvailable { get; }
 
-    int MaxDetectionDimension { get; set; }
+	int MaxDetectionDimension { get; set; }
 
-    FaceLandmarkTrackingResult Detect(BitmapSource bitmap, DateTime capturedAtUtc);
+	FaceLandmarkTrackingResult Detect(BitmapSource bitmap, DateTime capturedAtUtc);
 }

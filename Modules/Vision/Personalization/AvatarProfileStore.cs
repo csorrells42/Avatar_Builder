@@ -1,4 +1,7 @@
+using System;
+using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Text;
 using System.Text.Json;
 using AvatarBuilder.Modules.Infrastructure;
@@ -7,218 +10,206 @@ namespace AvatarBuilder.Modules.Vision.Personalization;
 
 public sealed class AvatarProfileStore
 {
-    public const string RootFolderName = "AvatarSystem";
-    public const string PeopleFolderName = "People";
-    public const string RegistryFileName = "avatar_profiles.json";
+	public const string RootFolderName = "AvatarSystem";
 
-    private static readonly JsonSerializerOptions JsonOptions = new()
-    {
-        WriteIndented = true
-    };
+	public const string PeopleFolderName = "People";
 
-    public AvatarProfileRegistry Load(string outputFolder)
-    {
-        var path = GetRegistryPath(outputFolder);
-        AvatarProfileRegistry? registry = null;
-        try
-        {
-            if (File.Exists(path))
-            {
-                registry = JsonSerializer.Deserialize<AvatarProfileRegistry>(
-                    File.ReadAllText(path, Encoding.UTF8),
-                    JsonOptions);
-            }
-        }
-        catch
-        {
-            registry = null;
-        }
+	public const string RegistryFileName = "avatar_profiles.json";
 
-        registry ??= new AvatarProfileRegistry();
-        NormalizeRegistry(registry);
-        return registry;
-    }
+	private static readonly JsonSerializerOptions JsonOptions = new JsonSerializerOptions
+	{
+		WriteIndented = true
+	};
 
-    public string Save(string outputFolder, AvatarProfileRegistry registry)
-    {
-        ArgumentNullException.ThrowIfNull(registry);
+	public AvatarProfileRegistry Load(string outputFolder)
+	{
+		string registryPath = GetRegistryPath(outputFolder);
+		AvatarProfileRegistry avatarProfileRegistry = null;
+		try
+		{
+			if (File.Exists(registryPath))
+			{
+				avatarProfileRegistry = JsonSerializer.Deserialize<AvatarProfileRegistry>(File.ReadAllText(registryPath, Encoding.UTF8), JsonOptions);
+			}
+		}
+		catch
+		{
+			avatarProfileRegistry = null;
+		}
+		if (avatarProfileRegistry == null)
+		{
+			avatarProfileRegistry = new AvatarProfileRegistry();
+		}
+		NormalizeRegistry(avatarProfileRegistry);
+		return avatarProfileRegistry;
+	}
 
-        NormalizeRegistry(registry);
-        var path = GetRegistryPath(outputFolder);
-        Directory.CreateDirectory(Path.GetDirectoryName(path) ?? GetRootFolder(outputFolder));
-        AtomicTextFileWriter.WriteAllText(path, JsonSerializer.Serialize(registry, JsonOptions), Encoding.UTF8);
-        return path;
-    }
+	public string Save(string outputFolder, AvatarProfileRegistry registry)
+	{
+		ArgumentNullException.ThrowIfNull(registry, "registry");
+		NormalizeRegistry(registry);
+		string registryPath = GetRegistryPath(outputFolder);
+		Directory.CreateDirectory(Path.GetDirectoryName(registryPath) ?? GetRootFolder(outputFolder));
+		AtomicTextFileWriter.WriteAllText(registryPath, JsonSerializer.Serialize(registry, JsonOptions), Encoding.UTF8);
+		return registryPath;
+	}
 
-    public AvatarProfile AddOrUpdateProfile(string outputFolder, AvatarProfileRegistry registry, string displayName)
-    {
-        ArgumentNullException.ThrowIfNull(registry);
+	public AvatarProfile AddOrUpdateProfile(string outputFolder, AvatarProfileRegistry registry, string displayName)
+	{
+		ArgumentNullException.ThrowIfNull(registry, "registry");
+		displayName = CleanDisplayName(displayName);
+		NormalizeRegistry(registry);
+		AvatarProfile avatarProfile = registry.Profiles.FirstOrDefault((AvatarProfile profile) => string.Equals(profile.DisplayName, displayName, StringComparison.OrdinalIgnoreCase));
+		DateTime utcNow = DateTime.UtcNow;
+		if (avatarProfile != null)
+		{
+			avatarProfile.DisplayName = displayName;
+			avatarProfile.UpdatedAtUtc = utcNow;
+			avatarProfile.LastSelectedAtUtc = utcNow;
+			registry.SelectedProfileId = avatarProfile.Id;
+			Save(outputFolder, registry);
+			return avatarProfile;
+		}
+		string text = CreateUniqueId(displayName, registry.Profiles);
+		AvatarProfile avatarProfile2 = new AvatarProfile
+		{
+			Id = text,
+			DisplayName = displayName,
+			DataFolderName = text,
+			CreatedAtUtc = utcNow,
+			UpdatedAtUtc = utcNow,
+			LastSelectedAtUtc = utcNow
+		};
+		registry.Profiles.Add(avatarProfile2);
+		registry.SelectedProfileId = avatarProfile2.Id;
+		Directory.CreateDirectory(GetProfileFolder(outputFolder, avatarProfile2));
+		Save(outputFolder, registry);
+		return avatarProfile2;
+	}
 
-        displayName = CleanDisplayName(displayName);
-        NormalizeRegistry(registry);
-        var existing = registry.Profiles.FirstOrDefault(profile =>
-            string.Equals(profile.DisplayName, displayName, StringComparison.OrdinalIgnoreCase));
-        var now = DateTime.UtcNow;
-        if (existing is not null)
-        {
-            existing.DisplayName = displayName;
-            existing.UpdatedAtUtc = now;
-            existing.LastSelectedAtUtc = now;
-            registry.SelectedProfileId = existing.Id;
-            Save(outputFolder, registry);
-            return existing;
-        }
+	public AvatarProfile SelectProfile(string outputFolder, AvatarProfileRegistry registry, string profileId)
+	{
+		ArgumentNullException.ThrowIfNull(registry, "registry");
+		NormalizeRegistry(registry);
+		AvatarProfile avatarProfile = registry.Profiles.FirstOrDefault((AvatarProfile item) => string.Equals(item.Id, profileId, StringComparison.OrdinalIgnoreCase));
+		if (avatarProfile == null)
+		{
+			avatarProfile = registry.Profiles.FirstOrDefault() ?? AddOrUpdateProfile(outputFolder, registry, "Primary subject");
+		}
+		avatarProfile.LastSelectedAtUtc = DateTime.UtcNow;
+		avatarProfile.UpdatedAtUtc = ((avatarProfile.UpdatedAtUtc == default(DateTime)) ? DateTime.UtcNow : avatarProfile.UpdatedAtUtc);
+		registry.SelectedProfileId = avatarProfile.Id;
+		Directory.CreateDirectory(GetProfileFolder(outputFolder, avatarProfile));
+		Save(outputFolder, registry);
+		return avatarProfile;
+	}
 
-        var id = CreateUniqueId(displayName, registry.Profiles);
-        var profile = new AvatarProfile
-        {
-            Id = id,
-            DisplayName = displayName,
-            DataFolderName = id,
-            CreatedAtUtc = now,
-            UpdatedAtUtc = now,
-            LastSelectedAtUtc = now
-        };
-        registry.Profiles.Add(profile);
-        registry.SelectedProfileId = profile.Id;
-        Directory.CreateDirectory(GetProfileFolder(outputFolder, profile));
-        Save(outputFolder, registry);
-        return profile;
-    }
+	public string GetRootFolder(string outputFolder)
+	{
+		return Path.Combine(outputFolder, "AvatarSystem");
+	}
 
-    public AvatarProfile SelectProfile(string outputFolder, AvatarProfileRegistry registry, string profileId)
-    {
-        ArgumentNullException.ThrowIfNull(registry);
+	public string GetProfileFolder(string outputFolder, AvatarProfile profile)
+	{
+		ArgumentNullException.ThrowIfNull(profile, "profile");
+		return Path.Combine(GetRootFolder(outputFolder), "People", profile.DataFolderName);
+	}
 
-        NormalizeRegistry(registry);
-        var profile = registry.Profiles.FirstOrDefault(item =>
-            string.Equals(item.Id, profileId, StringComparison.OrdinalIgnoreCase));
-        if (profile is null)
-        {
-            profile = registry.Profiles.FirstOrDefault()
-                ?? AddOrUpdateProfile(outputFolder, registry, "Primary subject");
-        }
+	public string GetRegistryPath(string outputFolder)
+	{
+		return Path.Combine(GetRootFolder(outputFolder), "avatar_profiles.json");
+	}
 
-        profile.LastSelectedAtUtc = DateTime.UtcNow;
-        profile.UpdatedAtUtc = profile.UpdatedAtUtc == default ? DateTime.UtcNow : profile.UpdatedAtUtc;
-        registry.SelectedProfileId = profile.Id;
-        Directory.CreateDirectory(GetProfileFolder(outputFolder, profile));
-        Save(outputFolder, registry);
-        return profile;
-    }
+	private static void NormalizeRegistry(AvatarProfileRegistry registry)
+	{
+		registry.Version = ((registry.Version <= 0) ? 1 : registry.Version);
+		registry.Profiles = registry.Profiles.Where((AvatarProfile profile) => !string.IsNullOrWhiteSpace(profile.DisplayName)).GroupBy<AvatarProfile, string>((AvatarProfile profile) => (!string.IsNullOrWhiteSpace(profile.Id)) ? CleanProfileId(profile.Id) : CreateId(profile.DisplayName), StringComparer.OrdinalIgnoreCase).Select(delegate(IGrouping<string, AvatarProfile> group)
+		{
+			AvatarProfile avatarProfile = group.First();
+			avatarProfile.Id = CleanProfileId(avatarProfile.Id);
+			if (string.IsNullOrWhiteSpace(avatarProfile.Id))
+			{
+				avatarProfile.Id = CreateId(avatarProfile.DisplayName);
+			}
+			avatarProfile.DisplayName = CleanDisplayName(avatarProfile.DisplayName);
+			avatarProfile.DataFolderName = CleanDataFolderName(avatarProfile.DataFolderName);
+			if (string.IsNullOrWhiteSpace(avatarProfile.DataFolderName))
+			{
+				avatarProfile.DataFolderName = avatarProfile.Id;
+			}
+			avatarProfile.CreatedAtUtc = ((avatarProfile.CreatedAtUtc == default(DateTime)) ? DateTime.UtcNow : avatarProfile.CreatedAtUtc);
+			avatarProfile.UpdatedAtUtc = ((avatarProfile.UpdatedAtUtc == default(DateTime)) ? avatarProfile.CreatedAtUtc : avatarProfile.UpdatedAtUtc);
+			return avatarProfile;
+		})
+			.OrderBy<AvatarProfile, string>((AvatarProfile profile) => profile.DisplayName, StringComparer.OrdinalIgnoreCase)
+			.ToList();
+		if (!registry.Profiles.Any((AvatarProfile profile) => string.Equals(profile.Id, registry.SelectedProfileId, StringComparison.OrdinalIgnoreCase)))
+		{
+			registry.SelectedProfileId = registry.Profiles.OrderByDescending((AvatarProfile profile) => profile.LastSelectedAtUtc ?? DateTime.MinValue).ThenBy<AvatarProfile, string>((AvatarProfile profile) => profile.DisplayName, StringComparer.OrdinalIgnoreCase).FirstOrDefault()?.Id ?? "";
+		}
+	}
 
-    public string GetRootFolder(string outputFolder)
-    {
-        return Path.Combine(outputFolder, RootFolderName);
-    }
+	private static string CreateUniqueId(string displayName, IReadOnlyList<AvatarProfile> profiles)
+	{
+		string id;
+		string value = (id = CreateId(displayName));
+		int num = 2;
+		while (profiles.Any((AvatarProfile profile) => string.Equals(profile.Id, id, StringComparison.OrdinalIgnoreCase)))
+		{
+			id = $"{value}-{num}";
+			num++;
+		}
+		return id;
+	}
 
-    public string GetProfileFolder(string outputFolder, AvatarProfile profile)
-    {
-        ArgumentNullException.ThrowIfNull(profile);
+	private static string CreateId(string displayName)
+	{
+		StringBuilder stringBuilder = new StringBuilder();
+		bool flag = false;
+		string text = displayName.Trim().ToLowerInvariant();
+		foreach (char c in text)
+		{
+			if (char.IsLetterOrDigit(c))
+			{
+				stringBuilder.Append(c);
+				flag = false;
+			}
+			else if (!flag)
+			{
+				stringBuilder.Append('-');
+				flag = true;
+			}
+		}
+		string text2 = stringBuilder.ToString().Trim('-');
+		if (!string.IsNullOrWhiteSpace(text2))
+		{
+			return text2;
+		}
+		return "profile";
+	}
 
-        var root = GetRootFolder(outputFolder);
-        return Path.Combine(root, PeopleFolderName, profile.DataFolderName);
-    }
+	private static string CleanProfileId(string value)
+	{
+		return CreateId(value);
+	}
 
-    public string GetRegistryPath(string outputFolder)
-    {
-        return Path.Combine(GetRootFolder(outputFolder), RegistryFileName);
-    }
+	private static string CleanDataFolderName(string value)
+	{
+		if (string.IsNullOrWhiteSpace(value))
+		{
+			return "";
+		}
+		return CreateId(value);
+	}
 
-    private static void NormalizeRegistry(AvatarProfileRegistry registry)
-    {
-        registry.Version = registry.Version <= 0 ? 1 : registry.Version;
-        registry.Profiles = registry.Profiles
-            .Where(static profile => !string.IsNullOrWhiteSpace(profile.DisplayName))
-            .GroupBy(static profile => string.IsNullOrWhiteSpace(profile.Id) ? CreateId(profile.DisplayName) : CleanProfileId(profile.Id), StringComparer.OrdinalIgnoreCase)
-            .Select(static group =>
-            {
-                var profile = group.First();
-                profile.Id = CleanProfileId(profile.Id);
-                if (string.IsNullOrWhiteSpace(profile.Id))
-                {
-                    profile.Id = CreateId(profile.DisplayName);
-                }
-
-                profile.DisplayName = CleanDisplayName(profile.DisplayName);
-                profile.DataFolderName = CleanDataFolderName(profile.DataFolderName);
-                if (string.IsNullOrWhiteSpace(profile.DataFolderName))
-                {
-                    profile.DataFolderName = profile.Id;
-                }
-                profile.CreatedAtUtc = profile.CreatedAtUtc == default ? DateTime.UtcNow : profile.CreatedAtUtc;
-                profile.UpdatedAtUtc = profile.UpdatedAtUtc == default ? profile.CreatedAtUtc : profile.UpdatedAtUtc;
-                return profile;
-            })
-            .OrderBy(static profile => profile.DisplayName, StringComparer.OrdinalIgnoreCase)
-            .ToList();
-
-        if (!registry.Profiles.Any(profile => string.Equals(profile.Id, registry.SelectedProfileId, StringComparison.OrdinalIgnoreCase)))
-        {
-            registry.SelectedProfileId = registry.Profiles
-                .OrderByDescending(static profile => profile.LastSelectedAtUtc ?? DateTime.MinValue)
-                .ThenBy(static profile => profile.DisplayName, StringComparer.OrdinalIgnoreCase)
-                .FirstOrDefault()?.Id ?? "";
-        }
-    }
-
-    private static string CreateUniqueId(string displayName, IReadOnlyList<AvatarProfile> profiles)
-    {
-        var baseId = CreateId(displayName);
-        var id = baseId;
-        for (var suffix = 2; profiles.Any(profile => string.Equals(profile.Id, id, StringComparison.OrdinalIgnoreCase)); suffix++)
-        {
-            id = $"{baseId}-{suffix}";
-        }
-
-        return id;
-    }
-
-    private static string CreateId(string displayName)
-    {
-        var builder = new StringBuilder();
-        var lastWasDash = false;
-        foreach (var character in displayName.Trim().ToLowerInvariant())
-        {
-            if (char.IsLetterOrDigit(character))
-            {
-                builder.Append(character);
-                lastWasDash = false;
-            }
-            else if (!lastWasDash)
-            {
-                builder.Append('-');
-                lastWasDash = true;
-            }
-        }
-
-        var id = builder.ToString().Trim('-');
-        return string.IsNullOrWhiteSpace(id) ? "profile" : id;
-    }
-
-    private static string CleanProfileId(string value)
-    {
-        return CreateId(value);
-    }
-
-    private static string CleanDataFolderName(string value)
-    {
-        if (string.IsNullOrWhiteSpace(value))
-        {
-            return "";
-        }
-
-        return CreateId(value);
-    }
-
-    private static string CleanDisplayName(string value)
-    {
-        value = string.IsNullOrWhiteSpace(value) ? "Primary subject" : value.Trim();
-        foreach (var invalid in Path.GetInvalidFileNameChars())
-        {
-            value = value.Replace(invalid, ' ');
-        }
-
-        return string.Join(' ', value.Split(' ', StringSplitOptions.RemoveEmptyEntries));
-    }
+	private static string CleanDisplayName(string value)
+	{
+		value = (string.IsNullOrWhiteSpace(value) ? "Primary subject" : value.Trim());
+		char[] invalidFileNameChars = Path.GetInvalidFileNameChars();
+		foreach (char oldChar in invalidFileNameChars)
+		{
+			value = value.Replace(oldChar, ' ');
+		}
+		return string.Join(' ', value.Split(' ', StringSplitOptions.RemoveEmptyEntries));
+	}
 }

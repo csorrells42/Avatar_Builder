@@ -1,22 +1,25 @@
+using System;
+using System.Threading;
+using System.Threading.Tasks;
 using System.Windows.Media.Imaging;
 
 namespace AvatarBuilder.Modules.Webcam.Common;
 
 public interface ICameraPreviewService : IDisposable
 {
-    event EventHandler<BitmapSource>? FrameAvailable;
+	bool IsAvailable { get; }
 
-    event EventHandler<CameraFrame>? CameraFrameAvailable;
+	int MaxOutputWidth { get; set; }
 
-    event EventHandler<string>? StatusChanged;
+	double MaxOutputFramesPerSecond { get; set; }
 
-    bool IsAvailable { get; }
+	event EventHandler<BitmapSource>? FrameAvailable;
 
-    int MaxOutputWidth { get; set; }
+	event EventHandler<CameraFrame>? CameraFrameAvailable;
 
-    double MaxOutputFramesPerSecond { get; set; }
+	event EventHandler<string>? StatusChanged;
 
-    Task<bool> StartAsync(CameraDevice camera, CameraVideoMode? mode, CancellationToken cancellationToken = default);
+	Task<bool> StartAsync(CameraDevice camera, CameraVideoMode? mode, CancellationToken cancellationToken = default(CancellationToken));
 
-    void Stop();
+	void Stop();
 }

@@ -1,256 +1,271 @@
+using System;
+using System.Collections.Generic;
+using System.Linq;
 using AvatarBuilder.Modules.Vision.Reconstruction;
 
 namespace AvatarBuilder.Modules.Storage.AvatarObservations;
 
 public static class AvatarObservationRanker
 {
-    public const int MaximumRetainedObservationCount = 360;
-    public const double MinimumReconstructionConfidencePercent = 55d;
-    public const double MinimumCaptureQualityPercent = 45d;
+	public const int MaximumRetainedObservationCount = 360;
 
-    private const double PoseThresholdDegrees = 10d;
-    private const double ReplacementMarginPercent = 2d;
+	public const double MinimumReconstructionConfidencePercent = 55.0;
 
-    public static AvatarObservationRankingDecision Rank(
-        AvatarObservationCapture capture,
-        IReadOnlyList<AvatarObservation> retained)
-    {
-        var reconstruction = capture.Reconstruction;
-        if (reconstruction.CanonicalIdentityVertices.Count < 1_000)
-        {
-            return AvatarObservationRankingDecision.Reject("3DDFA did not provide a full canonical identity scan.");
-        }
+	public const double MinimumCaptureQualityPercent = 45.0;
 
-        if (reconstruction.ReconstructionConfidencePercent < MinimumReconstructionConfidencePercent)
-        {
-            return AvatarObservationRankingDecision.Reject(
-                $"3DDFA confidence {reconstruction.ReconstructionConfidencePercent:0.#}% was below {MinimumReconstructionConfidencePercent:0.#}%.");
-        }
+	private const double PoseThresholdDegrees = 10.0;
 
-        if (capture.CaptureQuality.ScorePercent < MinimumCaptureQualityPercent)
-        {
-            return AvatarObservationRankingDecision.Reject(
-                $"Capture quality {capture.CaptureQuality.ScorePercent:0.#}% was below {MinimumCaptureQualityPercent:0.#}%.");
-        }
+	private const double ReplacementMarginPercent = 2.0;
 
-        var expressionEnergy = CalculateExpressionEnergy(reconstruction.ExpressionCoefficients);
-        var poseBucket = CreatePoseBucket(
-            reconstruction.ARotationAroundXDegrees,
-            reconstruction.BRotationAroundYDegrees,
-            reconstruction.CRotationAroundZDegrees,
-            capture.FaceGeometry.RelativeDistanceScale);
-        var bucketCount = retained.Count(item => string.Equals(item.PoseBucket, poseBucket, StringComparison.Ordinal));
-        var coverageScore = Math.Clamp(100d - bucketCount * 16d, 20d, 100d);
-        var identityWeight = Math.Clamp(
-            reconstruction.ReconstructionConfidencePercent - Math.Min(35d, expressionEnergy * 0.30d),
-            0d,
-            100d);
-        var identityScore = Math.Clamp(
-            reconstruction.ReconstructionConfidencePercent * 0.55d
-            + capture.CaptureQuality.ScorePercent * 0.25d
-            + capture.CaptureQuality.StabilityScorePercent * 0.20d
-            - expressionEnergy * 0.15d,
-            0d,
-            100d);
-        var expressionNovelty = CalculateExpressionNovelty(reconstruction.ExpressionCoefficients, retained);
-        var animationScore = Math.Clamp(
-            reconstruction.ReconstructionConfidencePercent * 0.50d
-            + capture.CaptureQuality.ScorePercent * 0.25d
-            + expressionNovelty * 0.25d,
-            0d,
-            100d);
-        var retentionScore = Math.Clamp(
-            Math.Max(identityScore, animationScore * 0.92d) * 0.58d
-            + coverageScore * 0.32d
-            + Math.Min(reconstruction.ReconstructionConfidencePercent, capture.CaptureQuality.ScorePercent) * 0.10d,
-            0d,
-            100d);
-        var candidate = new AvatarObservation
-        {
-            ObservationId = Guid.NewGuid().ToString("N"),
-            RequestId = reconstruction.RequestId,
-            SampleId = string.IsNullOrWhiteSpace(reconstruction.RequestId)
-                ? $"3ddfa-{reconstruction.CapturedAtUtc.Ticks}"
-                : $"3ddfa-{reconstruction.RequestId}",
-            CapturedAtUtc = reconstruction.CapturedAtUtc == default ? DateTime.UtcNow : reconstruction.CapturedAtUtc,
-            Source = reconstruction.Source,
-            ReconstructionConfidencePercent = Round(reconstruction.ReconstructionConfidencePercent),
-            SampleQualityPercent = Round(capture.CaptureQuality.ScorePercent),
-            EyeQualityPercent = Round(capture.CaptureQuality.EyeEvidenceScorePercent),
-            MouthQualityPercent = Round(capture.CaptureQuality.MouthEvidenceScorePercent),
-            BrowQualityPercent = Round(capture.CaptureQuality.StabilityScorePercent),
-            StabilityQualityPercent = Round(capture.CaptureQuality.StabilityScorePercent),
-            ARotationAroundXDegrees = Round(reconstruction.ARotationAroundXDegrees),
-            BRotationAroundYDegrees = Round(reconstruction.BRotationAroundYDegrees),
-            CRotationAroundZDegrees = Round(reconstruction.CRotationAroundZDegrees),
-            XHorizontalPercent = Round(capture.FaceGeometry.XHorizontalPercent),
-            YVerticalPercent = Round(capture.FaceGeometry.YVerticalPercent),
-            RelativeDistanceScale = RoundNullable(capture.FaceGeometry.RelativeDistanceScale),
-            ApparentDistanceUnits = RoundNullable(capture.FaceGeometry.ApparentDistanceUnits),
-            FaceWidthPercent = RoundNullable(capture.CaptureQuality.FaceWidthPercent),
-            FaceHeightPercent = RoundNullable(capture.CaptureQuality.FaceHeightPercent),
-            IdentityWeightPercent = Round(identityWeight),
-            ExpressionWeightPercent = Round(reconstruction.ReconstructionConfidencePercent),
-            IdentityScorePercent = Round(identityScore),
-            AnimationScorePercent = Round(animationScore),
-            CoverageScorePercent = Round(coverageScore),
-            RetentionScorePercent = Round(retentionScore),
-            ExpressionEnergyPercent = Round(expressionEnergy),
-            PoseBucket = poseBucket,
-            IdentityUse = expressionEnergy >= 42d
-                ? "Expression-rich observation retained primarily for animation range."
-                : "Identity-friendly canonical 3DDFA observation.",
-            TrustDecision = reconstruction.TrustDecision,
-            DenseVertexCount = reconstruction.Vertices.Count,
-            CanonicalVertexCount = reconstruction.CanonicalIdentityVertices.Count,
-            ShapeCoefficients = reconstruction.ShapeCoefficients.Select(Round).ToList(),
-            ExpressionCoefficients = reconstruction.ExpressionCoefficients.Select(Round).ToList(),
-            Warnings = reconstruction.Warnings.ToList()
-        };
+	public static AvatarObservationRankingDecision Rank(AvatarObservationCapture capture, IReadOnlyList<AvatarObservation> retained)
+	{
+		AvatarReconstructionSnapshot reconstruction = capture.Reconstruction;
+		bool flag = FaceReconstructionBackendIds.IsDecaFlame(reconstruction.BackendId);
+		bool flag2 = string.Equals(reconstruction.BackendId, "deca-flame-standard-model-checkpoint-v1", StringComparison.Ordinal);
+		if (reconstruction.CanonicalIdentityVertices.Count < 1000)
+		{
+			return AvatarObservationRankingDecision.Reject(reconstruction.Source + " did not provide a full canonical identity scan.");
+		}
+		if (!flag && reconstruction.ReconstructionConfidencePercent < 55.0)
+		{
+			return AvatarObservationRankingDecision.Reject($"{reconstruction.Source} measured projection fit {reconstruction.ReconstructionConfidencePercent:0.#}% was below {55.0:0.#}%.");
+		}
+		if (!flag && capture.CaptureQuality.ScorePercent < 45.0)
+		{
+			return AvatarObservationRankingDecision.Reject($"Capture quality {capture.CaptureQuality.ScorePercent:0.#}% was below {45.0:0.#}%.");
+		}
+		double num = CalculateExpressionEnergy(reconstruction.ExpressionCoefficients);
+		string poseBucket = CreatePoseBucket(reconstruction.ARotationAroundXDegrees, reconstruction.BRotationAroundYDegrees, reconstruction.CRotationAroundZDegrees, capture.FaceGeometry.RelativeDistanceScale);
+		int num2 = retained.Count((AvatarObservation item) => string.Equals(item.PoseBucket, poseBucket, StringComparison.Ordinal));
+		double num3 = Math.Clamp(100.0 - (double)num2 * 16.0, 20.0, 100.0);
+		double value = (flag ? 100.0 : Math.Clamp(reconstruction.ReconstructionConfidencePercent - Math.Min(35.0, num * 0.3), 0.0, 100.0));
+		double num4 = Math.Clamp(reconstruction.ReconstructionConfidencePercent * 0.55 + capture.CaptureQuality.ScorePercent * 0.25 + capture.CaptureQuality.StabilityScorePercent * 0.2 - num * 0.15, 0.0, 100.0);
+		double num5 = CalculateExpressionNovelty(reconstruction.ExpressionCoefficients, retained);
+		double num6 = Math.Clamp(reconstruction.ReconstructionConfidencePercent * 0.5 + capture.CaptureQuality.ScorePercent * 0.25 + num5 * 0.25, 0.0, 100.0);
+		double value2 = Math.Clamp(Math.Max(num4, num6 * 0.92) * 0.58 + num3 * 0.32 + Math.Min(reconstruction.ReconstructionConfidencePercent, capture.CaptureQuality.ScorePercent) * 0.1, 0.0, 100.0);
+		double num7 = NormalizeCoefficientDelta(reconstruction.CurrentModelCoefficientDeltaRms);
+		if (flag)
+		{
+			value2 = Math.Clamp(100.0 / (1.0 + num7 * 8.0) * 0.8 + capture.CaptureQuality.StabilityScorePercent * 0.15 + num3 * 0.05, 0.0, 100.0);
+		}
+		AvatarObservation avatarObservation = new AvatarObservation
+		{
+			ObservationId = Guid.NewGuid().ToString("N"),
+			RequestId = reconstruction.RequestId,
+			SampleId = (string.IsNullOrWhiteSpace(reconstruction.RequestId) ? $"avatar-{reconstruction.CapturedAtUtc.Ticks}" : ("avatar-" + reconstruction.RequestId)),
+			CapturedAtUtc = ((reconstruction.CapturedAtUtc == default(DateTime)) ? DateTime.UtcNow : reconstruction.CapturedAtUtc),
+			BackendId = reconstruction.BackendId,
+			Source = reconstruction.Source,
+			ReconstructionConfidencePercent = Round(reconstruction.ReconstructionConfidencePercent),
+			ModelSequenceNumber = reconstruction.CurrentModelSequenceNumber,
+			ModelCoefficientDeltaRms = Round(num7),
+			SampleQualityPercent = Round(capture.CaptureQuality.ScorePercent),
+			EyeQualityPercent = Round(capture.CaptureQuality.EyeEvidenceScorePercent),
+			MouthQualityPercent = Round(capture.CaptureQuality.MouthEvidenceScorePercent),
+			BrowQualityPercent = Round(capture.CaptureQuality.StabilityScorePercent),
+			StabilityQualityPercent = Round(capture.CaptureQuality.StabilityScorePercent),
+			ARotationAroundXDegrees = Round(reconstruction.ARotationAroundXDegrees),
+			BRotationAroundYDegrees = Round(reconstruction.BRotationAroundYDegrees),
+			CRotationAroundZDegrees = Round(reconstruction.CRotationAroundZDegrees),
+			XHorizontalPercent = Round(capture.FaceGeometry.XHorizontalPercent),
+			YVerticalPercent = Round(capture.FaceGeometry.YVerticalPercent),
+			RelativeDistanceScale = RoundNullable(capture.FaceGeometry.RelativeDistanceScale),
+			ApparentDistanceUnits = RoundNullable(capture.FaceGeometry.ApparentDistanceUnits),
+			FaceWidthPercent = RoundNullable(capture.CaptureQuality.FaceWidthPercent),
+			FaceHeightPercent = RoundNullable(capture.CaptureQuality.FaceHeightPercent),
+			IdentityWeightPercent = Round(value),
+			ExpressionWeightPercent = (flag ? 100.0 : Round(reconstruction.ReconstructionConfidencePercent)),
+			IdentityScorePercent = Round(num4),
+			AnimationScorePercent = Round(num6),
+			CoverageScorePercent = Round(num3),
+			RetentionScorePercent = Round(value2),
+			ExpressionEnergyPercent = Round(num),
+			PoseBucket = poseBucket,
+			IdentityUse = ((!flag2) ? (flag ? "Lowest-delta recurrent identity anchor from a bounded five-result convergence window." : ((num >= 42.0) ? "Expression-rich observation retained primarily for animation range." : ("Identity-friendly canonical " + reconstruction.Source + " observation."))) : ((reconstruction.PinnedStillPassCount == 0) ? "Human-accepted Standard Model checkpoint with an exact paired source frame." : "Sequential Standard Model checkpoint produced by holding one still fixed until convergence.")),
+			TrustDecision = reconstruction.TrustDecision,
+			DenseVertexCount = reconstruction.Vertices.Count,
+			CanonicalVertexCount = reconstruction.CanonicalIdentityVertices.Count,
+			ShapeCoefficients = reconstruction.ShapeCoefficients.Select(Round).ToList(),
+			ExpressionCoefficients = reconstruction.ExpressionCoefficients.Select(Round).ToList(),
+			Warnings = reconstruction.Warnings.ToList()
+		};
+		if (flag2)
+		{
+			if (reconstruction.PinnedStillPassCount == 0)
+			{
+				return AvatarObservationRankingDecision.Accept(avatarObservation, null, $"Human accepted this Standard Model checkpoint at coefficient delta RMS {num7:0.000000}.");
+			}
+			return AvatarObservationRankingDecision.Accept(avatarObservation, null, reconstruction.PinnedStillConverged ? $"Standard Model checkpoint converged after {reconstruction.PinnedStillPassCount} recurrent pass(es) at coefficient delta RMS {num7:0.000000}." : $"Standard Model checkpoint reached its bounded {reconstruction.PinnedStillPassCount}-pass limit at coefficient delta RMS {num7:0.000000}.");
+		}
+		if (flag)
+		{
+			if (retained.Count < 360)
+			{
+				return AvatarObservationRankingDecision.Accept(avatarObservation, null, $"Lowest-delta recurrent result retained at coefficient delta RMS {num7:0.000000}.");
+			}
+			AvatarObservation avatarObservation2 = (from item in retained
+				where string.Equals(item.PoseBucket, poseBucket, StringComparison.Ordinal)
+				orderby NormalizeCoefficientDelta(item.ModelCoefficientDeltaRms) descending
+				select item).FirstOrDefault() ?? retained.OrderByDescending((AvatarObservation item) => NormalizeCoefficientDelta(item.ModelCoefficientDeltaRms)).First();
+			double num8 = NormalizeCoefficientDelta(avatarObservation2.ModelCoefficientDeltaRms);
+			if (!(num7 + 1E-09 < num8))
+			{
+				return AvatarObservationRankingDecision.Reject($"The retained convergence anchor was already steadier ({num8:0.000000} versus {num7:0.000000}).");
+			}
+			return AvatarObservationRankingDecision.Accept(avatarObservation, avatarObservation2, $"A lower-delta recurrent anchor ({num7:0.000000}) replaced a noisier one ({num8:0.000000}).");
+		}
+		AvatarObservation avatarObservation3 = FindNearDuplicate(avatarObservation, retained);
+		if ((object)avatarObservation3 != null)
+		{
+			double num9 = Math.Max(avatarObservation.RetentionScorePercent, avatarObservation.AnimationScorePercent);
+			double num10 = Math.Max(avatarObservation3.RetentionScorePercent, avatarObservation3.AnimationScorePercent);
+			if (!(num9 >= num10 + 2.0))
+			{
+				return AvatarObservationRankingDecision.Reject("The observation was a lower-value near duplicate of retained evidence.");
+			}
+			return AvatarObservationRankingDecision.Accept(avatarObservation, avatarObservation3, "A higher-quality observation replaced a near duplicate.");
+		}
+		if (retained.Count < 360)
+		{
+			return AvatarObservationRankingDecision.Accept(avatarObservation, null, "The observation added useful retained evidence.");
+		}
+		AvatarObservation avatarObservation4 = (from item in retained
+			where string.Equals(item.PoseBucket, poseBucket, StringComparison.Ordinal)
+			orderby item.RetentionScorePercent
+			select item).FirstOrDefault();
+		if ((object)avatarObservation4 != null && avatarObservation.RetentionScorePercent >= avatarObservation4.RetentionScorePercent + 2.0)
+		{
+			return AvatarObservationRankingDecision.Accept(avatarObservation, avatarObservation4, "A stronger observation replaced the weakest sample in its coverage bucket.");
+		}
+		Dictionary<string, int> bucketSizes = retained.GroupBy<AvatarObservation, string>((AvatarObservation item) => item.PoseBucket, StringComparer.Ordinal).ToDictionary<IGrouping<string, AvatarObservation>, string, int>((IGrouping<string, AvatarObservation> group) => group.Key, (IGrouping<string, AvatarObservation> group) => group.Count(), StringComparer.Ordinal);
+		AvatarObservation avatarObservation5 = (from item in retained
+			where bucketSizes.GetValueOrDefault(item.PoseBucket) > 1
+			orderby item.RetentionScorePercent
+			select item).FirstOrDefault();
+		if ((object)avatarObservation5 == null || !(avatarObservation.RetentionScorePercent >= avatarObservation5.RetentionScorePercent + 4.0))
+		{
+			return AvatarObservationRankingDecision.Reject("The retained evidence set already contains stronger and more diverse observations.");
+		}
+		return AvatarObservationRankingDecision.Accept(avatarObservation, avatarObservation5, "A substantially stronger observation replaced weak redundant evidence.");
+	}
 
-        var duplicate = FindNearDuplicate(candidate, retained);
-        if (duplicate is not null)
-        {
-            var candidateValue = Math.Max(candidate.RetentionScorePercent, candidate.AnimationScorePercent);
-            var duplicateValue = Math.Max(duplicate.RetentionScorePercent, duplicate.AnimationScorePercent);
-            return candidateValue >= duplicateValue + ReplacementMarginPercent
-                ? AvatarObservationRankingDecision.Accept(candidate, duplicate, "A higher-quality observation replaced a near duplicate.")
-                : AvatarObservationRankingDecision.Reject("The observation was a lower-value near duplicate of retained evidence.");
-        }
+	private static AvatarObservation? FindNearDuplicate(AvatarObservation candidate, IReadOnlyList<AvatarObservation> retained)
+	{
+		foreach (AvatarObservation item in retained.Where((AvatarObservation item) => string.Equals(item.PoseBucket, candidate.PoseBucket, StringComparison.Ordinal)))
+		{
+			if (!(Math.Sqrt(Square(candidate.ARotationAroundXDegrees - item.ARotationAroundXDegrees) + Square(candidate.BRotationAroundYDegrees - item.BRotationAroundYDegrees) + Square(candidate.CRotationAroundZDegrees - item.CRotationAroundZDegrees)) > 3.0))
+			{
+				double num = RelativeRmsPercent(candidate.ShapeCoefficients, item.ShapeCoefficients);
+				double num2 = RelativeRmsPercent(candidate.ExpressionCoefficients, item.ExpressionCoefficients);
+				if (num <= 0.75 && num2 <= 2.5)
+				{
+					return item;
+				}
+			}
+		}
+		return null;
+	}
 
-        if (retained.Count < MaximumRetainedObservationCount)
-        {
-            return AvatarObservationRankingDecision.Accept(candidate, null, "The observation added useful retained evidence.");
-        }
+	private static double CalculateExpressionNovelty(IReadOnlyList<double> coefficients, IReadOnlyList<AvatarObservation> retained)
+	{
+		if (coefficients.Count == 0 || retained.Count == 0)
+		{
+			return 100.0;
+		}
+		return Math.Clamp(retained.Select((AvatarObservation item) => RelativeRmsPercent(coefficients, item.ExpressionCoefficients)).DefaultIfEmpty(100.0).Min() * 4.0, 0.0, 100.0);
+	}
 
-        var sameBucketLowest = retained
-            .Where(item => string.Equals(item.PoseBucket, poseBucket, StringComparison.Ordinal))
-            .OrderBy(static item => item.RetentionScorePercent)
-            .FirstOrDefault();
-        if (sameBucketLowest is not null
-            && candidate.RetentionScorePercent >= sameBucketLowest.RetentionScorePercent + ReplacementMarginPercent)
-        {
-            return AvatarObservationRankingDecision.Accept(candidate, sameBucketLowest, "A stronger observation replaced the weakest sample in its coverage bucket.");
-        }
+	private static string CreatePoseBucket(double a, double b, double c, double? z)
+	{
+		return $"A{AxisBucket(a)}-B{AxisBucket(b)}-C{AxisBucket(c)}-Z{DistanceBucket(z)}";
+	}
 
-        var bucketSizes = retained
-            .GroupBy(static item => item.PoseBucket, StringComparer.Ordinal)
-            .ToDictionary(static group => group.Key, static group => group.Count(), StringComparer.Ordinal);
-        var globalReplacement = retained
-            .Where(item => bucketSizes.GetValueOrDefault(item.PoseBucket) > 1)
-            .OrderBy(static item => item.RetentionScorePercent)
-            .FirstOrDefault();
-        return globalReplacement is not null
-               && candidate.RetentionScorePercent >= globalReplacement.RetentionScorePercent + 4d
-            ? AvatarObservationRankingDecision.Accept(candidate, globalReplacement, "A substantially stronger observation replaced weak redundant evidence.")
-            : AvatarObservationRankingDecision.Reject("The retained evidence set already contains stronger and more diverse observations.");
-    }
+	private static string AxisBucket(double value)
+	{
+		if (!(value <= -10.0))
+		{
+			if (!(value >= 10.0))
+			{
+				return "0";
+			}
+			return "P";
+		}
+		return "N";
+	}
 
-    private static AvatarObservation? FindNearDuplicate(
-        AvatarObservation candidate,
-        IReadOnlyList<AvatarObservation> retained)
-    {
-        foreach (var existing in retained.Where(item => string.Equals(item.PoseBucket, candidate.PoseBucket, StringComparison.Ordinal)))
-        {
-            var angleDistance = Math.Sqrt(
-                Square(candidate.ARotationAroundXDegrees - existing.ARotationAroundXDegrees)
-                + Square(candidate.BRotationAroundYDegrees - existing.BRotationAroundYDegrees)
-                + Square(candidate.CRotationAroundZDegrees - existing.CRotationAroundZDegrees));
-            if (angleDistance > 3d)
-            {
-                continue;
-            }
+	private static string DistanceBucket(double? value)
+	{
+		if (value.HasValue)
+		{
+			double valueOrDefault = value.GetValueOrDefault();
+			if (valueOrDefault <= 0.92)
+			{
+				return "L";
+			}
+			if (valueOrDefault >= 1.08)
+			{
+				return "H";
+			}
+		}
+		return "0";
+	}
 
-            var shapeDistance = RelativeRmsPercent(candidate.ShapeCoefficients, existing.ShapeCoefficients);
-            var expressionDistance = RelativeRmsPercent(candidate.ExpressionCoefficients, existing.ExpressionCoefficients);
-            if (shapeDistance <= 0.75d && expressionDistance <= 2.5d)
-            {
-                return existing;
-            }
-        }
+	private static double CalculateExpressionEnergy(IReadOnlyList<double> coefficients)
+	{
+		if (coefficients.Count != 0)
+		{
+			return Math.Clamp(coefficients.Average((double value) => Math.Abs(value)) * 100.0, 0.0, 100.0);
+		}
+		return 0.0;
+	}
 
-        return null;
-    }
+	private static double RelativeRmsPercent(IReadOnlyList<double> left, IReadOnlyList<double> right)
+	{
+		int num = Math.Min(left.Count, right.Count);
+		if (num == 0)
+		{
+			return 100.0;
+		}
+		double num2 = 0.0;
+		double num3 = 0.0;
+		for (int i = 0; i < num; i++)
+		{
+			num2 += Square(left[i] - right[i]);
+			num3 += Square(right[i]);
+		}
+		return Math.Sqrt(num2 / (double)num) / Math.Max(1E-06, Math.Sqrt(num3 / (double)num)) * 100.0;
+	}
 
-    private static double CalculateExpressionNovelty(
-        IReadOnlyList<double> coefficients,
-        IReadOnlyList<AvatarObservation> retained)
-    {
-        if (coefficients.Count == 0 || retained.Count == 0)
-        {
-            return 100d;
-        }
+	private static double Square(double value)
+	{
+		return value * value;
+	}
 
-        var nearest = retained
-            .Select(item => RelativeRmsPercent(coefficients, item.ExpressionCoefficients))
-            .DefaultIfEmpty(100d)
-            .Min();
-        return Math.Clamp(nearest * 4d, 0d, 100d);
-    }
+	private static double NormalizeCoefficientDelta(double value)
+	{
+		if (!double.IsFinite(value) || !(value >= 0.0))
+		{
+			return 1000000.0;
+		}
+		return value;
+	}
 
-    private static string CreatePoseBucket(double a, double b, double c, double? z)
-    {
-        return $"A{AxisBucket(a)}-B{AxisBucket(b)}-C{AxisBucket(c)}-Z{DistanceBucket(z)}";
-    }
+	private static double Round(double value)
+	{
+		if (!double.IsFinite(value))
+		{
+			return 0.0;
+		}
+		return Math.Round(value, 6);
+	}
 
-    private static string AxisBucket(double value)
-    {
-        return value <= -PoseThresholdDegrees ? "N" : value >= PoseThresholdDegrees ? "P" : "0";
-    }
-
-    private static string DistanceBucket(double? value)
-    {
-        return value switch
-        {
-            <= 0.92d => "L",
-            >= 1.08d => "H",
-            _ => "0"
-        };
-    }
-
-    private static double CalculateExpressionEnergy(IReadOnlyList<double> coefficients)
-    {
-        return coefficients.Count == 0
-            ? 0d
-            : Math.Clamp(coefficients.Average(static value => Math.Abs(value)) * 100d, 0d, 100d);
-    }
-
-    private static double RelativeRmsPercent(IReadOnlyList<double> left, IReadOnlyList<double> right)
-    {
-        var count = Math.Min(left.Count, right.Count);
-        if (count == 0)
-        {
-            return 100d;
-        }
-
-        var delta = 0d;
-        var scale = 0d;
-        for (var index = 0; index < count; index++)
-        {
-            delta += Square(left[index] - right[index]);
-            scale += Square(right[index]);
-        }
-
-        return Math.Sqrt(delta / count) / Math.Max(0.000001d, Math.Sqrt(scale / count)) * 100d;
-    }
-
-    private static double Square(double value) => value * value;
-
-    private static double Round(double value) => double.IsFinite(value) ? Math.Round(value, 6) : 0d;
-
-    private static double? RoundNullable(double? value) => value is { } number ? Round(number) : null;
-}
-
-public sealed record AvatarObservationRankingDecision(
-    bool Accepted,
-    AvatarObservation? Candidate,
-    AvatarObservation? Replacement,
-    string Reason)
-{
-    public static AvatarObservationRankingDecision Accept(
-        AvatarObservation candidate,
-        AvatarObservation? replacement,
-        string reason) => new(true, candidate, replacement, reason);
-
-    public static AvatarObservationRankingDecision Reject(string reason) => new(false, null, null, reason);
+	private static double? RoundNullable(double? value)
+	{
+		if (value.HasValue)
+		{
+			double valueOrDefault = value.GetValueOrDefault();
+			return Round(valueOrDefault);
+		}
+		return null;
+	}
 }

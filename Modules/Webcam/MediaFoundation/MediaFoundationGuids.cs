@@ -1,79 +1,56 @@
+using System;
+
 namespace AvatarBuilder.Modules.Webcam.MediaFoundation;
 
 internal static class MediaFoundationGuids
 {
-    public static readonly Guid MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE = new(
-        0xc60ac5fe, 0x252a, 0x478f, 0xa0, 0xef, 0xbc, 0x8f, 0xa5, 0xf7, 0xca, 0xd3);
+	public static readonly Guid MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE = new Guid(3322594814u, 9514, 18319, 160, 239, 188, 143, 165, 247, 202, 211);
 
-    public static readonly Guid MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_GUID = new(
-        0x8ac3587a, 0x4ae7, 0x42d8, 0x99, 0xe0, 0x0a, 0x60, 0x13, 0xee, 0xf9, 0x0f);
+	public static readonly Guid MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_GUID = new Guid(2328057978u, 19175, 17112, 153, 224, 10, 96, 19, 238, 249, 15);
 
-    public static readonly Guid MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME = new(
-        0x60d0e559, 0x52f8, 0x4fa2, 0xbb, 0xce, 0xac, 0xdb, 0x34, 0xa8, 0xec, 0x01);
+	public static readonly Guid MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME = new Guid(1624302937, 21240, 20386, 187, 206, 172, 219, 52, 168, 236, 1);
 
-    public static readonly Guid MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_SYMBOLIC_LINK = new(
-        0x58f0aad8, 0x22bf, 0x4f8a, 0xbb, 0x3d, 0xd2, 0xc4, 0x97, 0x8c, 0x6e, 0x2f);
+	public static readonly Guid MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_SYMBOLIC_LINK = new Guid(1492167384, 8895, 20362, 187, 61, 210, 196, 151, 140, 110, 47);
 
-    public static readonly Guid MFMediaType_Video = new(
-        0x73646976, 0x0000, 0x0010, 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71);
+	public static readonly Guid MFMediaType_Video = new Guid(1935960438, 0, 16, 128, 0, 0, 170, 0, 56, 155, 113);
 
-    public static readonly Guid MFVideoFormat_RGB32 = new(
-        0x00000016, 0x0000, 0x0010, 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71);
+	public static readonly Guid MFVideoFormat_RGB32 = new Guid(22, 0, 16, 128, 0, 0, 170, 0, 56, 155, 113);
 
-    public static readonly Guid MFVideoFormat_NV12 = new(
-        0x3231564e, 0x0000, 0x0010, 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71);
+	public static readonly Guid MFVideoFormat_NV12 = new Guid(842094158, 0, 16, 128, 0, 0, 170, 0, 56, 155, 113);
 
-    public static readonly Guid MFVideoFormat_P010 = new(
-        0x30313050, 0x0000, 0x0010, 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71);
+	public static readonly Guid MFVideoFormat_P010 = new Guid(808530000, 0, 16, 128, 0, 0, 170, 0, 56, 155, 113);
 
-    public static readonly Guid MFVideoFormat_H264 = new(
-        0x34363248, 0x0000, 0x0010, 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71);
+	public static readonly Guid MFVideoFormat_H264 = new Guid(875967048, 0, 16, 128, 0, 0, 170, 0, 56, 155, 113);
 
-    public static readonly Guid MF_MT_MAJOR_TYPE = new(
-        0x48eba18e, 0xf8c9, 0x4687, 0xbf, 0x11, 0x0a, 0x74, 0xc9, 0xf9, 0x6a, 0x8f);
+	public static readonly Guid MF_MT_MAJOR_TYPE = new Guid(1223401870u, 63689, 18055, 191, 17, 10, 116, 201, 249, 106, 143);
 
-    public static readonly Guid MF_MT_SUBTYPE = new(
-        0xf7e34c9a, 0x42e8, 0x4714, 0xb7, 0x4b, 0xcb, 0x29, 0xd7, 0x2c, 0x35, 0xe5);
+	public static readonly Guid MF_MT_SUBTYPE = new Guid(4158868634u, 17128, 18196, 183, 75, 203, 41, 215, 44, 53, 229);
 
-    public static readonly Guid MF_MT_FRAME_SIZE = new(
-        0x1652c33d, 0xd6b2, 0x4012, 0xb8, 0x34, 0x72, 0x03, 0x08, 0x49, 0xa3, 0x7d);
+	public static readonly Guid MF_MT_FRAME_SIZE = new Guid(374522685u, 54962, 16402, 184, 52, 114, 3, 8, 73, 163, 125);
 
-    public static readonly Guid MF_MT_FRAME_RATE = new(
-        0xc459a2e8, 0x3d2c, 0x4e44, 0xb1, 0x32, 0xfe, 0xe5, 0x15, 0x6c, 0x7b, 0xb0);
+	public static readonly Guid MF_MT_FRAME_RATE = new Guid(3294208744u, 15660, 20036, 177, 50, 254, 229, 21, 108, 123, 176);
 
-    public static readonly Guid MF_MT_PIXEL_ASPECT_RATIO = new(
-        0xc6376a1e, 0x8d0a, 0x4027, 0xbe, 0x45, 0x6d, 0x9a, 0x0a, 0xd3, 0x9b, 0xb6);
+	public static readonly Guid MF_MT_PIXEL_ASPECT_RATIO = new Guid(3325520414u, 36106, 16423, 190, 69, 109, 154, 10, 211, 155, 182);
 
-    public static readonly Guid MF_MT_INTERLACE_MODE = new(
-        0xe2724bb8, 0xe676, 0x4806, 0xb4, 0xb2, 0xa8, 0xd6, 0xef, 0xb4, 0x4c, 0xcd);
+	public static readonly Guid MF_MT_INTERLACE_MODE = new Guid(3799141304u, 58998, 18438, 180, 178, 168, 214, 239, 180, 76, 205);
 
-    public static readonly Guid MF_MT_AVG_BITRATE = new(
-        0x20332624, 0xfb0d, 0x4d9e, 0xbd, 0x0d, 0xcb, 0xf6, 0x78, 0x6c, 0x10, 0x2e);
+	public static readonly Guid MF_MT_AVG_BITRATE = new Guid(540223012u, 64269, 19870, 189, 13, 203, 246, 120, 108, 16, 46);
 
-    public static readonly Guid MF_MT_DEFAULT_STRIDE = new(
-        0x644b4e48, 0x1e02, 0x4516, 0xb0, 0xeb, 0xc0, 0x1c, 0xa9, 0xd4, 0x9a, 0xc6);
+	public static readonly Guid MF_MT_DEFAULT_STRIDE = new Guid(1682656840, 7682, 17686, 176, 235, 192, 28, 169, 212, 154, 198);
 
-    public static readonly Guid MF_MT_ALL_SAMPLES_INDEPENDENT = new(
-        0xc9173739, 0x5e56, 0x461c, 0xb7, 0x13, 0x46, 0xfb, 0x99, 0x5c, 0xb9, 0x5f);
+	public static readonly Guid MF_MT_ALL_SAMPLES_INDEPENDENT = new Guid(3373741881u, 24150, 17948, 183, 19, 70, 251, 153, 92, 185, 95);
 
-    public static readonly Guid MF_MT_FIXED_SIZE_SAMPLES = new(
-        0xb8ebefaf, 0xb718, 0x4e04, 0xb0, 0xa9, 0x11, 0x67, 0x75, 0xe3, 0x32, 0x1b);
+	public static readonly Guid MF_MT_FIXED_SIZE_SAMPLES = new Guid(3102470063u, 46872, 19972, 176, 169, 17, 103, 117, 227, 50, 27);
 
-    public static readonly Guid MFSampleExtension_CleanPoint = new(
-        0x9cdf01d8, 0xa0f0, 0x43ba, 0xb0, 0x77, 0xea, 0xa0, 0x6c, 0xbd, 0x72, 0x8a);
+	public static readonly Guid MFSampleExtension_CleanPoint = new Guid(2631860696u, 41200, 17338, 176, 119, 234, 160, 108, 189, 114, 138);
 
-    public static readonly Guid MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS = new(
-        0xa634a91c, 0x822b, 0x41b9, 0xa4, 0x94, 0x4d, 0xe4, 0x64, 0x36, 0x12, 0xb0);
+	public static readonly Guid MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS = new Guid(2788469020u, 33323, 16825, 164, 148, 77, 228, 100, 54, 18, 176);
 
-    public static readonly Guid MF_SOURCE_READER_D3D_MANAGER = new(
-        0xec822da2, 0xe1e9, 0x4b29, 0xa0, 0xd8, 0x56, 0x3c, 0x71, 0x9f, 0x52, 0x69);
+	public static readonly Guid MF_SOURCE_READER_D3D_MANAGER = new Guid(3967954338u, 57833, 19241, 160, 216, 86, 60, 113, 159, 82, 105);
 
-    public static readonly Guid MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING = new(
-        0xfb394f3d, 0xccf1, 0x42ee, 0xbb, 0xb3, 0xf9, 0xb8, 0x45, 0xd5, 0x68, 0x1d);
+	public static readonly Guid MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING = new Guid(4214837053u, 52465, 17134, 187, 179, 249, 184, 69, 213, 104, 29);
 
-    public static readonly Guid MF_SOURCE_READER_ENABLE_ADVANCED_VIDEO_PROCESSING = new(
-        0x0f81da2c, 0xb537, 0x4672, 0xa8, 0xb2, 0xa6, 0x81, 0xb1, 0x73, 0x07, 0xa3);
+	public static readonly Guid MF_SOURCE_READER_ENABLE_ADVANCED_VIDEO_PROCESSING = new Guid(260168236u, 46391, 18034, 168, 178, 166, 129, 177, 115, 7, 163);
 
-    public static readonly Guid MF_PD_DURATION = new(
-        0x6c990d33, 0xbb8e, 0x477a, 0x85, 0x98, 0x0d, 0x5d, 0x96, 0xfc, 0xd8, 0x8a);
+	public static readonly Guid MF_PD_DURATION = new Guid(1821969715u, 48014, 18298, 133, 152, 13, 93, 150, 252, 216, 138);
 }

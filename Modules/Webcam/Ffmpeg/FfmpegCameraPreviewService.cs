@@ -1,524 +1,662 @@
-using AvatarBuilder.Modules.Webcam.Common;
+using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
+using System.Linq;
+using System.Runtime.CompilerServices;
+using System.Threading;
+using System.Threading.Channels;
+using System.Threading.Tasks;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using AvatarBuilder.Modules.Infrastructure;
+using AvatarBuilder.Modules.Webcam.Common;
+using AvatarBuilder.Modules.Webcam.DirectX12;
 
 namespace AvatarBuilder.Modules.Webcam.Ffmpeg;
 
-public sealed class FfmpegCameraPreviewService : ICameraPreviewService
+public sealed class FfmpegCameraPreviewService : ICameraPreviewService, IDisposable
 {
-    private readonly string? _ffmpegPath = FfmpegLocator.FindFfmpeg();
-    private readonly object _errorLock = new();
-    private readonly List<string> _recentErrors = [];
-    private Process? _process;
-    private CancellationTokenSource? _cancellation;
-    private TaskCompletionSource<bool>? _firstFrameSignal;
+	private sealed record OutputLayout(int Width, int Height, double FramesPerSecond);
 
-    public event EventHandler<BitmapSource>? FrameAvailable;
-    public event EventHandler<CameraFrame>? CameraFrameAvailable;
-    public event EventHandler<string>? StatusChanged;
+	private readonly string? _ffmpegPath = FfmpegLocator.FindFfmpeg();
 
-    public bool IsAvailable => _ffmpegPath is not null;
+	private readonly object _errorLock = new object();
 
-    public string? FfmpegPath => _ffmpegPath;
+	private readonly List<string> _recentErrors = new List<string>();
 
-    public bool DenoiseEnabled { get; set; }
+	private Process? _process;
 
-    public double DenoiseStrength { get; set; } = 2d;
+	private CancellationTokenSource? _cancellation;
 
-    public int MaxOutputWidth { get; set; } = 960;
+	private TaskCompletionSource<bool>? _firstFrameSignal;
 
-    public double MaxOutputFramesPerSecond { get; set; } = 15d;
+	private Channel<CameraFrame>? _frameChannel;
 
-    public async Task<bool> StartAsync(CameraDevice camera, CameraVideoMode? mode, CancellationToken cancellationToken = default)
-    {
-        Stop();
-        ClearRecentErrors();
+	private Task? _frameReaderTask;
 
-        if (_ffmpegPath is null)
-        {
-            StatusChanged?.Invoke(this, "FFmpeg was not found on this computer");
-            return false;
-        }
+	private Task? _frameDeliveryTask;
 
-        var cameraName = camera.Name;
-        _cancellation = new CancellationTokenSource();
-        _firstFrameSignal = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+	private int _frameDeliveryBusy;
 
-        var startInfo = new ProcessStartInfo
-        {
-            FileName = _ffmpegPath,
-            UseShellExecute = false,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            CreateNoWindow = true
-        };
+	private int _framesToQuarantine;
 
-        startInfo.ArgumentList.Add("-hide_banner");
-        startInfo.ArgumentList.Add("-loglevel");
-        startInfo.ArgumentList.Add("warning");
-        startInfo.ArgumentList.Add("-fflags");
-        startInfo.ArgumentList.Add("nobuffer");
-        startInfo.ArgumentList.Add("-flags");
-        startInfo.ArgumentList.Add("low_delay");
-        startInfo.ArgumentList.Add("-rtbufsize");
-        startInfo.ArgumentList.Add($"{GetRealtimeBufferMegabytes(mode)}M");
-        if (mode is { IsAuto: false })
-        {
-            if (!string.IsNullOrWhiteSpace(mode.InputFormat))
-            {
-                AddFormatArguments(startInfo, mode.InputFormat);
-            }
+	private long _lastOverflowReportTimestamp;
 
-            if (mode.Width is int width && mode.Height is int height)
-            {
-                startInfo.ArgumentList.Add("-video_size");
-                startInfo.ArgumentList.Add($"{width}x{height}");
-            }
+	public bool IsAvailable => _ffmpegPath != null;
 
-            if (mode.FramesPerSecond is double fps)
-            {
-                startInfo.ArgumentList.Add("-framerate");
-                startInfo.ArgumentList.Add($"{fps:0.###}");
-            }
-        }
+	public string? FfmpegPath => _ffmpegPath;
 
-        startInfo.ArgumentList.Add("-f");
-        startInfo.ArgumentList.Add("dshow");
-        startInfo.ArgumentList.Add("-i");
-        startInfo.ArgumentList.Add($"video={cameraName}");
-        startInfo.ArgumentList.Add("-vf");
-        startInfo.ArgumentList.Add(CreatePreviewFilter(mode));
-        startInfo.ArgumentList.Add("-an");
-        startInfo.ArgumentList.Add("-f");
-        startInfo.ArgumentList.Add("image2pipe");
-        startInfo.ArgumentList.Add("-vcodec");
-        startInfo.ArgumentList.Add("mjpeg");
-        startInfo.ArgumentList.Add("-q:v");
-        startInfo.ArgumentList.Add("8");
-        startInfo.ArgumentList.Add("pipe:1");
+	public bool DenoiseEnabled { get; set; }
 
-        try
-        {
-            LogCameraLine($"Starting FFmpeg preview for {cameraName} / {mode?.Label ?? "Auto"}");
-            LogCameraLine($"Preview fidelity: max width {MaxOutputWidth}px, max {MaxOutputFramesPerSecond:0.###} fps");
-            LogCameraLine($"Arguments: {string.Join(" ", startInfo.ArgumentList)}");
-            _process = Process.Start(startInfo);
-        }
-        catch (Exception ex)
-        {
-            LogCameraLine($"Could not start camera preview: {ex}");
-            StatusChanged?.Invoke(this, $"Could not start camera preview: {ex.Message}");
-            return false;
-        }
+	public double DenoiseStrength { get; set; } = 2.0;
 
-        if (_process is null)
-        {
-            StatusChanged?.Invoke(this, "Could not start camera preview");
-            return false;
-        }
+	public int MaxOutputWidth { get; set; } = 960;
 
-        _ = ReadFramesAsync(_process, _cancellation.Token);
-        _ = ReadErrorsAsync(_process, _cancellation.Token);
-        var exitTask = WatchExitAsync(_process, _cancellation.Token);
-        StatusChanged?.Invoke(this, $"Starting preview: {cameraName}");
+	public double MaxOutputFramesPerSecond { get; set; } = 15.0;
 
-        try
-        {
-            var firstFrameTask = _firstFrameSignal.Task;
-            var readinessTask = await Task.WhenAny(firstFrameTask, exitTask, Task.Delay(1500, cancellationToken));
-            if (readinessTask == firstFrameTask)
-            {
-                return true;
-            }
+	public bool BitmapFramesEnabled { get; set; } = true;
 
-            if (readinessTask == exitTask && _process.HasExited)
-            {
-                var error = GetRecentErrorSummary();
-                var message = string.IsNullOrWhiteSpace(error)
-                    ? $"Camera preview stopped with FFmpeg exit code {_process.ExitCode}"
-                    : $"Camera preview stopped with FFmpeg exit code {_process.ExitCode}: {error}";
-                LogCameraLine(message);
-                StatusChanged?.Invoke(this, message);
-                Stop();
-                return false;
-            }
-        }
-        catch (OperationCanceledException)
-        {
-            Stop();
-            return false;
-        }
+	public event EventHandler<BitmapSource>? FrameAvailable;
 
-        return true;
-    }
+	public event EventHandler<CameraFrame>? CameraFrameAvailable;
 
-    private string CreatePreviewFilter(CameraVideoMode? mode)
-    {
-        var width = mode?.Width ?? 1280;
-        var height = mode?.Height ?? 720;
-        var sourceFps = mode?.FramesPerSecond ?? 30d;
-        var targetFps = Math.Clamp(Math.Min(sourceFps, MaxOutputFramesPerSecond), 1d, 60d);
-        var maximumWidth = Math.Clamp(MaxOutputWidth, 320, 3840);
-        var targetWidth = Math.Min(width, maximumWidth);
-        var filters = new List<string>
-        {
-            string.Create(CultureInfo.InvariantCulture, $"fps={targetFps:0.###}")
-        };
+	public event EventHandler<string>? StatusChanged;
 
-        if (targetWidth < width)
-        {
-            var scale = targetWidth / (double)Math.Max(1, width);
-            var targetHeight = Math.Max(2, (int)Math.Round(height * scale / 2d) * 2);
-            filters.Add($"scale={targetWidth}:{targetHeight}");
-        }
+	public async Task<bool> StartAsync(CameraDevice camera, CameraVideoMode? mode, CancellationToken cancellationToken = default(CancellationToken))
+	{
+		Stop();
+		ClearRecentErrors();
+		if (_ffmpegPath == null)
+		{
+			this.StatusChanged?.Invoke(this, "FFmpeg was not found on this computer");
+			return false;
+		}
+		string name = camera.Name;
+		_cancellation = new CancellationTokenSource();
+		_firstFrameSignal = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+		Interlocked.Exchange(ref _framesToQuarantine, 0);
+		Interlocked.Exchange(ref _lastOverflowReportTimestamp, 0L);
+		ProcessStartInfo processStartInfo = new ProcessStartInfo
+		{
+			FileName = _ffmpegPath,
+			UseShellExecute = false,
+			RedirectStandardOutput = true,
+			RedirectStandardError = true,
+			CreateNoWindow = true
+		};
+		processStartInfo.ArgumentList.Add("-hide_banner");
+		processStartInfo.ArgumentList.Add("-loglevel");
+		processStartInfo.ArgumentList.Add("warning");
+		processStartInfo.ArgumentList.Add("-fflags");
+		processStartInfo.ArgumentList.Add("nobuffer");
+		processStartInfo.ArgumentList.Add("-flags");
+		processStartInfo.ArgumentList.Add("low_delay");
+		processStartInfo.ArgumentList.Add("-rtbufsize");
+		processStartInfo.ArgumentList.Add($"{GetRealtimeBufferMegabytes(mode)}M");
+		if (mode != null && !mode.IsAuto)
+		{
+			if (!string.IsNullOrWhiteSpace(mode.InputFormat))
+			{
+				AddFormatArguments(processStartInfo, mode.InputFormat);
+			}
+			int? width = mode.Width;
+			if (width.HasValue)
+			{
+				int valueOrDefault = width.GetValueOrDefault();
+				width = mode.Height;
+				if (width.HasValue)
+				{
+					int valueOrDefault2 = width.GetValueOrDefault();
+					processStartInfo.ArgumentList.Add("-video_size");
+					processStartInfo.ArgumentList.Add($"{valueOrDefault}x{valueOrDefault2}");
+				}
+			}
+			double? framesPerSecond = mode.FramesPerSecond;
+			if (framesPerSecond.HasValue)
+			{
+				double valueOrDefault3 = framesPerSecond.GetValueOrDefault();
+				processStartInfo.ArgumentList.Add("-framerate");
+				processStartInfo.ArgumentList.Add($"{valueOrDefault3:0.###}");
+			}
+		}
+		processStartInfo.ArgumentList.Add("-f");
+		processStartInfo.ArgumentList.Add("dshow");
+		processStartInfo.ArgumentList.Add("-i");
+		processStartInfo.ArgumentList.Add("video=" + name);
+		OutputLayout outputLayout = GetOutputLayout(mode);
+		processStartInfo.ArgumentList.Add("-vf");
+		processStartInfo.ArgumentList.Add(CreatePreviewFilter(mode, outputLayout));
+		processStartInfo.ArgumentList.Add("-an");
+		processStartInfo.ArgumentList.Add("-sn");
+		processStartInfo.ArgumentList.Add("-dn");
+		processStartInfo.ArgumentList.Add("-pix_fmt");
+		processStartInfo.ArgumentList.Add("nv12");
+		processStartInfo.ArgumentList.Add("-f");
+		processStartInfo.ArgumentList.Add("rawvideo");
+		processStartInfo.ArgumentList.Add("pipe:1");
+		try
+		{
+			LogCameraLine("Starting FFmpeg preview for " + name + " / " + (mode?.Label ?? "Auto"));
+			LogCameraLine($"Preview fidelity: {outputLayout.Width}x{outputLayout.Height} NV12 at {outputLayout.FramesPerSecond:0.###} fps");
+			LogCameraLine("Arguments: " + string.Join(" ", processStartInfo.ArgumentList));
+			_process = Process.Start(processStartInfo);
+		}
+		catch (Exception ex)
+		{
+			LogCameraLine($"Could not start camera preview: {ex}");
+			this.StatusChanged?.Invoke(this, "Could not start camera preview: " + ex.Message);
+			return false;
+		}
+		if (_process == null)
+		{
+			this.StatusChanged?.Invoke(this, "Could not start camera preview");
+			return false;
+		}
+		Channel<CameraFrame> channel = (_frameChannel = Channel.CreateBounded<CameraFrame>(new BoundedChannelOptions(1)
+		{
+			SingleReader = false,
+			SingleWriter = true,
+			FullMode = BoundedChannelFullMode.Wait
+		}));
+		_frameDeliveryTask = DeliverFramesAsync(channel.Reader, _cancellation.Token);
+		_frameReaderTask = ReadFramesAsync(_process, outputLayout, channel, _cancellation.Token);
+		ReadErrorsAsync(_process, _cancellation.Token);
+		Task exitTask = WatchExitAsync(_process, _cancellation.Token);
+		this.StatusChanged?.Invoke(this, "Starting preview: " + name);
+		try
+		{
+			Task<bool> firstFrameTask = _firstFrameSignal.Task;
+			Task readinessTimeout = Task.Delay(TimeSpan.FromSeconds(5L), cancellationToken);
+			InlineArray3<Task> buffer = default(InlineArray3<Task>);
+			buffer[0] = firstFrameTask;
+			buffer[1] = exitTask;
+			buffer[2] = readinessTimeout;
+			Task task = await Task.WhenAny(buffer);
+			if (task == firstFrameTask)
+			{
+				return true;
+			}
+			if (task == exitTask && _process.HasExited)
+			{
+				string recentErrorSummary = GetRecentErrorSummary();
+				string text = (string.IsNullOrWhiteSpace(recentErrorSummary) ? $"Camera preview stopped with FFmpeg exit code {_process.ExitCode}" : $"Camera preview stopped with FFmpeg exit code {_process.ExitCode}: {recentErrorSummary}");
+				LogCameraLine(text);
+				this.StatusChanged?.Invoke(this, text);
+				Stop();
+				return false;
+			}
+			if (task == readinessTimeout)
+			{
+				LogCameraLine("Camera preview opened but did not deliver a frame within 5 seconds.");
+				this.StatusChanged?.Invoke(this, "Camera preview opened but did not deliver a frame within 5 seconds.");
+				Stop();
+				return false;
+			}
+		}
+		catch (OperationCanceledException)
+		{
+			Stop();
+			return false;
+		}
+		return true;
+	}
 
-        if (DenoiseEnabled)
-        {
-            var strength = Math.Clamp(DenoiseStrength, 0.5d, 8d);
-            var chromaStrength = Math.Max(0.25d, strength * 0.7d);
-            filters.Add(string.Create(
-                CultureInfo.InvariantCulture,
-                $"hqdn3d={strength:0.##}:{chromaStrength:0.##}:{strength * 1.5d:0.##}:{chromaStrength * 1.5d:0.##}"));
-        }
+	private string CreatePreviewFilter(CameraVideoMode? mode, OutputLayout outputLayout)
+	{
+		List<string> list = new List<string>();
+		IFormatProvider invariantCulture = CultureInfo.InvariantCulture;
+		IFormatProvider provider = invariantCulture;
+		DefaultInterpolatedStringHandler handler = new DefaultInterpolatedStringHandler(4, 1, invariantCulture);
+		handler.AppendLiteral("fps=");
+		handler.AppendFormatted(outputLayout.FramesPerSecond, "0.###");
+		list.Add(string.Create(provider, ref handler));
+		List<string> list2 = list;
+		if (outputLayout.Width != (mode?.Width ?? 1280) || outputLayout.Height != (mode?.Height ?? 720))
+		{
+			list2.Add($"scale={outputLayout.Width}:{outputLayout.Height}");
+		}
+		if (DenoiseEnabled)
+		{
+			double num = Math.Clamp(DenoiseStrength, 0.5, 8.0);
+			double num2 = Math.Max(0.25, num * 0.7);
+			invariantCulture = CultureInfo.InvariantCulture;
+			IFormatProvider provider2 = invariantCulture;
+			DefaultInterpolatedStringHandler handler2 = new DefaultInterpolatedStringHandler(10, 4, invariantCulture);
+			handler2.AppendLiteral("hqdn3d=");
+			handler2.AppendFormatted(num, "0.##");
+			handler2.AppendLiteral(":");
+			handler2.AppendFormatted(num2, "0.##");
+			handler2.AppendLiteral(":");
+			handler2.AppendFormatted(num * 1.5, "0.##");
+			handler2.AppendLiteral(":");
+			handler2.AppendFormatted(num2 * 1.5, "0.##");
+			list2.Add(string.Create(provider2, ref handler2));
+		}
+		return string.Join(",", list2);
+	}
 
-        return string.Join(",", filters);
-    }
+	private OutputLayout GetOutputLayout(CameraVideoMode? mode)
+	{
+		int num = mode?.Width ?? 1280;
+		int num2 = mode?.Height ?? 720;
+		double framesPerSecond = Math.Clamp(Math.Min(mode?.FramesPerSecond ?? 30.0, MaxOutputFramesPerSecond), 1.0, 60.0);
+		int val = Math.Clamp(MaxOutputWidth, 320, 3840);
+		int num3 = Math.Min(num, val);
+		double num4 = (double)num3 / (double)Math.Max(1, num);
+		int height = Math.Max(2, (int)Math.Round((double)num2 * num4 / 2.0) * 2);
+		return new OutputLayout(num3, height, framesPerSecond);
+	}
 
-    private int GetRealtimeBufferMegabytes(CameraVideoMode? mode)
-    {
-        var requestedWidth = mode?.Width ?? MaxOutputWidth;
-        var requestedHeight = mode?.Height ?? 720;
-        var requestedPixels = requestedWidth * requestedHeight;
-        var outputPixels = Math.Min(requestedWidth, Math.Clamp(MaxOutputWidth, 320, 3840))
-            * Math.Min(requestedHeight, 2160);
+	private int GetRealtimeBufferMegabytes(CameraVideoMode? mode)
+	{
+		int num = mode?.Width ?? MaxOutputWidth;
+		int num2 = mode?.Height ?? 720;
+		int num3 = num * num2;
+		int num4 = Math.Min(num, Math.Clamp(MaxOutputWidth, 320, 3840)) * Math.Min(num2, 2160);
+		if (num3 >= 8294400 || num4 >= 8294400)
+		{
+			return 256;
+		}
+		if (num3 >= 2073600 || num4 >= 2073600)
+		{
+			return 96;
+		}
+		return 32;
+	}
 
-        if (requestedPixels >= 3840 * 2160 || outputPixels >= 3840 * 2160)
-        {
-            return 256;
-        }
+	private static void AddFormatArguments(ProcessStartInfo startInfo, string format)
+	{
+		format = NormalizeInputFormat(format);
+		if (IsPixelFormat(format))
+		{
+			startInfo.ArgumentList.Add("-pixel_format");
+			startInfo.ArgumentList.Add(format);
+		}
+		else
+		{
+			startInfo.ArgumentList.Add("-vcodec");
+			startInfo.ArgumentList.Add(format);
+		}
+	}
 
-        if (requestedPixels >= 1920 * 1080 || outputPixels >= 1920 * 1080)
-        {
-            return 96;
-        }
+	private static string NormalizeInputFormat(string format)
+	{
+		return format.ToLowerInvariant() switch
+		{
+			"mjpg" => "mjpeg", 
+			"yuy2" => "yuyv422", 
+			"uyvy" => "uyvy422", 
+			_ => format, 
+		};
+	}
 
-        return 32;
-    }
+	private static bool IsPixelFormat(string format)
+	{
+		if (!format.Equals("yuyv422", StringComparison.OrdinalIgnoreCase) && !format.Equals("uyvy422", StringComparison.OrdinalIgnoreCase) && !format.Equals("nv12", StringComparison.OrdinalIgnoreCase) && !format.Equals("rgb32", StringComparison.OrdinalIgnoreCase) && !format.Equals("rgb24", StringComparison.OrdinalIgnoreCase))
+		{
+			return format.Equals("bgr24", StringComparison.OrdinalIgnoreCase);
+		}
+		return true;
+	}
 
-    private static void AddFormatArguments(ProcessStartInfo startInfo, string format)
-    {
-        format = NormalizeInputFormat(format);
-        if (IsPixelFormat(format))
-        {
-            startInfo.ArgumentList.Add("-pixel_format");
-            startInfo.ArgumentList.Add(format);
-            return;
-        }
+	public void Stop()
+	{
+		CancellationTokenSource cancellationTokenSource = Interlocked.Exchange(ref _cancellation, null);
+		cancellationTokenSource?.Cancel();
+		Interlocked.Exchange(ref _frameChannel, null)?.Writer.TryComplete();
+		_firstFrameSignal = null;
+		Interlocked.Exchange(ref _framesToQuarantine, 0);
+		Process process = Interlocked.Exchange(ref _process, null);
+		try
+		{
+			if (process != null && !process.HasExited)
+			{
+				process.Kill(entireProcessTree: true);
+				process.WaitForExit(1500);
+			}
+		}
+		catch
+		{
+		}
+		finally
+		{
+			process?.Dispose();
+		}
+		Task task = Interlocked.Exchange(ref _frameReaderTask, null);
+		Task task2 = Interlocked.Exchange(ref _frameDeliveryTask, null);
+		try
+		{
+			Task[] array = new Task[2] { task, task2 }.Where((Task task3) => task3 != null).Cast<Task>().ToArray();
+			if (array.Length != 0)
+			{
+				Task.WaitAll(array, TimeSpan.FromMilliseconds(750L));
+			}
+		}
+		catch
+		{
+		}
+		finally
+		{
+			cancellationTokenSource?.Dispose();
+		}
+	}
 
-        startInfo.ArgumentList.Add("-vcodec");
-        startInfo.ArgumentList.Add(format);
-    }
+	public void Dispose()
+	{
+		Stop();
+	}
 
-    private static string NormalizeInputFormat(string format)
-    {
-        return format.ToLowerInvariant() switch
-        {
-            "mjpg" => "mjpeg",
-            "yuy2" => "yuyv422",
-            "uyvy" => "uyvy422",
-            _ => format
-        };
-    }
+	private async Task ReadErrorsAsync(Process process, CancellationToken cancellationToken)
+	{
+		try
+		{
+			while (!cancellationToken.IsCancellationRequested)
+			{
+				string text = await process.StandardError.ReadLineAsync(cancellationToken);
+				if (text == null)
+				{
+					break;
+				}
+				if (string.IsNullOrWhiteSpace(text))
+				{
+					continue;
+				}
+				if (IsRealtimeBufferOverflow(text))
+				{
+					QuarantineFramesAfterOverflow();
+					ReportRealtimeBufferOverflow();
+					continue;
+				}
+				AddRecentError(text);
+				string text2 = SimplifyStatusLine(text);
+				if (text2 != null)
+				{
+					LogCameraLine(text2);
+					this.StatusChanged?.Invoke(this, text2);
+				}
+			}
+		}
+		catch (OperationCanceledException)
+		{
+		}
+		catch (Exception ex2)
+		{
+			this.StatusChanged?.Invoke(this, ex2.Message);
+		}
+	}
 
-    private static bool IsPixelFormat(string format)
-    {
-        return format.Equals("yuyv422", StringComparison.OrdinalIgnoreCase)
-            || format.Equals("uyvy422", StringComparison.OrdinalIgnoreCase)
-            || format.Equals("nv12", StringComparison.OrdinalIgnoreCase)
-            || format.Equals("rgb32", StringComparison.OrdinalIgnoreCase)
-            || format.Equals("rgb24", StringComparison.OrdinalIgnoreCase)
-            || format.Equals("bgr24", StringComparison.OrdinalIgnoreCase);
-    }
+	private async Task WatchExitAsync(Process process, CancellationToken cancellationToken)
+	{
+		try
+		{
+			await process.WaitForExitAsync(cancellationToken);
+			if (!cancellationToken.IsCancellationRequested && process.ExitCode != 0)
+			{
+				string recentErrorSummary = GetRecentErrorSummary();
+				string text = (string.IsNullOrWhiteSpace(recentErrorSummary) ? $"Camera preview stopped with FFmpeg exit code {process.ExitCode}" : $"Camera preview stopped with FFmpeg exit code {process.ExitCode}: {recentErrorSummary}");
+				LogCameraLine(text);
+				this.StatusChanged?.Invoke(this, text);
+			}
+		}
+		catch (OperationCanceledException)
+		{
+		}
+		catch (Exception ex2)
+		{
+			this.StatusChanged?.Invoke(this, ex2.Message);
+		}
+	}
 
-    public void Stop()
-    {
-        _cancellation?.Cancel();
-        _cancellation?.Dispose();
-        _cancellation = null;
-        _firstFrameSignal = null;
+	private static string? SimplifyStatusLine(string line)
+	{
+		if (line.Contains("[INFO]", StringComparison.OrdinalIgnoreCase) || line.Contains("Failed to open settings hive", StringComparison.OrdinalIgnoreCase) || line.Contains("Failed to open NBX hive", StringComparison.OrdinalIgnoreCase) || line.Contains("Creating WndMsg Listener Window", StringComparison.OrdinalIgnoreCase) || line.Contains("Destroying WndMsg Listener Window", StringComparison.OrdinalIgnoreCase) || line.Contains("Unregistered window class", StringComparison.OrdinalIgnoreCase) || line.Contains("deprecated pixel format", StringComparison.OrdinalIgnoreCase))
+		{
+			return null;
+		}
+		return line;
+	}
 
-        if (_process is null)
-        {
-            return;
-        }
+	private async Task ReadFramesAsync(Process process, OutputLayout outputLayout, Channel<CameraFrame> frameChannel, CancellationToken cancellationToken)
+	{
+		Stream stream = process.StandardOutput.BaseStream;
+		int frameByteCount = checked(outputLayout.Width * outputLayout.Height * 3) / 2;
+		try
+		{
+			while (!cancellationToken.IsCancellationRequested)
+			{
+				CameraFrame frame = CameraFrame.RentNv12(outputLayout.Width, outputLayout.Height, outputLayout.Width, "nv12-ffmpeg");
+				try
+				{
+					byte[] nv12Bytes = frame.Nv12Bytes;
+					bool flag = nv12Bytes == null;
+					if (!flag)
+					{
+						flag = !(await ReadExactFrameAsync(stream, nv12Bytes, frameByteCount, cancellationToken));
+					}
+					if (flag)
+					{
+						break;
+					}
+					if (!ConsumeQuarantinedFrame())
+					{
+						_firstFrameSignal?.TrySetResult(result: true);
+						if (TryQueueFrame(frameChannel, frame))
+						{
+							frame = null;
+						}
+					}
+				}
+				finally
+				{
+					frame?.Dispose();
+				}
+			}
+		}
+		catch (OperationCanceledException)
+		{
+		}
+		catch (Exception ex2)
+		{
+			this.StatusChanged?.Invoke(this, ex2.Message);
+		}
+		finally
+		{
+			frameChannel.Writer.TryComplete();
+		}
+	}
 
-        try
-        {
-            if (!_process.HasExited)
-            {
-                _process.Kill(entireProcessTree: true);
-                _process.WaitForExit(1500);
-            }
-        }
-        catch
-        {
-            // The process may already be gone.
-        }
-        finally
-        {
-            _process.Dispose();
-            _process = null;
-        }
-    }
+	private async Task DeliverFramesAsync(ChannelReader<CameraFrame> reader, CancellationToken cancellationToken)
+	{
+		try
+		{
+			while (await reader.WaitToReadAsync(cancellationToken))
+			{
+				if (!reader.TryRead(out CameraFrame item))
+				{
+					continue;
+				}
+				try
+				{
+					using (item)
+					{
+						this.CameraFrameAvailable?.Invoke(this, item);
+						if (BitmapFramesEnabled && this.FrameAvailable != null)
+						{
+							BitmapSource bitmapSource = CreateBitmap(item);
+							if (bitmapSource != null)
+							{
+								this.FrameAvailable(this, bitmapSource);
+							}
+						}
+					}
+				}
+				finally
+				{
+					Interlocked.Exchange(ref _frameDeliveryBusy, 0);
+				}
+			}
+		}
+		catch (OperationCanceledException)
+		{
+		}
+		catch (Exception ex2)
+		{
+			this.StatusChanged?.Invoke(this, "Camera frame delivery paused: " + ex2.Message);
+		}
+		finally
+		{
+			CameraFrame item2;
+			while (reader.TryRead(out item2))
+			{
+				item2.Dispose();
+			}
+			Interlocked.Exchange(ref _frameDeliveryBusy, 0);
+		}
+	}
 
-    public void Dispose()
-    {
-        Stop();
-    }
+	private bool TryQueueFrame(Channel<CameraFrame> channel, CameraFrame frame)
+	{
+		if (Interlocked.CompareExchange(ref _frameDeliveryBusy, 1, 0) != 0)
+		{
+			return false;
+		}
+		if (channel.Writer.TryWrite(frame))
+		{
+			return true;
+		}
+		Interlocked.Exchange(ref _frameDeliveryBusy, 0);
+		return false;
+	}
 
-    private async Task ReadErrorsAsync(Process process, CancellationToken cancellationToken)
-    {
-        try
-        {
-            while (!cancellationToken.IsCancellationRequested)
-            {
-                var line = await process.StandardError.ReadLineAsync(cancellationToken);
-                if (line is null)
-                {
-                    break;
-                }
+	private static bool IsRealtimeBufferOverflow(string line)
+	{
+		if (line.Contains("real-time buffer", StringComparison.OrdinalIgnoreCase))
+		{
+			return line.Contains("too full", StringComparison.OrdinalIgnoreCase);
+		}
+		return false;
+	}
 
-                if (!string.IsNullOrWhiteSpace(line))
-                {
-                    AddRecentError(line);
-                    var status = SimplifyStatusLine(line);
-                    if (status is not null)
-                    {
-                        LogCameraLine(status);
-                        StatusChanged?.Invoke(this, status);
-                    }
-                }
-            }
-        }
-        catch (OperationCanceledException)
-        {
-        }
-        catch (Exception ex)
-        {
-            StatusChanged?.Invoke(this, ex.Message);
-        }
-    }
+	private void QuarantineFramesAfterOverflow()
+	{
+		int num;
+		do
+		{
+			num = Volatile.Read(in _framesToQuarantine);
+		}
+		while (num < 8 && Interlocked.CompareExchange(ref _framesToQuarantine, 8, num) != num);
+	}
 
-    private async Task WatchExitAsync(Process process, CancellationToken cancellationToken)
-    {
-        try
-        {
-            await process.WaitForExitAsync(cancellationToken);
-            if (!cancellationToken.IsCancellationRequested && process.ExitCode != 0)
-            {
-                var error = GetRecentErrorSummary();
-                var message = string.IsNullOrWhiteSpace(error)
-                    ? $"Camera preview stopped with FFmpeg exit code {process.ExitCode}"
-                    : $"Camera preview stopped with FFmpeg exit code {process.ExitCode}: {error}";
-                LogCameraLine(message);
-                StatusChanged?.Invoke(this, message);
-            }
-        }
-        catch (OperationCanceledException)
-        {
-        }
-        catch (Exception ex)
-        {
-            StatusChanged?.Invoke(this, ex.Message);
-        }
-    }
+	private bool ConsumeQuarantinedFrame()
+	{
+		int num;
+		do
+		{
+			num = Volatile.Read(in _framesToQuarantine);
+			if (num <= 0)
+			{
+				return false;
+			}
+		}
+		while (Interlocked.CompareExchange(ref _framesToQuarantine, num - 1, num) != num);
+		return true;
+	}
 
-    private static string? SimplifyStatusLine(string line)
-    {
-        if (line.Contains("[INFO]", StringComparison.OrdinalIgnoreCase)
-            || line.Contains("Failed to open settings hive", StringComparison.OrdinalIgnoreCase)
-            || line.Contains("Failed to open NBX hive", StringComparison.OrdinalIgnoreCase)
-            || line.Contains("Creating WndMsg Listener Window", StringComparison.OrdinalIgnoreCase)
-            || line.Contains("Destroying WndMsg Listener Window", StringComparison.OrdinalIgnoreCase)
-            || line.Contains("Unregistered window class", StringComparison.OrdinalIgnoreCase)
-            || line.Contains("deprecated pixel format", StringComparison.OrdinalIgnoreCase))
-        {
-            return null;
-        }
+	private void ReportRealtimeBufferOverflow()
+	{
+		long timestamp = Stopwatch.GetTimestamp();
+		long num = Volatile.Read(in _lastOverflowReportTimestamp);
+		if ((num == 0L || !(Stopwatch.GetElapsedTime(num, timestamp) < TimeSpan.FromSeconds(2L))) && Interlocked.CompareExchange(ref _lastOverflowReportTimestamp, timestamp, num) == num)
+		{
+			LogCameraLine("Camera input briefly fell behind; transition frames were quarantined before preview and calibration.");
+			this.StatusChanged?.Invoke(this, "Camera input briefly fell behind; transition frames were quarantined before preview and calibration.");
+		}
+	}
 
-        return line;
-    }
+	private static async Task<bool> ReadExactFrameAsync(Stream stream, byte[] buffer, int byteCount, CancellationToken cancellationToken)
+	{
+		int num;
+		for (int offset = 0; offset < byteCount; offset += num)
+		{
+			num = await stream.ReadAsync(buffer.AsMemory(offset, byteCount - offset), cancellationToken);
+			if (num == 0)
+			{
+				return false;
+			}
+		}
+		return true;
+	}
 
-    private async Task ReadFramesAsync(Process process, CancellationToken cancellationToken)
-    {
-        var stream = process.StandardOutput.BaseStream;
-        var buffer = new byte[8192];
-        var pending = new List<byte>(512 * 1024);
+	private static BitmapSource? CreateBitmap(CameraFrame frame)
+	{
+		if (frame.HasNv12)
+		{
+			byte[] nv12Bytes = frame.Nv12Bytes;
+			if (nv12Bytes != null)
+			{
+				try
+				{
+					int outputWidth;
+					int outputHeight;
+					int bgraStride;
+					byte[] array = Nv12FrameConverter.ConvertToBgra(nv12Bytes, frame.Nv12Stride, frame.Width, frame.Height, frame.Width, out outputWidth, out outputHeight, out bgraStride);
+					if (array == null || array.Length == 0)
+					{
+						return null;
+					}
+					BitmapSource bitmapSource = BitmapSource.Create(outputWidth, outputHeight, 96.0, 96.0, PixelFormats.Bgra32, null, array, bgraStride);
+					bitmapSource.Freeze();
+					return bitmapSource;
+				}
+				catch
+				{
+					return null;
+				}
+			}
+		}
+		return null;
+	}
 
-        try
-        {
-            while (!cancellationToken.IsCancellationRequested)
-            {
-                var read = await stream.ReadAsync(buffer, cancellationToken);
-                if (read <= 0)
-                {
-                    break;
-                }
+	private void ClearRecentErrors()
+	{
+		lock (_errorLock)
+		{
+			_recentErrors.Clear();
+		}
+	}
 
-                for (var i = 0; i < read; i++)
-                {
-                    pending.Add(buffer[i]);
-                }
+	private void AddRecentError(string line)
+	{
+		lock (_errorLock)
+		{
+			_recentErrors.Add(line);
+			if (_recentErrors.Count > 12)
+			{
+				_recentErrors.RemoveAt(0);
+			}
+		}
+	}
 
-                ExtractFrames(pending);
-            }
-        }
-        catch (OperationCanceledException)
-        {
-        }
-        catch (Exception ex)
-        {
-            StatusChanged?.Invoke(this, ex.Message);
-        }
-    }
+	private string GetRecentErrorSummary()
+	{
+		lock (_errorLock)
+		{
+			return string.Join(" | ", (from line in _recentErrors.Select(SimplifyStatusLine)
+				where !string.IsNullOrWhiteSpace(line)
+				select line).TakeLast(4));
+		}
+	}
 
-    private void ExtractFrames(List<byte> pending)
-    {
-        while (true)
-        {
-            var start = FindMarker(pending, 0, 0xFF, 0xD8);
-            if (start < 0)
-            {
-                pending.Clear();
-                return;
-            }
-
-            if (start > 0)
-            {
-                pending.RemoveRange(0, start);
-            }
-
-            var end = FindMarker(pending, 2, 0xFF, 0xD9);
-            if (end < 0)
-            {
-                return;
-            }
-
-            var frameLength = end + 2;
-            var frameBytes = pending.Take(frameLength).ToArray();
-            pending.RemoveRange(0, frameLength);
-
-            var bitmap = CreateBitmap(frameBytes);
-            if (bitmap is not null)
-            {
-                _firstFrameSignal?.TrySetResult(true);
-                var cameraFrame = CreateCameraFrame(bitmap);
-                if (cameraFrame is not null)
-                {
-                    CameraFrameAvailable?.Invoke(this, cameraFrame);
-                }
-
-                FrameAvailable?.Invoke(this, bitmap);
-            }
-        }
-    }
-
-    private static int FindMarker(List<byte> bytes, int startIndex, byte first, byte second)
-    {
-        for (var i = startIndex; i < bytes.Count - 1; i++)
-        {
-            if (bytes[i] == first && bytes[i + 1] == second)
-            {
-                return i;
-            }
-        }
-
-        return -1;
-    }
-
-    private static BitmapSource? CreateBitmap(byte[] bytes)
-    {
-        try
-        {
-            using var memory = new MemoryStream(bytes);
-            var bitmap = new BitmapImage();
-            bitmap.BeginInit();
-            bitmap.CacheOption = BitmapCacheOption.OnLoad;
-            bitmap.StreamSource = memory;
-            bitmap.EndInit();
-            bitmap.Freeze();
-            return bitmap;
-        }
-        catch
-        {
-            return null;
-        }
-    }
-
-    private static CameraFrame? CreateCameraFrame(BitmapSource bitmap)
-    {
-        if (bitmap.PixelWidth <= 0 || bitmap.PixelHeight <= 0)
-        {
-            return null;
-        }
-
-        BitmapSource source = bitmap;
-        if (source.Format != PixelFormats.Bgra32)
-        {
-            source = new FormatConvertedBitmap(source, PixelFormats.Bgra32, null, 0);
-        }
-
-        var stride = source.PixelWidth * 4;
-        var bytes = new byte[stride * source.PixelHeight];
-        source.CopyPixels(bytes, stride, 0);
-        return new CameraFrame(bytes, source.PixelWidth, source.PixelHeight, stride);
-    }
-
-    private void ClearRecentErrors()
-    {
-        lock (_errorLock)
-        {
-            _recentErrors.Clear();
-        }
-    }
-
-    private void AddRecentError(string line)
-    {
-        lock (_errorLock)
-        {
-            _recentErrors.Add(line);
-            if (_recentErrors.Count > 12)
-            {
-                _recentErrors.RemoveAt(0);
-            }
-        }
-    }
-
-    private string GetRecentErrorSummary()
-    {
-        lock (_errorLock)
-        {
-            return string.Join(" | ", _recentErrors
-                .Select(SimplifyStatusLine)
-                .Where(line => !string.IsNullOrWhiteSpace(line))
-                .TakeLast(4));
-        }
-    }
-
-    private static void LogCameraLine(string line)
-    {
-        try
-        {
-            var path = Path.Combine(AppContext.BaseDirectory, "AvatarBuilder-camera.log");
-            File.AppendAllText(path, $"{DateTime.Now:O} {line}{Environment.NewLine}");
-        }
-        catch
-        {
-        }
-    }
+	private static void LogCameraLine(string line)
+	{
+		try
+		{
+			File.AppendAllText(Path.Combine(AppContext.BaseDirectory, "AvatarBuilder-camera.log"), $"{DateTime.Now:O} {line}{Environment.NewLine}");
+		}
+		catch
+		{
+		}
+	}
 }
-

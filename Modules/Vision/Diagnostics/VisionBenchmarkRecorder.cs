@@ -1,195 +1,232 @@
-using System.Collections.Concurrent;
+using System;
+using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
+using System.Linq;
 using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
 
 namespace AvatarBuilder.Modules.Vision.Diagnostics;
 
 public sealed class VisionBenchmarkRecorder : IDisposable
 {
-    private const int MaximumPendingSampleCount = 5000;
-    private static readonly TimeSpan FlushInterval = TimeSpan.FromSeconds(10);
-    private static readonly UTF8Encoding Utf8WithoutBom = new(false);
-    private readonly ConcurrentQueue<VisionPipelineDiagnostics> _pending = new();
-    private readonly object _folderLock = new();
-    private readonly object _flushLock = new();
-    private readonly Timer _timer;
-    private string _benchmarkFolder = "";
-    private int _flushRunning;
-    private bool _disposed;
+	private const int MaximumPendingSampleCount = 64;
 
-    public VisionBenchmarkRecorder()
-    {
-        _timer = new Timer(_ => QueueFlush(), null, FlushInterval, FlushInterval);
-    }
+	private static readonly TimeSpan FlushInterval = TimeSpan.FromSeconds(10L);
 
-    public void SetOutputRoot(string outputRoot)
-    {
-        if (string.IsNullOrWhiteSpace(outputRoot))
-        {
-            return;
-        }
+	private static readonly UTF8Encoding Utf8WithoutBom = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false);
 
-        FlushPending();
-        lock (_folderLock)
-        {
-            _benchmarkFolder = Path.Combine(Path.GetFullPath(outputRoot), "Benchmarks");
-        }
-    }
+	private readonly object _pendingLock = new object();
 
-    public void Record(VisionPipelineDiagnostics diagnostics)
-    {
-        if (_disposed || diagnostics == VisionPipelineDiagnostics.None || diagnostics.EndToEndMilliseconds <= 0d)
-        {
-            return;
-        }
+	private readonly Dictionary<string, VisionPipelineDiagnostics> _pending = new Dictionary<string, VisionPipelineDiagnostics>(StringComparer.Ordinal);
 
-        _pending.Enqueue(diagnostics);
-        while (_pending.Count > MaximumPendingSampleCount && _pending.TryDequeue(out _))
-        {
-        }
-    }
+	private readonly object _folderLock = new object();
 
-    public void Dispose()
-    {
-        if (_disposed)
-        {
-            return;
-        }
+	private readonly object _flushLock = new object();
 
-        _disposed = true;
-        _timer.Dispose();
-        FlushPending();
-    }
+	private readonly Timer _timer;
 
-    private void QueueFlush()
-    {
-        if (_disposed || _pending.IsEmpty || Interlocked.Exchange(ref _flushRunning, 1) != 0)
-        {
-            return;
-        }
+	private string _benchmarkFolder = "";
 
-        _ = Task.Run(() =>
-        {
-            try
-            {
-                FlushPending();
-            }
-            finally
-            {
-                Interlocked.Exchange(ref _flushRunning, 0);
-            }
-        });
-    }
+	private int _flushRunning;
 
-    private void FlushPending()
-    {
-        lock (_flushLock)
-        {
-            FlushPendingLocked();
-        }
-    }
+	private bool _disposed;
 
-    private void FlushPendingLocked()
-    {
-        string folder;
-        lock (_folderLock)
-        {
-            folder = _benchmarkFolder;
-        }
+	public VisionBenchmarkRecorder()
+	{
+		_timer = new Timer(delegate
+		{
+			QueueFlush();
+		}, null, FlushInterval, FlushInterval);
+	}
 
-        if (string.IsNullOrWhiteSpace(folder) || _pending.IsEmpty)
-        {
-            return;
-        }
+	public void SetOutputRoot(string outputRoot)
+	{
+		if (string.IsNullOrWhiteSpace(outputRoot))
+		{
+			return;
+		}
+		FlushPending();
+		lock (_folderLock)
+		{
+			_benchmarkFolder = Path.Combine(Path.GetFullPath(outputRoot), "Benchmarks");
+		}
+	}
 
-        var samples = new List<VisionPipelineDiagnostics>();
-        while (_pending.TryDequeue(out var sample))
-        {
-            samples.Add(sample);
-        }
+	public void Record(VisionPipelineDiagnostics diagnostics)
+	{
+		if (_disposed || diagnostics == VisionPipelineDiagnostics.None || diagnostics.EndToEndMilliseconds <= 0.0)
+		{
+			return;
+		}
+		string key = diagnostics.Backend + "\0" + diagnostics.Mode;
+		lock (_pendingLock)
+		{
+			if (_pending.Count < 64 && !_pending.ContainsKey(key))
+			{
+				_pending.Add(key, diagnostics);
+			}
+		}
+	}
 
-        if (samples.Count == 0)
-        {
-            return;
-        }
+	public void Dispose()
+	{
+		if (!_disposed)
+		{
+			_disposed = true;
+			_timer.Dispose();
+			FlushPending();
+		}
+	}
 
-        try
-        {
-            Directory.CreateDirectory(folder);
-            foreach (var group in samples.GroupBy(static sample => sample.CapturedAtUtc.ToString("yyyyMMdd", CultureInfo.InvariantCulture)))
-            {
-                var path = Path.Combine(folder, $"vision-pipeline-{group.Key}.csv");
-                var writeHeader = !File.Exists(path) || new FileInfo(path).Length == 0L;
-                using var writer = new StreamWriter(path, append: true, Utf8WithoutBom);
-                if (writeHeader)
-                {
-                    writer.WriteLine("capturedAtUtc,backend,mode,sourceWidth,sourceHeight,inputWidth,inputHeight,payloadBytes,hasFace,clientPrepareMs,decodeMs,faceBoxMs,inferenceMs,parametersMs,sparseMs,denseMs,poseMs,serializeMs,sidecarTotalMs,roundTripMs,parseMs,endToEndMs,status");
-                }
+	private void QueueFlush()
+	{
+		if (_disposed || !HasPendingSamples() || Interlocked.Exchange(ref _flushRunning, 1) != 0)
+		{
+			return;
+		}
+		Task.Run(delegate
+		{
+			try
+			{
+				FlushPending();
+			}
+			finally
+			{
+				Interlocked.Exchange(ref _flushRunning, 0);
+			}
+		});
+	}
 
-                foreach (var sample in group)
-                {
-                    writer.WriteLine(ToCsv(sample));
-                }
-            }
-        }
-        catch
-        {
-            foreach (var sample in samples)
-            {
-                _pending.Enqueue(sample);
-            }
-        }
-    }
+	private void FlushPending()
+	{
+		lock (_flushLock)
+		{
+			FlushPendingLocked();
+		}
+	}
 
-    private static string ToCsv(VisionPipelineDiagnostics sample)
-    {
-        return string.Join(",",
-            Csv(sample.CapturedAtUtc.ToString("O", CultureInfo.InvariantCulture)),
-            Csv(sample.Backend),
-            Csv(sample.Mode),
-            sample.SourceWidth.ToString(CultureInfo.InvariantCulture),
-            sample.SourceHeight.ToString(CultureInfo.InvariantCulture),
-            sample.InputWidth.ToString(CultureInfo.InvariantCulture),
-            sample.InputHeight.ToString(CultureInfo.InvariantCulture),
-            sample.EncodedPayloadBytes.ToString(CultureInfo.InvariantCulture),
-            sample.HasFace ? "true" : "false",
-            Number(sample.ClientPrepareMilliseconds),
-            Stage(sample, "decode"),
-            Stage(sample, "face_box", "faceBox"),
-            Stage(sample, "inference"),
-            Stage(sample, "parameters"),
-            Stage(sample, "sparse"),
-            Stage(sample, "dense"),
-            Stage(sample, "pose"),
-            Stage(sample, "serialize"),
-            Stage(sample, "total"),
-            Number(sample.SidecarRoundTripMilliseconds),
-            Number(sample.ClientParseMilliseconds),
-            Number(sample.EndToEndMilliseconds),
-            Csv(sample.Status));
-    }
+	private void FlushPendingLocked()
+	{
+		string benchmarkFolder;
+		lock (_folderLock)
+		{
+			benchmarkFolder = _benchmarkFolder;
+		}
+		if (string.IsNullOrWhiteSpace(benchmarkFolder) || !HasPendingSamples())
+		{
+			return;
+		}
+		KeyValuePair<string, VisionPipelineDiagnostics>[] array;
+		lock (_pendingLock)
+		{
+			array = _pending.ToArray();
+			_pending.Clear();
+		}
+		if (array.Length == 0)
+		{
+			return;
+		}
+		try
+		{
+			Directory.CreateDirectory(benchmarkFolder);
+			foreach (IGrouping<string, VisionPipelineDiagnostics> item in from pair in array
+				select pair.Value into sample
+				group sample by sample.CapturedAtUtc.ToString("yyyyMMdd", CultureInfo.InvariantCulture))
+			{
+				string text = Path.Combine(benchmarkFolder, "vision-pipeline-" + item.Key + ".csv");
+				bool flag = !File.Exists(text) || new FileInfo(text).Length == 0;
+				using StreamWriter streamWriter = new StreamWriter(text, append: true, Utf8WithoutBom);
+				if (flag)
+				{
+					streamWriter.WriteLine("capturedAtUtc,backend,mode,sourceWidth,sourceHeight,inputWidth,inputHeight,payloadBytes,hasFace,clientPrepareMs,decodeMs,faceBoxMs,inferenceMs,parametersMs,sparseMs,denseMs,poseMs,serializeMs,sidecarTotalMs,roundTripMs,parseMs,endToEndMs,status");
+				}
+				foreach (VisionPipelineDiagnostics item2 in item)
+				{
+					streamWriter.WriteLine(ToCsv(item2));
+				}
+			}
+		}
+		catch
+		{
+			lock (_pendingLock)
+			{
+				KeyValuePair<string, VisionPipelineDiagnostics>[] array2 = array;
+				for (int num = 0; num < array2.Length; num++)
+				{
+					KeyValuePair<string, VisionPipelineDiagnostics> keyValuePair = array2[num];
+					if (_pending.Count < 64)
+					{
+						_pending.TryAdd(keyValuePair.Key, keyValuePair.Value);
+						continue;
+					}
+					break;
+				}
+			}
+		}
+	}
 
-    private static string Stage(VisionPipelineDiagnostics sample, params string[] names)
-    {
-        foreach (var name in names)
-        {
-            if (sample.SidecarStagesMilliseconds.TryGetValue(name, out var value))
-            {
-                return Number(value);
-            }
-        }
+	private bool HasPendingSamples()
+	{
+		lock (_pendingLock)
+		{
+			return _pending.Count > 0;
+		}
+	}
 
-        return "";
-    }
+	private static string ToCsv(VisionPipelineDiagnostics sample)
+	{
+		_003C_003Ey__InlineArray23<string> buffer = default(_003C_003Ey__InlineArray23<string>);
+		buffer[0] = Csv(sample.CapturedAtUtc.ToString("O", CultureInfo.InvariantCulture));
+		buffer[1] = Csv(sample.Backend);
+		buffer[2] = Csv(sample.Mode);
+		buffer[3] = sample.SourceWidth.ToString(CultureInfo.InvariantCulture);
+		buffer[4] = sample.SourceHeight.ToString(CultureInfo.InvariantCulture);
+		buffer[5] = sample.InputWidth.ToString(CultureInfo.InvariantCulture);
+		buffer[6] = sample.InputHeight.ToString(CultureInfo.InvariantCulture);
+		buffer[7] = sample.EncodedPayloadBytes.ToString(CultureInfo.InvariantCulture);
+		buffer[8] = (sample.HasFace ? "true" : "false");
+		buffer[9] = Number(sample.ClientPrepareMilliseconds);
+		buffer[10] = Stage(sample, "decode");
+		buffer[11] = Stage(sample, "face_box", "faceBox");
+		buffer[12] = Stage(sample, "inference");
+		buffer[13] = Stage(sample, "parameters");
+		buffer[14] = Stage(sample, "sparse");
+		buffer[15] = Stage(sample, "dense");
+		buffer[16] = Stage(sample, "pose");
+		buffer[17] = Stage(sample, "serialize");
+		buffer[18] = Stage(sample, "total");
+		buffer[19] = Number(sample.SidecarRoundTripMilliseconds);
+		buffer[20] = Number(sample.ClientParseMilliseconds);
+		buffer[21] = Number(sample.EndToEndMilliseconds);
+		buffer[22] = Csv(sample.Status);
+		return string.Join(",", (ReadOnlySpan<string?>)buffer);
+	}
 
-    private static string Number(double value)
-    {
-        return double.IsFinite(value) ? value.ToString("0.####", CultureInfo.InvariantCulture) : "";
-    }
+	private static string Stage(VisionPipelineDiagnostics sample, params string[] names)
+	{
+		foreach (string key in names)
+		{
+			if (sample.SidecarStagesMilliseconds.TryGetValue(key, out var value))
+			{
+				return Number(value);
+			}
+		}
+		return "";
+	}
 
-    private static string Csv(string value)
-    {
-        return $"\"{(value ?? "").Replace("\"", "\"\"")}\"";
-    }
+	private static string Number(double value)
+	{
+		if (!double.IsFinite(value))
+		{
+			return "";
+		}
+		return value.ToString("0.####", CultureInfo.InvariantCulture);
+	}
+
+	private static string Csv(string value)
+	{
+		return "\"" + (value ?? "").Replace("\"", "\"\"") + "\"";
+	}
 }

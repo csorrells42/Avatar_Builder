@@ -1,3 +1,4 @@
+using System;
 using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Interop;
@@ -6,179 +7,156 @@ namespace AvatarBuilder.Modules.Webcam.DirectX12;
 
 public abstract class WebcamDirectX12ViewportHost : HwndHost
 {
-    private const int WsChild = 0x40000000;
-    private const int WsVisible = 0x10000000;
-    private const int WsClipChildren = 0x02000000;
-    private const int WsClipSiblings = 0x04000000;
-    private const int SsBlackRect = 0x00000004;
-    private const int SwpNoZOrder = 0x0004;
-    private const int SwpNoActivate = 0x0010;
+	private const int WsChild = 1073741824;
 
-    private readonly string _childWindowFailureMessage;
-    private readonly bool _useBlackBackground;
-    private IntPtr _viewportHandle;
-    private int _viewportPixelWidth;
-    private int _viewportPixelHeight;
-    private DateTimeOffset? _viewportCreatedUtc;
+	private const int WsVisible = 268435456;
 
-    protected WebcamDirectX12ViewportHost(
-        string childWindowFailureMessage = "Could not create webcam DX12 preview child window.",
-        bool useBlackBackground = true)
-    {
-        _childWindowFailureMessage = childWindowFailureMessage;
-        _useBlackBackground = useBlackBackground;
-    }
+	private const int WsClipChildren = 33554432;
 
-    public bool IsViewportCreated => _viewportHandle != IntPtr.Zero;
+	private const int WsClipSiblings = 67108864;
 
-    public int ViewportPixelWidth => _viewportPixelWidth;
+	private const int SsBlackRect = 4;
 
-    public int ViewportPixelHeight => _viewportPixelHeight;
+	private const int SwpNoZOrder = 4;
 
-    public DateTimeOffset? ViewportCreatedUtc => _viewportCreatedUtc;
+	private const int SwpNoActivate = 16;
 
-    public string ViewportStateDescription => IsViewportCreated
-        ? $"webcam DX12 viewport {_viewportPixelWidth}x{_viewportPixelHeight}"
-        : "webcam DX12 viewport not created";
+	private readonly string _childWindowFailureMessage;
 
-    protected IntPtr ViewportHandle => _viewportHandle;
+	private readonly bool _useBlackBackground;
 
-    protected int ViewportWidth => Math.Max(1, (int)ActualWidth);
+	private nint _viewportHandle;
 
-    protected int ViewportHeight => Math.Max(1, (int)ActualHeight);
+	private int _viewportPixelWidth;
 
-    protected sealed override HandleRef BuildWindowCore(HandleRef hwndParent)
-    {
-        var width = ViewportWidth;
-        var height = ViewportHeight;
-        var style = WsChild | WsVisible | WsClipChildren | WsClipSiblings;
-        if (_useBlackBackground)
-        {
-            style |= SsBlackRect;
-        }
+	private int _viewportPixelHeight;
 
-        _viewportHandle = CreateWindowEx(
-            0,
-            "static",
-            string.Empty,
-            style,
-            0,
-            0,
-            width,
-            height,
-            hwndParent.Handle,
-            IntPtr.Zero,
-            IntPtr.Zero,
-            IntPtr.Zero);
+	private DateTimeOffset? _viewportCreatedUtc;
 
-        if (_viewportHandle == IntPtr.Zero)
-        {
-            var lastError = Marshal.GetLastWin32Error();
-            throw new InvalidOperationException($"{_childWindowFailureMessage} Win32 error: {lastError}.");
-        }
+	public bool IsViewportCreated => _viewportHandle != IntPtr.Zero;
 
-        _viewportPixelWidth = width;
-        _viewportPixelHeight = height;
-        _viewportCreatedUtc = DateTimeOffset.UtcNow;
+	public int ViewportPixelWidth => _viewportPixelWidth;
 
-        try
-        {
-            OnViewportCreated(_viewportHandle, width, height);
-        }
-        catch (Exception ex)
-        {
-            OnViewportCreateFailed(ex);
-        }
+	public int ViewportPixelHeight => _viewportPixelHeight;
 
-        return new HandleRef(this, _viewportHandle);
-    }
+	public DateTimeOffset? ViewportCreatedUtc => _viewportCreatedUtc;
 
-    protected sealed override void DestroyWindowCore(HandleRef hwnd)
-    {
-        try
-        {
-            OnViewportDestroying();
-        }
-        finally
-        {
-            if (hwnd.Handle != IntPtr.Zero)
-            {
-                DestroyWindow(hwnd.Handle);
-            }
+	public string ViewportStateDescription
+	{
+		get
+		{
+			if (!IsViewportCreated)
+			{
+				return "webcam DX12 viewport not created";
+			}
+			return $"webcam DX12 viewport {_viewportPixelWidth}x{_viewportPixelHeight}";
+		}
+	}
 
-            _viewportHandle = IntPtr.Zero;
-            _viewportPixelWidth = 0;
-            _viewportPixelHeight = 0;
-            _viewportCreatedUtc = null;
-        }
-    }
+	protected nint ViewportHandle => _viewportHandle;
 
-    protected sealed override void OnRenderSizeChanged(SizeChangedInfo sizeInfo)
-    {
-        base.OnRenderSizeChanged(sizeInfo);
-        if (_viewportHandle == IntPtr.Zero)
-        {
-            return;
-        }
+	protected int ViewportWidth => Math.Max(1, (int)base.ActualWidth);
 
-        var width = ViewportWidth;
-        var height = ViewportHeight;
-        SetWindowPos(_viewportHandle, IntPtr.Zero, 0, 0, width, height, SwpNoZOrder | SwpNoActivate);
-        _viewportPixelWidth = width;
-        _viewportPixelHeight = height;
+	protected int ViewportHeight => Math.Max(1, (int)base.ActualHeight);
 
-        try
-        {
-            OnViewportResized(width, height);
-        }
-        catch (Exception ex)
-        {
-            OnViewportResizeFailed(ex);
-        }
-    }
+	protected WebcamDirectX12ViewportHost(string childWindowFailureMessage = "Could not create webcam DX12 preview child window.", bool useBlackBackground = true)
+	{
+		_childWindowFailureMessage = childWindowFailureMessage;
+		_useBlackBackground = useBlackBackground;
+	}
 
-    protected abstract void OnViewportCreated(IntPtr hwnd, int width, int height);
+	protected sealed override HandleRef BuildWindowCore(HandleRef hwndParent)
+	{
+		int viewportWidth = ViewportWidth;
+		int viewportHeight = ViewportHeight;
+		int num = 1442840576;
+		if (_useBlackBackground)
+		{
+			num |= 4;
+		}
+		_viewportHandle = CreateWindowEx(0, "static", string.Empty, num, 0, 0, viewportWidth, viewportHeight, hwndParent.Handle, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero);
+		if (_viewportHandle == IntPtr.Zero)
+		{
+			int lastWin32Error = Marshal.GetLastWin32Error();
+			throw new InvalidOperationException($"{_childWindowFailureMessage} Win32 error: {lastWin32Error}.");
+		}
+		_viewportPixelWidth = viewportWidth;
+		_viewportPixelHeight = viewportHeight;
+		_viewportCreatedUtc = DateTimeOffset.UtcNow;
+		try
+		{
+			OnViewportCreated(_viewportHandle, viewportWidth, viewportHeight);
+		}
+		catch (Exception ex)
+		{
+			OnViewportCreateFailed(ex);
+		}
+		return new HandleRef(this, _viewportHandle);
+	}
 
-    protected abstract void OnViewportDestroying();
+	protected sealed override void DestroyWindowCore(HandleRef hwnd)
+	{
+		try
+		{
+			OnViewportDestroying();
+		}
+		finally
+		{
+			if (hwnd.Handle != IntPtr.Zero)
+			{
+				DestroyWindow(hwnd.Handle);
+			}
+			_viewportHandle = IntPtr.Zero;
+			_viewportPixelWidth = 0;
+			_viewportPixelHeight = 0;
+			_viewportCreatedUtc = null;
+		}
+	}
 
-    protected abstract void OnViewportResized(int width, int height);
+	protected sealed override void OnRenderSizeChanged(SizeChangedInfo sizeInfo)
+	{
+		base.OnRenderSizeChanged(sizeInfo);
+		if (_viewportHandle == IntPtr.Zero)
+		{
+			return;
+		}
+		int viewportWidth = ViewportWidth;
+		int viewportHeight = ViewportHeight;
+		SetWindowPos(_viewportHandle, IntPtr.Zero, 0, 0, viewportWidth, viewportHeight, 20);
+		_viewportPixelWidth = viewportWidth;
+		_viewportPixelHeight = viewportHeight;
+		try
+		{
+			OnViewportResized(viewportWidth, viewportHeight);
+		}
+		catch (Exception ex)
+		{
+			OnViewportResizeFailed(ex);
+		}
+	}
 
-    protected virtual void OnViewportCreateFailed(Exception ex)
-    {
-        throw new InvalidOperationException("Webcam DX12 viewport initialization failed.", ex);
-    }
+	protected abstract void OnViewportCreated(nint hwnd, int width, int height);
 
-    protected virtual void OnViewportResizeFailed(Exception ex)
-    {
-        throw new InvalidOperationException("Webcam DX12 viewport resize failed.", ex);
-    }
+	protected abstract void OnViewportDestroying();
 
-    [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
-    private static extern IntPtr CreateWindowEx(
-        int exStyle,
-        string className,
-        string windowName,
-        int style,
-        int x,
-        int y,
-        int width,
-        int height,
-        IntPtr parent,
-        IntPtr menu,
-        IntPtr instance,
-        IntPtr param);
+	protected abstract void OnViewportResized(int width, int height);
 
-    [DllImport("user32.dll", SetLastError = true)]
-    private static extern bool DestroyWindow(IntPtr hwnd);
+	protected virtual void OnViewportCreateFailed(Exception ex)
+	{
+		throw new InvalidOperationException("Webcam DX12 viewport initialization failed.", ex);
+	}
 
-    [DllImport("user32.dll", SetLastError = true)]
-    private static extern bool SetWindowPos(
-        IntPtr hwnd,
-        IntPtr hwndInsertAfter,
-        int x,
-        int y,
-        int width,
-        int height,
-        int flags);
+	protected virtual void OnViewportResizeFailed(Exception ex)
+	{
+		throw new InvalidOperationException("Webcam DX12 viewport resize failed.", ex);
+	}
+
+	[DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+	private static extern nint CreateWindowEx(int exStyle, string className, string windowName, int style, int x, int y, int width, int height, nint parent, nint menu, nint instance, nint param);
+
+	[DllImport("user32.dll", SetLastError = true)]
+	private static extern bool DestroyWindow(nint hwnd);
+
+	[DllImport("user32.dll", SetLastError = true)]
+	private static extern bool SetWindowPos(nint hwnd, nint hwndInsertAfter, int x, int y, int width, int height, int flags);
 }
-

@@ -1,2638 +1,1913 @@
+using System;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Threading;
 using AvatarBuilder.Modules.Webcam.Common;
-using SharpGen.Runtime;
 using Vortice;
 using Vortice.D3DCompiler;
+using Vortice.DXGI;
 using Vortice.Direct3D;
 using Vortice.Direct3D12;
-using Vortice.DXGI;
 using Vortice.Mathematics;
-using static Vortice.Direct3D12.D3D12;
-using static Vortice.DXGI.DXGI;
 
 namespace AvatarBuilder.Modules.Webcam.DirectX12;
 
 public sealed class Direct3D12PreviewHost : WebcamDirectX12ViewportHost
 {
-    private static readonly TimeSpan RendererDisposeLockTimeout = TimeSpan.FromMilliseconds(250);
-
-    private IntPtr _nativeD3D12Device;
-    private readonly object _rendererLock = new();
-    private readonly object _renderWorkerLock = new();
-    private readonly object _renderThrottleLock = new();
-    private readonly AutoResetEvent _renderFrameReady = new(false);
-    private Direct3D12SwapChainRenderer? _renderer;
-    private Thread? _renderThread;
-    private QueuedCameraFrame? _pendingCameraFrame;
-    private QueuedTextureFrame? _pendingTextureFrame;
-    private string _previewPathDescription = "DX12 preview path pending";
-    private readonly object _diagnosticsLock = new();
-    private Direct3D12PreviewDiagnostics _diagnostics = Direct3D12PreviewDiagnostics.Empty;
-    private DateTimeOffset _diagnosticsFpsWindowStartUtc = DateTimeOffset.UtcNow;
-    private long _diagnosticsFpsWindowStartRenderedFrames;
-    private long _submittedFrames;
-    private long _renderedFrames;
-    private long _droppedFrames;
-    private double _renderFramesPerSecond;
-    private string _recordingMode = "not recording";
-    private PreviewTrackingOverlay _trackingOverlay = PreviewTrackingOverlay.Empty;
-    private DateTime _lastAcceptedRenderFrameUtc = DateTime.MinValue;
-    private double _maxRenderFramesPerSecond;
-    private int _renderingSuspended;
-    private bool _renderWorkerStopping;
-    private bool _disposed;
-
-    public Direct3D12PreviewHost(IntPtr nativeD3D12Device = default)
-        : base("Could not create DX12 preview child window.")
-    {
-        _nativeD3D12Device = nativeD3D12Device;
-        _renderThread = new Thread(RenderWorkerLoop)
-        {
-            IsBackground = true,
-            Name = "Avatar Builder DX12 preview"
-        };
-        _renderThread.Start();
-    }
-
-    public event EventHandler<string>? StatusChanged;
-
-    public event EventHandler<Direct3D12PreviewDiagnostics>? DiagnosticsChanged;
-
-    public bool IsReady => _renderer is not null;
-
-    public string DeviceDescription => _renderer?.DeviceDescription ?? "DX12 preview not initialized";
-
-    public string PreviewPathDescription => _previewPathDescription;
-
-    public string RecordingMode => Volatile.Read(ref _recordingMode);
-
-    public Direct3D12PreviewDiagnostics Diagnostics
-    {
-        get
-        {
-            lock (_diagnosticsLock)
-            {
-                return _diagnostics;
-            }
-        }
-    }
-
-    public void SetRecordingMode(string recordingMode)
-    {
-        Volatile.Write(
-            ref _recordingMode,
-            string.IsNullOrWhiteSpace(recordingMode) ? "not recording" : recordingMode.Trim());
-    }
-
-    public void LimitRenderRate(double maxFramesPerSecond)
-    {
-        lock (_renderThrottleLock)
-        {
-            _maxRenderFramesPerSecond = maxFramesPerSecond <= 0d
-                ? 0d
-                : Math.Clamp(maxFramesPerSecond, 1d, 120d);
-            _lastAcceptedRenderFrameUtc = DateTime.MinValue;
-        }
-    }
-
-    public void RenderBgraFrame(
-        CameraFrame frame,
-        long frameNumber,
-        VideoFrameColorSettings colorSettings = default,
-        bool denoiseEnabled = false,
-        double denoiseStrength = 0d)
-    {
-        if (_disposed || IsRenderingSuspended)
-        {
-            return;
-        }
-
-        RecordSubmittedFrame();
-        if (!ShouldAcceptRenderFrame())
-        {
-            RecordDroppedFrame();
-            return;
-        }
-
-        lock (_renderWorkerLock)
-        {
-            if (_pendingCameraFrame is not null)
-            {
-                RecordDroppedFrame();
-            }
-
-            _pendingCameraFrame = new QueuedCameraFrame(
-                frame.BgraBytes,
-                frame.Width,
-                frame.Height,
-                frame.Stride,
-                frame.Nv12Bytes,
-                frame.Nv12Stride,
-                frame.Format,
-                colorSettings,
-                denoiseEnabled,
-                denoiseStrength,
-                frameNumber);
-        }
-
-        _renderFrameReady.Set();
-    }
-
-    public void RenderProofFrame(TextureNativeFrameInfo frame)
-    {
-        if (_renderer is null || IsRenderingSuspended)
-        {
-            return;
-        }
-
-        try
-        {
-            lock (_rendererLock)
-            {
-                _renderer.RenderProofFrame(frame.FrameNumber);
-            }
-        }
-        catch (Exception ex)
-        {
-            StatusChanged?.Invoke(this, $"DX12 preview render failed: {ex.Message}");
-        }
-    }
-
-    public void RenderTextureFrame(
-        TextureNativeFrameLease frame,
-        bool denoiseEnabled,
-        double denoiseStrength,
-        VideoFrameColorSettings colorSettings = default)
-    {
-        RecordSubmittedFrame();
-        if (_disposed || IsRenderingSuspended || !ShouldAcceptRenderFrame())
-        {
-            RecordDroppedFrame();
-            return;
-        }
-
-        string? sharedBridgeFailureReason = null;
-        var isDirectD3D12Frame = string.Equals(frame.DeviceMode, "D3D12", StringComparison.OrdinalIgnoreCase);
-        var preferNv12Upload = TextureNativePreviewPolicy.ShouldPreferNv12UploadFallback(
-            frame.MediaSubtype,
-            frame.Width,
-            frame.Height,
-            frame.Nv12PreviewBytes,
-            frame.Nv12PreviewStride);
-
-        // D3D11 capture exposes one reusable shared texture. Only use that synchronous
-        // bridge when no validated NV12 payload exists; this camera's shared NV12 path
-        // has previously produced green frames while still reporting success.
-        if (!isDirectD3D12Frame && !preferNv12Upload && frame.D3D12SharedTextureHandle != IntPtr.Zero)
-        {
-            try
-            {
-                lock (_rendererLock)
-                {
-                    if (!IsRenderingSuspended
-                        && _renderer is not null
-                        && _renderer.RenderSharedD3D11BridgeFrame(
-                            frame,
-                            colorSettings,
-                            denoiseEnabled,
-                            denoiseStrength,
-                            Volatile.Read(ref _trackingOverlay),
-                            out sharedBridgeFailureReason))
-                    {
-                        ReportPreviewPath("DX12 D3D11 bridge texture preview");
-                        RecordRenderedFrame(
-                            "DX12 D3D11 bridge texture preview",
-                            frame.MediaSubtype,
-                            frame.Width,
-                            frame.Height,
-                            frame.FramesPerSecond,
-                            denoiseEnabled,
-                            denoiseStrength,
-                            colorSettings,
-                            RecordingMode,
-                            null,
-                            frame.FrameNumber);
-                        return;
-                    }
-                }
-            }
-            catch (Exception ex)
-            {
-                sharedBridgeFailureReason = ex.Message;
-            }
-        }
-        else if (!isDirectD3D12Frame && !preferNv12Upload)
-        {
-            sharedBridgeFailureReason = "D3D11 bridge shared texture handle missing";
-        }
-
-        TextureNativeFrameLease? frameLease = null;
-        try
-        {
-            frameLease = frame.Duplicate();
-            if (frameLease is null)
-            {
-                RecordDroppedFrame();
-                return;
-            }
-
-            lock (_renderWorkerLock)
-            {
-                if (_renderWorkerStopping)
-                {
-                    RecordDroppedFrame();
-                    return;
-                }
-
-                if (_pendingTextureFrame is not null)
-                {
-                    _pendingTextureFrame.Dispose();
-                    RecordDroppedFrame();
-                }
-
-                _pendingTextureFrame = new QueuedTextureFrame(
-                    frameLease,
-                    colorSettings,
-                    denoiseEnabled,
-                    denoiseStrength,
-                    sharedBridgeFailureReason);
-                frameLease = null;
-            }
-
-            _renderFrameReady.Set();
-        }
-        finally
-        {
-            frameLease?.Dispose();
-        }
-    }
-
-    public void UpdateTrackingOverlay(PreviewTrackingOverlay? overlay)
-    {
-        Volatile.Write(ref _trackingOverlay, overlay ?? PreviewTrackingOverlay.Empty);
-    }
-
-    public void ResumeRendering()
-    {
-        if (_disposed)
-        {
-            return;
-        }
-
-        lock (_renderThrottleLock)
-        {
-            _lastAcceptedRenderFrameUtc = DateTime.MinValue;
-        }
-
-        Interlocked.Exchange(ref _renderingSuspended, 0);
-        Volatile.Read(ref _renderer)?.RequestPresentationRefresh();
-        _renderFrameReady.Set();
-    }
-
-    public void SuspendRendering()
-    {
-        if (_disposed)
-        {
-            return;
-        }
-
-        Interlocked.Exchange(ref _renderingSuspended, 1);
-        lock (_renderWorkerLock)
-        {
-            _pendingCameraFrame = null;
-            _pendingTextureFrame?.Dispose();
-            _pendingTextureFrame = null;
-        }
-
-        _renderFrameReady.Set();
-        if (Monitor.TryEnter(_rendererLock, TimeSpan.FromMilliseconds(100)))
-        {
-            Monitor.Exit(_rendererLock);
-        }
-    }
-
-    private bool IsRenderingSuspended => Volatile.Read(ref _renderingSuspended) != 0;
-
-    private void RenderTextureFrameCore(QueuedTextureFrame queuedFrame)
-    {
-        var frame = queuedFrame.Frame;
-        if (IsRenderingSuspended)
-        {
-            RecordDroppedFrame();
-            return;
-        }
-
-        try
-        {
-            lock (_rendererLock)
-            {
-                if (_renderer is null || IsRenderingSuspended)
-                {
-                    RecordDroppedFrame();
-                    return;
-                }
-
-                string? directTextureFailureReason = null;
-                if (frame.IsValid
-                    && string.Equals(frame.DeviceMode, "D3D12", StringComparison.OrdinalIgnoreCase)
-                    && _renderer.RenderNativeTextureFrame(
-                        frame,
-                        queuedFrame.ColorSettings,
-                        queuedFrame.DenoiseEnabled,
-                        queuedFrame.DenoiseStrength,
-                        Volatile.Read(ref _trackingOverlay),
-                        out directTextureFailureReason))
-                {
-                    ReportPreviewPath("direct DX12 texture");
-                    RecordRenderedFrame(
-                        "direct DX12 texture",
-                        frame.MediaSubtype,
-                        frame.Width,
-                        frame.Height,
-                        frame.FramesPerSecond,
-                        queuedFrame.DenoiseEnabled,
-                        queuedFrame.DenoiseStrength,
-                        queuedFrame.ColorSettings,
-                        RecordingMode,
-                        null,
-                        frame.FrameNumber);
-                    return;
-                }
-
-                var textureFailureReason = CombineTextureFailureReasons(
-                    directTextureFailureReason,
-                    queuedFrame.SharedBridgeFailureReason);
-                if (TryRenderNv12TextureUpload(
-                    _renderer,
-                    frame,
-                    textureFailureReason,
-                    queuedFrame.ColorSettings,
-                    queuedFrame.DenoiseEnabled,
-                    queuedFrame.DenoiseStrength,
-                    Volatile.Read(ref _trackingOverlay)))
-                {
-                    return;
-                }
-
-                _renderer.RenderProofFrame(frame.FrameNumber);
-                ReportPreviewPath(FormatUploadFallbackPath("DX12 proof-frame fallback", textureFailureReason));
-                RecordDroppedFrame();
-            }
-        }
-        catch (Exception ex)
-        {
-            RecordDroppedFrame();
-            StatusChanged?.Invoke(this, $"DX12 camera frame upload failed: {ex.Message}");
-        }
-    }
-
-    private void ReportPreviewPath(string description)
-    {
-        if (string.Equals(_previewPathDescription, description, StringComparison.Ordinal))
-        {
-            return;
-        }
-
-        _previewPathDescription = description;
-        StatusChanged?.Invoke(this, $"DX12 preview path: {description}");
-    }
-
-    private void RenderWorkerLoop()
-    {
-        try
-        {
-            while (true)
-            {
-                _renderFrameReady.WaitOne();
-
-                while (true)
-                {
-                    QueuedTextureFrame? textureFrame;
-                    QueuedCameraFrame? frame;
-                    lock (_renderWorkerLock)
-                    {
-                        if (_renderWorkerStopping)
-                        {
-                            return;
-                        }
-
-                        textureFrame = _pendingTextureFrame;
-                        _pendingTextureFrame = null;
-                        frame = textureFrame is null ? _pendingCameraFrame : null;
-                        if (textureFrame is null)
-                        {
-                            _pendingCameraFrame = null;
-                        }
-                    }
-
-                    if (textureFrame is not null)
-                    {
-                        using (textureFrame)
-                        {
-                            RenderTextureFrameCore(textureFrame);
-                        }
-
-                        continue;
-                    }
-
-                    if (frame is null)
-                    {
-                        break;
-                    }
-
-                    try
-                    {
-                        lock (_rendererLock)
-                        {
-                            if (_renderer is null || IsRenderingSuspended)
-                            {
-                                break;
-                            }
-
-                            if (frame.Nv12Bytes is { Length: > 0 } nv12Bytes && frame.Nv12Stride > 0)
-                            {
-                                if (_renderer.RenderNv12Frame(
-                                    nv12Bytes,
-                                    frame.Width,
-                                    frame.Height,
-                                    frame.Nv12Stride,
-                                    frame.FrameNumber,
-                                    frame.ColorSettings,
-                                    frame.DenoiseEnabled,
-                                    frame.DenoiseStrength,
-                                    Volatile.Read(ref _trackingOverlay)))
-                                {
-                                    ReportPreviewPath("DX12 NV12 upload preview");
-                                    RecordRenderedFrame(
-                                        "DX12 NV12 upload preview",
-                                        frame.FrameFormat,
-                                        frame.Width,
-                                        frame.Height,
-                                        0d,
-                                        frame.DenoiseEnabled,
-                                        frame.DenoiseStrength,
-                                        frame.ColorSettings,
-                                        RecordingMode,
-                                        null,
-                                        frame.FrameNumber);
-                                    continue;
-                                }
-
-                                StatusChanged?.Invoke(
-                                    this,
-                                    $"DX12 NV12 preview renderer refused {frame.Width}x{frame.Height}, stride {frame.Nv12Stride}, bytes {nv12Bytes.Length}: {_renderer.LastNv12PreviewFailureReason}");
-                            }
-
-                            if (frame.BgraBytes.Length <= 0 || frame.Stride <= 0)
-                            {
-                                StatusChanged?.Invoke(this, "DX12 preview skipped: frame had no renderable BGRA or NV12 payload.");
-                                break;
-                            }
-
-                            _renderer.RenderBgraFrame(
-                                frame.BgraBytes,
-                                frame.Width,
-                                frame.Height,
-                                frame.Stride,
-                                frame.FrameNumber,
-                                frame.ColorSettings,
-                                frame.DenoiseEnabled,
-                                frame.DenoiseStrength,
-                                Volatile.Read(ref _trackingOverlay));
-                        }
-
-                        ReportPreviewPath("DX12 BGRA upload preview");
-                        RecordRenderedFrame(
-                            "DX12 BGRA upload preview",
-                            frame.FrameFormat,
-                            frame.Width,
-                            frame.Height,
-                            0d,
-                            frame.DenoiseEnabled,
-                            frame.DenoiseStrength,
-                            frame.ColorSettings,
-                            RecordingMode,
-                            null,
-                            frame.FrameNumber);
-                    }
-                    catch (Exception ex)
-                    {
-                        RecordDroppedFrame();
-                        StatusChanged?.Invoke(this, $"DX12 BGRA preview upload failed: {ex.Message}");
-                    }
-                }
-            }
-        }
-        finally
-        {
-            DisposeRenderer();
-        }
-    }
-
-    private bool StopRenderWorker()
-    {
-        lock (_renderWorkerLock)
-        {
-            _renderWorkerStopping = true;
-            _pendingCameraFrame = null;
-            _pendingTextureFrame?.Dispose();
-            _pendingTextureFrame = null;
-        }
-
-        _renderFrameReady.Set();
-        var stopped = _renderThread?.Join(TimeSpan.FromSeconds(2)) != false;
-        _renderThread = null;
-        _renderFrameReady.Dispose();
-        return stopped;
-    }
-
-    private sealed record QueuedCameraFrame(
-        byte[] BgraBytes,
-        int Width,
-        int Height,
-        int Stride,
-        byte[]? Nv12Bytes,
-        int Nv12Stride,
-        string FrameFormat,
-        VideoFrameColorSettings ColorSettings,
-        bool DenoiseEnabled,
-        double DenoiseStrength,
-        long FrameNumber);
-
-    private sealed record QueuedTextureFrame(
-        TextureNativeFrameLease Frame,
-        VideoFrameColorSettings ColorSettings,
-        bool DenoiseEnabled,
-        double DenoiseStrength,
-        string? SharedBridgeFailureReason) : IDisposable
-    {
-        public void Dispose()
-        {
-            Frame.Dispose();
-        }
-    }
-
-    private void RecordSubmittedFrame()
-    {
-        Interlocked.Increment(ref _submittedFrames);
-    }
-
-    private bool ShouldAcceptRenderFrame()
-    {
-        lock (_renderThrottleLock)
-        {
-            if (_maxRenderFramesPerSecond <= 0d)
-            {
-                return true;
-            }
-
-            var now = DateTime.UtcNow;
-            if (now - _lastAcceptedRenderFrameUtc < TimeSpan.FromSeconds(1d / _maxRenderFramesPerSecond))
-            {
-                return false;
-            }
-
-            _lastAcceptedRenderFrameUtc = now;
-            return true;
-        }
-    }
-
-    private void RecordDroppedFrame()
-    {
-        Interlocked.Increment(ref _droppedFrames);
-    }
-
-    private void RecordRenderedFrame(
-        string previewPath,
-        string frameFormat,
-        int width,
-        int height,
-        double sourceFramesPerSecond,
-        bool denoiseEnabled,
-        double denoiseStrength,
-        VideoFrameColorSettings colorSettings,
-        string recordingMode,
-        string? fallbackReason,
-        long frameNumber)
-    {
-        var rendered = Interlocked.Increment(ref _renderedFrames);
-        var submitted = Interlocked.Read(ref _submittedFrames);
-        var dropped = Interlocked.Read(ref _droppedFrames);
-        var now = DateTimeOffset.UtcNow;
-        Direct3D12PreviewDiagnostics snapshot;
-        lock (_diagnosticsLock)
-        {
-            var elapsed = now - _diagnosticsFpsWindowStartUtc;
-            if (elapsed.TotalSeconds >= 1d)
-            {
-                var framesSinceWindowStart = Math.Max(0, rendered - _diagnosticsFpsWindowStartRenderedFrames);
-                _renderFramesPerSecond = framesSinceWindowStart / Math.Max(0.001d, elapsed.TotalSeconds);
-                _diagnosticsFpsWindowStartUtc = now;
-                _diagnosticsFpsWindowStartRenderedFrames = rendered;
-            }
-
-            snapshot = new Direct3D12PreviewDiagnostics(
-                previewPath,
-                DeviceDescription,
-                string.IsNullOrWhiteSpace(frameFormat) ? "unknown" : frameFormat,
-                width,
-                height,
-                sourceFramesPerSecond,
-                submitted,
-                rendered,
-                dropped,
-                _renderFramesPerSecond,
-                denoiseEnabled,
-                denoiseStrength,
-                colorSettings.HasVisibleAdjustments,
-                recordingMode,
-                fallbackReason,
-                frameNumber,
-                now);
-            _diagnostics = snapshot;
-        }
-
-        DiagnosticsChanged?.Invoke(this, snapshot);
-    }
-
-    private static string FormatUploadFallbackPath(string path, string? directTextureFailureReason)
-    {
-        if (string.IsNullOrWhiteSpace(directTextureFailureReason))
-        {
-            return path;
-        }
-
-        var reason = directTextureFailureReason.Trim();
-        if (reason.Length > 160)
-        {
-            reason = reason[..157] + "...";
-        }
-
-        return $"{path}; texture unavailable: {reason}";
-    }
-
-    private static string? CombineTextureFailureReasons(
-        string? directTextureFailureReason,
-        string? sharedBridgeFailureReason)
-    {
-        var direct = string.IsNullOrWhiteSpace(directTextureFailureReason)
-            ? null
-            : $"direct: {directTextureFailureReason.Trim()}";
-        var bridge = string.IsNullOrWhiteSpace(sharedBridgeFailureReason)
-            ? null
-            : $"bridge: {sharedBridgeFailureReason.Trim()}";
-        return (direct, bridge) switch
-        {
-            (not null, not null) => $"{direct}; {bridge}",
-            (not null, null) => direct,
-            (null, not null) => bridge,
-            _ => null
-        };
-    }
-
-    private bool TryRenderNv12TextureUpload(
-        Direct3D12SwapChainRenderer renderer,
-        TextureNativeFrameLease frame,
-        string? textureFailureReason,
-        VideoFrameColorSettings colorSettings,
-        bool denoiseEnabled,
-        double denoiseStrength,
-        PreviewTrackingOverlay trackingOverlay)
-    {
-        if (frame.Nv12PreviewBytes is not { Length: > 0 } nv12Bytes || frame.Nv12PreviewStride <= 0)
-        {
-            return false;
-        }
-
-        if (!renderer.RenderNv12Frame(
-            nv12Bytes,
-            frame.Width,
-            frame.Height,
-            frame.Nv12PreviewStride,
-            frame.FrameNumber,
-            colorSettings,
-            denoiseEnabled,
-            denoiseStrength,
-            trackingOverlay))
-        {
-            return false;
-        }
-
-        var path = FormatUploadFallbackPath("DX12 NV12 texture upload", textureFailureReason);
-        ReportPreviewPath(path);
-        RecordRenderedFrame(
-            path,
-            "NV12 texture upload",
-            frame.Width,
-            frame.Height,
-            frame.FramesPerSecond,
-            denoiseEnabled,
-            denoiseStrength,
-            colorSettings,
-            RecordingMode,
-            textureFailureReason,
-            frame.FrameNumber);
-        return true;
-    }
-
-    protected override void OnViewportCreated(IntPtr hwnd, int width, int height)
-    {
-        Direct3D12SwapChainRenderer renderer;
-        var nativeDevice = Interlocked.Exchange(ref _nativeD3D12Device, IntPtr.Zero);
-        try
-        {
-            lock (_rendererLock)
-            {
-                renderer = new Direct3D12SwapChainRenderer(hwnd, width, height, nativeDevice);
-                _renderer = renderer;
-            }
-
-            nativeDevice = IntPtr.Zero;
-        }
-        finally
-        {
-            if (nativeDevice != IntPtr.Zero)
-            {
-                Marshal.Release(nativeDevice);
-            }
-        }
-
-        StatusChanged?.Invoke(this, $"{renderer.DeviceDescription} preview surface ready.");
-    }
-
-    protected override void OnViewportCreateFailed(Exception ex)
-    {
-        StatusChanged?.Invoke(this, $"DX12 preview surface unavailable: {ex.Message}");
-    }
-
-    protected override void OnViewportDestroying()
-    {
-        TryDisposeRenderer("window destroy");
-    }
-
-    protected override void OnViewportResized(int width, int height)
-    {
-        lock (_rendererLock)
-        {
-            _renderer?.Resize(width, height);
-        }
-    }
-
-    protected override void OnViewportResizeFailed(Exception ex)
-    {
-        StatusChanged?.Invoke(this, $"DX12 preview resize failed: {ex.Message}");
-    }
-
-    public new void Dispose()
-    {
-        if (_disposed)
-        {
-            return;
-        }
-
-        _disposed = true;
-        if (!StopRenderWorker())
-        {
-            StatusChanged?.Invoke(this, "DX12 preview stop is waiting for the render worker to leave the driver.");
-        }
-
-        var nativeDevice = Interlocked.Exchange(ref _nativeD3D12Device, IntPtr.Zero);
-        if (nativeDevice != IntPtr.Zero)
-        {
-            Marshal.Release(nativeDevice);
-        }
-
-        base.Dispose();
-    }
-
-    private void DisposeRenderer()
-    {
-        lock (_rendererLock)
-        {
-            DisposeRendererCore();
-        }
-    }
-
-    private void TryDisposeRenderer(string context)
-    {
-        if (!Monitor.TryEnter(_rendererLock, RendererDisposeLockTimeout))
-        {
-            StatusChanged?.Invoke(this, $"DX12 preview {context} deferred because the renderer is busy.");
-            return;
-        }
-
-        try
-        {
-            DisposeRendererCore();
-        }
-        finally
-        {
-            Monitor.Exit(_rendererLock);
-        }
-    }
-
-    private void DisposeRendererCore()
-    {
-        _renderer?.Dispose();
-        _renderer = null;
-    }
-
-    private sealed class Direct3D12SwapChainRenderer : IDisposable
-    {
-        private const int FrameCount = 3;
-        private const int D3D12DefaultShader4ComponentMappingValue = 5768;
-        private const int BgraColorSettingsDescriptorStart = 3;
-        private const int BgraColorSettingsBufferBytes = 256;
-
-        private readonly ID3D12Device _device;
-        private readonly ID3D12CommandQueue _commandQueue;
-        private readonly IDXGIFactory4 _factory;
-        private readonly ID3D12GraphicsCommandList _commandList;
-        private readonly ID3D12Fence _fence;
-        private readonly AutoResetEvent _fenceEvent = new(false);
-        private readonly ID3D12DescriptorHeap _rtvHeap;
-        private readonly ID3D12DescriptorHeap _srvHeap;
-        private readonly int _rtvDescriptorSize;
-        private readonly int _srvDescriptorSize;
-        private readonly ID3D12Resource?[] _renderTargets = new ID3D12Resource?[FrameCount];
-        private ID3D12RootSignature? _previewRootSignature;
-        private ID3D12PipelineState? _previewPipelineState;
-        private ID3D12RootSignature? _nv12PreviewRootSignature;
-        private ID3D12PipelineState? _nv12PreviewPipelineState;
-        private Direct2DTrackingOverlayRenderer? _trackingOverlayRenderer;
-        private readonly FrameResource[] _frameResources = new FrameResource[FrameCount];
-        private ID3D12Resource? _cameraTexture;
-        private PlacedSubresourceFootPrint _cameraTextureFootprint;
-        private ResourceStates _cameraTextureState;
-        private ID3D12Resource? _nv12YTexture;
-        private ID3D12Resource? _nv12UvTexture;
-        private PlacedSubresourceFootPrint _nv12YFootprint;
-        private PlacedSubresourceFootPrint _nv12UvFootprint;
-        private ResourceStates _nv12YTextureState;
-        private ResourceStates _nv12UvTextureState;
-        private IDXGISwapChain3 _swapChain;
-        private ulong _fenceValue;
-        private int _cameraTextureWidth;
-        private int _cameraTextureHeight;
-        private int _nv12TextureWidth;
-        private int _nv12TextureHeight;
-        private int _viewportWidth;
-        private int _viewportHeight;
-        private int _presentationRefreshRequested;
-        private bool _disposed;
-        private bool _shaderPreviewUnavailable;
-        private bool _nv12PreviewUnavailable;
-        private string? _nv12PreviewFailureReason;
-        private bool _nativeTexturePreviewUnavailable;
-        private string? _nativeTexturePreviewFailureReason;
-        private bool _sharedD3D11BridgePreviewUnavailable;
-        private string? _sharedD3D11BridgePreviewFailureReason;
-        private readonly bool _usesSharedCaptureDevice;
-
-        public Direct3D12SwapChainRenderer(IntPtr hwnd, int width, int height, IntPtr nativeD3D12Device = default)
-        {
-            _viewportWidth = width;
-            _viewportHeight = height;
-            if (nativeD3D12Device != IntPtr.Zero)
-            {
-                _device = new ID3D12Device(nativeD3D12Device);
-                _usesSharedCaptureDevice = true;
-            }
-            else
-            {
-                _device = D3D12CreateDevice<ID3D12Device>(null, FeatureLevel.Level_12_0);
-            }
-
-            _commandQueue = _device.CreateCommandQueue<ID3D12CommandQueue>(
-                new CommandQueueDescription(CommandListType.Direct));
-            _factory = CreateDXGIFactory2<IDXGIFactory4>(false);
-
-            var swapChainDescription = new SwapChainDescription1
-            {
-                Width = (uint)width,
-                Height = (uint)height,
-                Format = Format.B8G8R8A8_UNorm,
-                Stereo = false,
-                SampleDescription = new SampleDescription(1, 0),
-                BufferUsage = Usage.RenderTargetOutput,
-                BufferCount = FrameCount,
-                Scaling = Scaling.Stretch,
-                SwapEffect = SwapEffect.FlipDiscard,
-                AlphaMode = AlphaMode.Ignore,
-                Flags = SwapChainFlags.None
-            };
-            using var swapChain = _factory.CreateSwapChainForHwnd(
-                _commandQueue,
-                hwnd,
-                swapChainDescription,
-                null,
-                null);
-            _swapChain = swapChain.QueryInterface<IDXGISwapChain3>();
-            _factory.MakeWindowAssociation(hwnd, WindowAssociationFlags.IgnoreAltEnter);
-
-            _rtvHeap = _device.CreateDescriptorHeap<ID3D12DescriptorHeap>(
-                new DescriptorHeapDescription(DescriptorHeapType.RenderTargetView, FrameCount));
-            _srvHeap = _device.CreateDescriptorHeap<ID3D12DescriptorHeap>(
-                new DescriptorHeapDescription(
-                    DescriptorHeapType.ConstantBufferViewShaderResourceViewUnorderedAccessView,
-                    BgraColorSettingsDescriptorStart + FrameCount,
-                    DescriptorHeapFlags.ShaderVisible));
-            _rtvDescriptorSize = (int)_device.GetDescriptorHandleIncrementSize(DescriptorHeapType.RenderTargetView);
-            _srvDescriptorSize = (int)_device.GetDescriptorHandleIncrementSize(DescriptorHeapType.ConstantBufferViewShaderResourceViewUnorderedAccessView);
-            CreateRenderTargetViews();
-            TryCreatePreviewShaderPipeline();
-            TryCreateNv12PreviewShaderPipeline();
-            _trackingOverlayRenderer = Direct2DTrackingOverlayRenderer.TryCreate(
-                _device,
-                _commandQueue,
-                FrameCount);
-            TryAttachTrackingOverlayRenderer();
-
-            for (var i = 0; i < FrameCount; i++)
-            {
-                _frameResources[i] = new FrameResource(
-                    _device.CreateCommandAllocator<ID3D12CommandAllocator>(CommandListType.Direct));
-                _frameResources[i].CreateBgraColorSettingsBuffer(_device, BgraColorSettingsBufferBytes);
-                _device.CreateConstantBufferView(
-                    new ConstantBufferViewDescription
-                    {
-                        BufferLocation = _frameResources[i].BgraColorSettingsBuffer!.GPUVirtualAddress,
-                        SizeInBytes = BgraColorSettingsBufferBytes
-                    },
-                    GetSrvCpuHandle(BgraColorSettingsDescriptorStart + i));
-            }
-
-            _commandList = _device.CreateCommandList<ID3D12GraphicsCommandList>(
-                0,
-                CommandListType.Direct,
-                _frameResources[0].CommandAllocator,
-                null);
-            _commandList.Close();
-            _fence = _device.CreateFence<ID3D12Fence>(0);
-        }
-
-        public string DeviceDescription => _usesSharedCaptureDevice
-            ? "Direct3D 12 / DXGI flip model on shared capture device"
-            : "Direct3D 12 / DXGI flip model";
-
-        public string LastNv12PreviewFailureReason => _nv12PreviewFailureReason ?? "no NV12 failure detail";
-
-        public unsafe void RenderProofFrame(long frameNumber)
-        {
-            if (_disposed)
-            {
-                return;
-            }
-
-            var frameResource = BeginFrame(out var frameIndex);
-            var renderTarget = _renderTargets[frameIndex] ?? throw new InvalidOperationException("DX12 render target is not ready.");
-
-            var toRenderTarget = ResourceBarrier.BarrierTransition(
-                renderTarget,
-                ResourceStates.Present,
-                ResourceStates.RenderTarget);
-            _commandList.ResourceBarrier([toRenderTarget]);
-
-            var rtvHandle = GetRtvHandle(frameIndex);
-            var pulse = (float)((frameNumber % 120) / 120d);
-            _commandList.OMSetRenderTargets(rtvHandle, null);
-            _commandList.ClearRenderTargetView(
-                rtvHandle,
-                new Color4(0.02f + pulse * 0.08f, 0.08f, 0.12f + pulse * 0.18f, 1f),
-                0,
-                null!);
-
-            var toPresent = ResourceBarrier.BarrierTransition(
-                renderTarget,
-                ResourceStates.RenderTarget,
-                ResourceStates.Present);
-            _commandList.ResourceBarrier([toPresent]);
-            ExecuteAndPresent(frameResource);
-        }
-
-        public unsafe void RenderBgraFrame(
-            byte[] bgraBytes,
-            int width,
-            int height,
-            int stride,
-            long frameNumber,
-            VideoFrameColorSettings colorSettings = default,
-            bool denoiseEnabled = false,
-            double denoiseStrength = 0d,
-            PreviewTrackingOverlay? trackingOverlay = null)
-        {
-            if (_disposed || bgraBytes.Length < stride * height)
-            {
-                return;
-            }
-
-            var overlay = trackingOverlay ?? PreviewTrackingOverlay.Empty;
-            if (TryRenderBgraFrameWithShader(
-                bgraBytes,
-                width,
-                height,
-                stride,
-                colorSettings,
-                denoiseEnabled,
-                denoiseStrength,
-                overlay))
-            {
-                return;
-            }
-
-            RenderBgraFrameToBackBuffer(bgraBytes, width, height, stride, overlay);
-        }
-
-        public unsafe bool RenderNv12Frame(
-            byte[] nv12Bytes,
-            int width,
-            int height,
-            int stride,
-            long frameNumber,
-            VideoFrameColorSettings colorSettings,
-            bool denoiseEnabled,
-            double denoiseStrength,
-            PreviewTrackingOverlay trackingOverlay)
-        {
-            var uvHeight = (height + 1) / 2;
-            if (_disposed || stride < width || nv12Bytes.Length < stride * height + stride * uvHeight)
-            {
-                _nv12PreviewFailureReason = _disposed
-                    ? "renderer disposed"
-                    : $"invalid NV12 payload: stride {stride}, width {width}, bytes {nv12Bytes.Length}, expected {stride * height + stride * uvHeight}";
-                return false;
-            }
-
-            var rendered = TryRenderNv12FrameWithShader(
-                nv12Bytes,
-                width,
-                height,
-                stride,
-                colorSettings,
-                denoiseEnabled,
-                denoiseStrength,
-                trackingOverlay);
-            if (rendered)
-            {
-                _nv12PreviewFailureReason = null;
-            }
-
-            return rendered;
-        }
-
-        public bool RenderNativeTextureFrame(
-            TextureNativeFrameLease frame,
-            VideoFrameColorSettings colorSettings,
-            bool denoiseEnabled,
-            double denoiseStrength,
-            PreviewTrackingOverlay trackingOverlay,
-            out string? failureReason)
-        {
-            failureReason = null;
-            if (_disposed)
-            {
-                failureReason = "renderer disposed";
-                return false;
-            }
-
-            if (!_usesSharedCaptureDevice)
-            {
-                failureReason = "presenter is not using the capture D3D12 device";
-                return false;
-            }
-
-            if (_nativeTexturePreviewUnavailable)
-            {
-                failureReason = _nativeTexturePreviewFailureReason ?? "direct texture rendering disabled after an earlier failure";
-                return false;
-            }
-
-            if (_nv12PreviewRootSignature is null || _nv12PreviewPipelineState is null)
-            {
-                failureReason = "NV12 shader pipeline unavailable";
-                return false;
-            }
-
-            if (frame.Resource == IntPtr.Zero)
-            {
-                failureReason = "frame texture resource is missing";
-                return false;
-            }
-
-            if (!frame.MediaSubtype.Contains("NV12", StringComparison.OrdinalIgnoreCase))
-            {
-                failureReason = $"media subtype {frame.MediaSubtype} is not NV12";
-                return false;
-            }
-
-            try
-            {
-                Marshal.AddRef(frame.Resource);
-                using var nativeResource = new ID3D12Resource(frame.Resource);
-                RenderNativeNv12Resource(
-                    nativeResource,
-                    frame.Width,
-                    frame.Height,
-                    colorSettings,
-                    denoiseEnabled,
-                    denoiseStrength,
-                    trackingOverlay);
-                _nativeTexturePreviewFailureReason = null;
-                return true;
-            }
-            catch (Exception ex)
-            {
-                _nativeTexturePreviewUnavailable = true;
-                _nativeTexturePreviewFailureReason = ex.Message;
-                failureReason = ex.Message;
-                return false;
-            }
-        }
-
-        public bool RenderSharedD3D11BridgeFrame(
-            TextureNativeFrameLease frame,
-            VideoFrameColorSettings colorSettings,
-            bool denoiseEnabled,
-            double denoiseStrength,
-            PreviewTrackingOverlay trackingOverlay,
-            out string? failureReason)
-        {
-            failureReason = null;
-            if (_disposed)
-            {
-                failureReason = "renderer disposed";
-                return false;
-            }
-
-            if (_sharedD3D11BridgePreviewUnavailable)
-            {
-                failureReason = _sharedD3D11BridgePreviewFailureReason
-                    ?? "D3D11 bridge texture rendering disabled after an earlier failure";
-                return false;
-            }
-
-            if (_nv12PreviewRootSignature is null || _nv12PreviewPipelineState is null)
-            {
-                failureReason = "NV12 shader pipeline unavailable";
-                return false;
-            }
-
-            if (frame.D3D12SharedTextureHandle == IntPtr.Zero)
-            {
-                failureReason = "D3D11 bridge shared texture handle is missing";
-                return false;
-            }
-
-            if (!frame.MediaSubtype.Contains("NV12", StringComparison.OrdinalIgnoreCase))
-            {
-                failureReason = $"media subtype {frame.MediaSubtype} is not NV12";
-                return false;
-            }
-
-            try
-            {
-                using var sharedResource = _device.OpenSharedHandle<ID3D12Resource>(frame.D3D12SharedTextureHandle);
-                RenderNativeNv12Resource(
-                    sharedResource,
-                    frame.Width,
-                    frame.Height,
-                    colorSettings,
-                    denoiseEnabled,
-                    denoiseStrength,
-                    trackingOverlay);
-
-                // The bridge owns one reusable D3D11 texture. The capture thread must not
-                // copy the next frame into it until this DX12 queue has finished reading it.
-                WaitForGpu();
-                _sharedD3D11BridgePreviewFailureReason = null;
-                return true;
-            }
-            catch (Exception ex)
-            {
-                _sharedD3D11BridgePreviewUnavailable = true;
-                _sharedD3D11BridgePreviewFailureReason = ex.Message;
-                failureReason = ex.Message;
-                return false;
-            }
-        }
-
-        private void RenderNativeNv12Resource(
-            ID3D12Resource cameraResource,
-            int width,
-            int height,
-            VideoFrameColorSettings colorSettings,
-            bool denoiseEnabled,
-            double denoiseStrength,
-            PreviewTrackingOverlay trackingOverlay)
-        {
-            var ySrvDescription = new ShaderResourceViewDescription
-            {
-                Format = Format.R8_UNorm,
-                ViewDimension = Vortice.Direct3D12.ShaderResourceViewDimension.Texture2D,
-                Shader4ComponentMapping = D3D12DefaultShader4ComponentMappingValue,
-                Texture2D = new Texture2DShaderResourceView
-                {
-                    MipLevels = 1,
-                    PlaneSlice = 0
-                }
-            };
-            var uvSrvDescription = new ShaderResourceViewDescription
-            {
-                Format = Format.R8G8_UNorm,
-                ViewDimension = Vortice.Direct3D12.ShaderResourceViewDimension.Texture2D,
-                Shader4ComponentMapping = D3D12DefaultShader4ComponentMappingValue,
-                Texture2D = new Texture2DShaderResourceView
-                {
-                    MipLevels = 1,
-                    PlaneSlice = 1
-                }
-            };
-            _device.CreateShaderResourceView(cameraResource, ySrvDescription, GetSrvCpuHandle(1));
-            _device.CreateShaderResourceView(cameraResource, uvSrvDescription, GetSrvCpuHandle(2));
-
-            var frameResource = BeginFrame(out var frameIndex);
-            var renderTarget = _renderTargets[frameIndex] ?? throw new InvalidOperationException("DX12 render target is not ready.");
-
-            var cameraToPixelShaderResource = ResourceBarrier.BarrierTransition(
-                cameraResource,
-                ResourceStates.Common,
-                ResourceStates.PixelShaderResource);
-            var toRenderTarget = ResourceBarrier.BarrierTransition(
-                renderTarget,
-                ResourceStates.Present,
-                ResourceStates.RenderTarget);
-            _commandList.ResourceBarrier([cameraToPixelShaderResource, toRenderTarget]);
-
-            var rtvHandle = GetRtvHandle(frameIndex);
-            _commandList.SetGraphicsRootSignature(_nv12PreviewRootSignature);
-            _commandList.SetPipelineState(_nv12PreviewPipelineState);
-            _commandList.SetDescriptorHeaps([_srvHeap]);
-            _commandList.SetGraphicsRootDescriptorTable(0, GetSrvGpuHandle(1));
-            SetNv12ShaderConstants(width, height, colorSettings, denoiseEnabled, denoiseStrength);
-            var viewport = new Viewport(0, 0, _viewportWidth, _viewportHeight);
-            var scissor = new RawRect(0, 0, _viewportWidth, _viewportHeight);
-            _commandList.RSSetViewports(viewport);
-            _commandList.RSSetScissorRects(scissor);
-            _commandList.OMSetRenderTargets(rtvHandle, null);
-            _commandList.IASetPrimitiveTopology(PrimitiveTopology.TriangleList);
-            _commandList.DrawInstanced(3, 1, 0, 0);
-
-            var useDirect2DOverlay = _trackingOverlayRenderer?.PrepareDraw(
-                frameIndex,
-                trackingOverlay,
-                _viewportWidth,
-                _viewportHeight) == true;
-            var toPresent = ResourceBarrier.BarrierTransition(
-                renderTarget,
-                ResourceStates.RenderTarget,
-                ResourceStates.Present);
-            var cameraToCommon = ResourceBarrier.BarrierTransition(
-                cameraResource,
-                ResourceStates.PixelShaderResource,
-                ResourceStates.Common);
-            _commandList.ResourceBarrier(useDirect2DOverlay
-                ? [cameraToCommon]
-                : [toPresent, cameraToCommon]);
-            ExecuteAndPresent(
-                frameResource,
-                frameIndex,
-                trackingOverlay,
-                useDirect2DOverlay);
-        }
-
-        private unsafe bool TryRenderNv12FrameWithShader(
-            byte[] nv12Bytes,
-            int width,
-            int height,
-            int stride,
-            VideoFrameColorSettings colorSettings,
-            bool denoiseEnabled,
-            double denoiseStrength,
-            PreviewTrackingOverlay trackingOverlay)
-        {
-            if (_nv12PreviewUnavailable || _nv12PreviewRootSignature is null || _nv12PreviewPipelineState is null)
-            {
-                _nv12PreviewFailureReason = _nv12PreviewUnavailable
-                    ? _nv12PreviewFailureReason ?? "NV12 preview disabled after earlier failure"
-                    : "NV12 shader pipeline unavailable";
-                return false;
-            }
-
-            try
-            {
-                EnsureNv12Textures(width, height);
-                var yTexture = _nv12YTexture;
-                var uvTexture = _nv12UvTexture;
-                var frameResource = BeginFrame(out var frameIndex);
-                var yUploadBuffer = frameResource.Nv12YUploadBuffer;
-                var uvUploadBuffer = frameResource.Nv12UvUploadBuffer;
-                if (yTexture is null || uvTexture is null || yUploadBuffer is null || uvUploadBuffer is null)
-                {
-                    return false;
-                }
-
-                CopyNv12FrameToUploadBuffers(frameResource, nv12Bytes, width, height, stride);
-
-                var renderTarget = _renderTargets[frameIndex] ?? throw new InvalidOperationException("DX12 render target is not ready.");
-
-                if (_nv12YTextureState != ResourceStates.CopyDest)
-                {
-                    var toCopyDestination = ResourceBarrier.BarrierTransition(
-                        yTexture,
-                        _nv12YTextureState,
-                        ResourceStates.CopyDest);
-                    _commandList.ResourceBarrier([toCopyDestination]);
-                    _nv12YTextureState = ResourceStates.CopyDest;
-                }
-
-                if (_nv12UvTextureState != ResourceStates.CopyDest)
-                {
-                    var toCopyDestination = ResourceBarrier.BarrierTransition(
-                        uvTexture,
-                        _nv12UvTextureState,
-                        ResourceStates.CopyDest);
-                    _commandList.ResourceBarrier([toCopyDestination]);
-                    _nv12UvTextureState = ResourceStates.CopyDest;
-                }
-
-                _commandList.CopyTextureRegion(
-                    new TextureCopyLocation(yTexture, 0),
-                    0,
-                    0,
-                    0,
-                    new TextureCopyLocation(yUploadBuffer, _nv12YFootprint),
-                    null);
-                _commandList.CopyTextureRegion(
-                    new TextureCopyLocation(uvTexture, 0),
-                    0,
-                    0,
-                    0,
-                    new TextureCopyLocation(uvUploadBuffer, _nv12UvFootprint),
-                    null);
-
-                var yToPixelShaderResource = ResourceBarrier.BarrierTransition(
-                    yTexture,
-                    ResourceStates.CopyDest,
-                    ResourceStates.PixelShaderResource);
-                var uvToPixelShaderResource = ResourceBarrier.BarrierTransition(
-                    uvTexture,
-                    ResourceStates.CopyDest,
-                    ResourceStates.PixelShaderResource);
-                _commandList.ResourceBarrier([yToPixelShaderResource, uvToPixelShaderResource]);
-                _nv12YTextureState = ResourceStates.PixelShaderResource;
-                _nv12UvTextureState = ResourceStates.PixelShaderResource;
-
-                var toRenderTarget = ResourceBarrier.BarrierTransition(
-                    renderTarget,
-                    ResourceStates.Present,
-                    ResourceStates.RenderTarget);
-                _commandList.ResourceBarrier([toRenderTarget]);
-
-                var rtvHandle = GetRtvHandle(frameIndex);
-                _commandList.SetGraphicsRootSignature(_nv12PreviewRootSignature);
-                _commandList.SetPipelineState(_nv12PreviewPipelineState);
-                _commandList.SetDescriptorHeaps([_srvHeap]);
-                _commandList.SetGraphicsRootDescriptorTable(0, GetSrvGpuHandle(1));
-                SetNv12ShaderConstants(width, height, colorSettings, denoiseEnabled, denoiseStrength);
-                var viewport = new Viewport(0, 0, _viewportWidth, _viewportHeight);
-                var scissor = new RawRect(0, 0, _viewportWidth, _viewportHeight);
-                _commandList.RSSetViewports(viewport);
-                _commandList.RSSetScissorRects(scissor);
-                _commandList.OMSetRenderTargets(rtvHandle, null);
-                _commandList.IASetPrimitiveTopology(PrimitiveTopology.TriangleList);
-                _commandList.DrawInstanced(3, 1, 0, 0);
-
-                var useDirect2DOverlay = _trackingOverlayRenderer?.PrepareDraw(
-                    frameIndex,
-                    trackingOverlay,
-                    _viewportWidth,
-                    _viewportHeight) == true;
-                var toPresent = ResourceBarrier.BarrierTransition(
-                    renderTarget,
-                    ResourceStates.RenderTarget,
-                    ResourceStates.Present);
-                if (!useDirect2DOverlay)
-                {
-                    _commandList.ResourceBarrier([toPresent]);
-                }
-
-                ExecuteAndPresent(
-                    frameResource,
-                    frameIndex,
-                    trackingOverlay,
-                    useDirect2DOverlay);
-                return true;
-            }
-            catch (Exception ex)
-            {
-                _nv12PreviewUnavailable = true;
-                _nv12PreviewFailureReason = ex.Message;
-                return false;
-            }
-        }
-
-        private unsafe bool TryRenderBgraFrameWithShader(
-            byte[] bgraBytes,
-            int width,
-            int height,
-            int stride,
-            VideoFrameColorSettings colorSettings,
-            bool denoiseEnabled,
-            double denoiseStrength,
-            PreviewTrackingOverlay trackingOverlay)
-        {
-            if (_shaderPreviewUnavailable || _previewRootSignature is null || _previewPipelineState is null)
-            {
-                return false;
-            }
-
-            try
-            {
-                EnsureCameraTexture(width, height);
-                var cameraTexture = _cameraTexture;
-                var frameResource = BeginFrame(out var frameIndex);
-                var uploadBuffer = frameResource.CameraUploadBuffer;
-                if (cameraTexture is null || uploadBuffer is null)
-                {
-                    return false;
-                }
-
-                CopyBgraFrameToUploadBuffer(frameResource, bgraBytes, width, height, stride);
-                WriteBgraColorSettings(frameResource, colorSettings, denoiseEnabled, denoiseStrength, width, height);
-
-                var renderTarget = _renderTargets[frameIndex] ?? throw new InvalidOperationException("DX12 render target is not ready.");
-
-                if (_cameraTextureState != ResourceStates.CopyDest)
-                {
-                    var toCopyDestination = ResourceBarrier.BarrierTransition(
-                        cameraTexture,
-                        _cameraTextureState,
-                        ResourceStates.CopyDest);
-                    _commandList.ResourceBarrier([toCopyDestination]);
-                    _cameraTextureState = ResourceStates.CopyDest;
-                }
-
-                _commandList.CopyTextureRegion(
-                    new TextureCopyLocation(cameraTexture, 0),
-                    0,
-                    0,
-                    0,
-                    new TextureCopyLocation(uploadBuffer, _cameraTextureFootprint),
-                    null);
-
-                var toPixelShaderResource = ResourceBarrier.BarrierTransition(
-                    cameraTexture,
-                    ResourceStates.CopyDest,
-                    ResourceStates.PixelShaderResource);
-                _commandList.ResourceBarrier([toPixelShaderResource]);
-                _cameraTextureState = ResourceStates.PixelShaderResource;
-
-                var toRenderTarget = ResourceBarrier.BarrierTransition(
-                    renderTarget,
-                    ResourceStates.Present,
-                    ResourceStates.RenderTarget);
-                _commandList.ResourceBarrier([toRenderTarget]);
-
-                var rtvHandle = GetRtvHandle(frameIndex);
-                _commandList.SetGraphicsRootSignature(_previewRootSignature);
-                _commandList.SetPipelineState(_previewPipelineState);
-                _commandList.SetDescriptorHeaps([_srvHeap]);
-                _commandList.SetGraphicsRootDescriptorTable(0, _srvHeap.GetGPUDescriptorHandleForHeapStart());
-                _commandList.SetGraphicsRootDescriptorTable(1, GetSrvGpuHandle(BgraColorSettingsDescriptorStart + frameIndex));
-                var viewport = new Viewport(0, 0, _viewportWidth, _viewportHeight);
-                var scissor = new RawRect(0, 0, _viewportWidth, _viewportHeight);
-                _commandList.RSSetViewports(viewport);
-                _commandList.RSSetScissorRects(scissor);
-                _commandList.OMSetRenderTargets(rtvHandle, null);
-                _commandList.IASetPrimitiveTopology(PrimitiveTopology.TriangleList);
-                _commandList.DrawInstanced(3, 1, 0, 0);
-
-                var useDirect2DOverlay = _trackingOverlayRenderer?.PrepareDraw(
-                    frameIndex,
-                    trackingOverlay,
-                    _viewportWidth,
-                    _viewportHeight) == true;
-                var toPresent = ResourceBarrier.BarrierTransition(
-                    renderTarget,
-                    ResourceStates.RenderTarget,
-                    ResourceStates.Present);
-                if (!useDirect2DOverlay)
-                {
-                    _commandList.ResourceBarrier([toPresent]);
-                }
-
-                ExecuteAndPresent(
-                    frameResource,
-                    frameIndex,
-                    trackingOverlay,
-                    useDirect2DOverlay);
-                return true;
-            }
-            catch
-            {
-                _shaderPreviewUnavailable = true;
-                return false;
-            }
-        }
-
-        private unsafe void RenderBgraFrameToBackBuffer(
-            byte[] bgraBytes,
-            int width,
-            int height,
-            int stride,
-            PreviewTrackingOverlay trackingOverlay)
-        {
-            if (width != _viewportWidth || height != _viewportHeight)
-            {
-                return;
-            }
-
-            var frameResource = BeginFrame(out var frameIndex);
-            var renderTarget = _renderTargets[frameIndex] ?? throw new InvalidOperationException("DX12 render target is not ready.");
-
-            var toCommon = ResourceBarrier.BarrierTransition(
-                renderTarget,
-                ResourceStates.Present,
-                ResourceStates.Common);
-            _commandList.ResourceBarrier([toCommon]);
-            _commandList.Close();
-            _commandQueue.ExecuteCommandList(_commandList);
-            WaitForGpu();
-
-            fixed (byte* source = bgraBytes)
-            {
-                renderTarget.WriteToSubresource(
-                    0,
-                    null,
-                    (IntPtr)source,
-                    (uint)stride,
-                    (uint)(stride * height));
-            }
-
-            frameResource.CommandAllocator.Reset();
-            _commandList.Reset(frameResource.CommandAllocator);
-            var toRenderTarget = ResourceBarrier.BarrierTransition(
-                renderTarget,
-                ResourceStates.Common,
-                ResourceStates.RenderTarget);
-            _commandList.ResourceBarrier([toRenderTarget]);
-            var rtvHandle = GetRtvHandle(frameIndex);
-            var viewport = new Viewport(0, 0, _viewportWidth, _viewportHeight);
-            var scissor = new RawRect(0, 0, _viewportWidth, _viewportHeight);
-            _commandList.RSSetViewports(viewport);
-            _commandList.RSSetScissorRects(scissor);
-            _commandList.OMSetRenderTargets(rtvHandle, null);
-            var useDirect2DOverlay = _trackingOverlayRenderer?.PrepareDraw(
-                frameIndex,
-                trackingOverlay,
-                _viewportWidth,
-                _viewportHeight) == true;
-            var toPresent = ResourceBarrier.BarrierTransition(
-                renderTarget,
-                ResourceStates.RenderTarget,
-                ResourceStates.Present);
-            if (!useDirect2DOverlay)
-            {
-                _commandList.ResourceBarrier([toPresent]);
-            }
-
-            ExecuteAndPresent(
-                frameResource,
-                frameIndex,
-                trackingOverlay,
-                useDirect2DOverlay);
-        }
-
-        private void EnsureCameraTexture(int width, int height)
-        {
-            if (_cameraTexture is not null
-                && CameraUploadBuffersReady()
-                && _cameraTextureWidth == width
-                && _cameraTextureHeight == height)
-            {
-                return;
-            }
-
-            WaitForGpu();
-            _cameraTexture?.Dispose();
-            ReleaseCameraUploadBuffers();
-            _cameraTexture = null;
-            _cameraTextureWidth = width;
-            _cameraTextureHeight = height;
-            var description = new ResourceDescription(
-                ResourceDimension.Texture2D,
-                0,
-                (ulong)width,
-                (uint)height,
-                1,
-                1,
-                Format.B8G8R8A8_UNorm,
-                1,
-                0,
-                TextureLayout.Unknown,
-                ResourceFlags.None);
-            _cameraTexture = _device.CreateCommittedResource<ID3D12Resource>(
-                new HeapProperties(HeapType.Default),
-                HeapFlags.None,
-                description,
-                ResourceStates.CopyDest);
-            _cameraTextureState = ResourceStates.CopyDest;
-            var layouts = new PlacedSubresourceFootPrint[1];
-            var numRows = new uint[1];
-            var rowSizesInBytes = new ulong[1];
-            _device.GetCopyableFootprints(
-                description,
-                0,
-                1,
-                0,
-                layouts,
-                numRows,
-                rowSizesInBytes,
-                out var uploadBytes);
-            _cameraTextureFootprint = layouts[0];
-            foreach (var frameResource in _frameResources)
-            {
-                frameResource.CreateCameraUploadBuffer(_device, uploadBytes);
-            }
-
-            var srvDescription = new ShaderResourceViewDescription
-            {
-                Format = Format.B8G8R8A8_UNorm,
-                ViewDimension = Vortice.Direct3D12.ShaderResourceViewDimension.Texture2D,
-                Shader4ComponentMapping = D3D12DefaultShader4ComponentMappingValue,
-                Texture2D = new Texture2DShaderResourceView
-                {
-                    MipLevels = 1
-                }
-            };
-            _device.CreateShaderResourceView(
-                _cameraTexture,
-                srvDescription,
-                _srvHeap.GetCPUDescriptorHandleForHeapStart());
-        }
-
-        private void EnsureNv12Textures(int width, int height)
-        {
-            if (_nv12YTexture is not null
-                && _nv12UvTexture is not null
-                && Nv12UploadBuffersReady()
-                && _nv12TextureWidth == width
-                && _nv12TextureHeight == height)
-            {
-                return;
-            }
-
-            WaitForGpu();
-            _nv12YTexture?.Dispose();
-            _nv12UvTexture?.Dispose();
-            ReleaseNv12UploadBuffers();
-            _nv12YTexture = null;
-            _nv12UvTexture = null;
-            _nv12TextureWidth = width;
-            _nv12TextureHeight = height;
-
-            var yDescription = new ResourceDescription(
-                ResourceDimension.Texture2D,
-                0,
-                (ulong)width,
-                (uint)height,
-                1,
-                1,
-                Format.R8_UNorm,
-                1,
-                0,
-                TextureLayout.Unknown,
-                ResourceFlags.None);
-            var uvDescription = new ResourceDescription(
-                ResourceDimension.Texture2D,
-                0,
-                (ulong)Math.Max(1, width / 2),
-                (uint)Math.Max(1, height / 2),
-                1,
-                1,
-                Format.R8G8_UNorm,
-                1,
-                0,
-                TextureLayout.Unknown,
-                ResourceFlags.None);
-
-            _nv12YTexture = _device.CreateCommittedResource<ID3D12Resource>(
-                new HeapProperties(HeapType.Default),
-                HeapFlags.None,
-                yDescription,
-                ResourceStates.CopyDest);
-            _nv12UvTexture = _device.CreateCommittedResource<ID3D12Resource>(
-                new HeapProperties(HeapType.Default),
-                HeapFlags.None,
-                uvDescription,
-                ResourceStates.CopyDest);
-            _nv12YTextureState = ResourceStates.CopyDest;
-            _nv12UvTextureState = ResourceStates.CopyDest;
-
-            _nv12YFootprint = GetTextureFootprint(yDescription, out var yUploadBytes);
-            _nv12UvFootprint = GetTextureFootprint(uvDescription, out var uvUploadBytes);
-            foreach (var frameResource in _frameResources)
-            {
-                frameResource.CreateNv12UploadBuffers(_device, yUploadBytes, uvUploadBytes);
-            }
-
-            var ySrvDescription = new ShaderResourceViewDescription
-            {
-                Format = Format.R8_UNorm,
-                ViewDimension = Vortice.Direct3D12.ShaderResourceViewDimension.Texture2D,
-                Shader4ComponentMapping = D3D12DefaultShader4ComponentMappingValue,
-                Texture2D = new Texture2DShaderResourceView
-                {
-                    MipLevels = 1
-                }
-            };
-            var uvSrvDescription = new ShaderResourceViewDescription
-            {
-                Format = Format.R8G8_UNorm,
-                ViewDimension = Vortice.Direct3D12.ShaderResourceViewDimension.Texture2D,
-                Shader4ComponentMapping = D3D12DefaultShader4ComponentMappingValue,
-                Texture2D = new Texture2DShaderResourceView
-                {
-                    MipLevels = 1
-                }
-            };
-            _device.CreateShaderResourceView(_nv12YTexture, ySrvDescription, GetSrvCpuHandle(1));
-            _device.CreateShaderResourceView(_nv12UvTexture, uvSrvDescription, GetSrvCpuHandle(2));
-        }
-
-        private PlacedSubresourceFootPrint GetTextureFootprint(
-            ResourceDescription description,
-            out ulong uploadBytes)
-        {
-            var layouts = new PlacedSubresourceFootPrint[1];
-            var numRows = new uint[1];
-            var rowSizesInBytes = new ulong[1];
-            _device.GetCopyableFootprints(
-                description,
-                0,
-                1,
-                0,
-                layouts,
-                numRows,
-                rowSizesInBytes,
-                out uploadBytes);
-            return layouts[0];
-        }
-
-        private bool CameraUploadBuffersReady()
-        {
-            foreach (var frameResource in _frameResources)
-            {
-                if (frameResource.CameraUploadBuffer is null || frameResource.CameraUploadPointer == IntPtr.Zero)
-                {
-                    return false;
-                }
-            }
-
-            return true;
-        }
-
-        private bool Nv12UploadBuffersReady()
-        {
-            foreach (var frameResource in _frameResources)
-            {
-                if (frameResource.Nv12YUploadBuffer is null
-                    || frameResource.Nv12UvUploadBuffer is null
-                    || frameResource.Nv12YUploadPointer == IntPtr.Zero
-                    || frameResource.Nv12UvUploadPointer == IntPtr.Zero)
-                {
-                    return false;
-                }
-            }
-
-            return true;
-        }
-
-        private void ReleaseCameraUploadBuffers()
-        {
-            foreach (var frameResource in _frameResources)
-            {
-                frameResource.ReleaseCameraUploadBuffer();
-            }
-        }
-
-        private void ReleaseNv12UploadBuffers()
-        {
-            foreach (var frameResource in _frameResources)
-            {
-                frameResource.ReleaseNv12UploadBuffers();
-            }
-        }
-
-        private unsafe void CopyBgraFrameToUploadBuffer(FrameResource frameResource, byte[] bgraBytes, int width, int height, int stride)
-        {
-            var mappedData = (byte*)frameResource.CameraUploadPointer;
-            if (mappedData == null)
-            {
-                throw new InvalidOperationException("DX12 BGRA upload buffer is not mapped.");
-            }
-
-            fixed (byte* sourceStart = bgraBytes)
-            {
-                var sourceRowBytes = width * 4;
-                var destinationStart = mappedData + (nint)_cameraTextureFootprint.Offset;
-                var destinationStride = (nint)_cameraTextureFootprint.Footprint.RowPitch;
-                for (var row = 0; row < height; row++)
-                {
-                    Buffer.MemoryCopy(
-                        sourceStart + row * stride,
-                        destinationStart + row * destinationStride,
-                        destinationStride,
-                        sourceRowBytes);
-                }
-            }
-        }
-
-        private unsafe void WriteBgraColorSettings(
-            FrameResource frameResource,
-            VideoFrameColorSettings settings,
-            bool denoiseEnabled,
-            double denoiseStrength,
-            int width,
-            int height)
-        {
-            var mappedData = (float*)frameResource.BgraColorSettingsPointer;
-            if (mappedData == null)
-            {
-                throw new InvalidOperationException("DX12 BGRA color settings buffer is not mapped.");
-            }
-
-            var hasColor = settings.HasVisibleAdjustments;
-            mappedData[0] = hasColor ? (float)(Math.Clamp(settings.Exposure, -30d, 30d) * 2.2d) : 0f;
-            mappedData[1] = hasColor ? (float)(1d + Math.Clamp(settings.Contrast, -40d, 40d) / 100d) : 1f;
-            mappedData[2] = hasColor ? (float)(1d + Math.Clamp(settings.Saturation, -40d, 40d) / 100d) : 1f;
-            mappedData[3] = hasColor ? (float)(Math.Clamp(settings.Warmth, -40d, 40d) * 0.9d) : 0f;
-            var strength = (float)Math.Clamp(denoiseStrength, 0.5d, 5d);
-            mappedData[4] = denoiseEnabled ? Math.Clamp(0.06f + strength * 0.08f, 0.10f, 0.42f) : 0f;
-            mappedData[5] = denoiseEnabled ? Math.Clamp(0.018f + strength * 0.006f, 0.024f, 0.052f) : 0f;
-            mappedData[6] = 1f / Math.Max(1, width);
-            mappedData[7] = 1f / Math.Max(1, height);
-        }
-
-        private unsafe void CopyNv12FrameToUploadBuffers(
-            FrameResource frameResource,
-            byte[] nv12Bytes,
-            int width,
-            int height,
-            int stride)
-        {
-            var uvHeight = Math.Max(1, height / 2);
-            var uvOffset = stride * height;
-            var mappedYPointer = (byte*)frameResource.Nv12YUploadPointer;
-            var mappedUvPointer = (byte*)frameResource.Nv12UvUploadPointer;
-            if (mappedYPointer == null || mappedUvPointer == null)
-            {
-                throw new InvalidOperationException("DX12 NV12 upload buffers are not mapped.");
-            }
-
-            fixed (byte* sourceStart = nv12Bytes)
-            {
-                var yDestinationStart = mappedYPointer + (nint)_nv12YFootprint.Offset;
-                var yDestinationStride = (nint)_nv12YFootprint.Footprint.RowPitch;
-                for (var row = 0; row < height; row++)
-                {
-                    Buffer.MemoryCopy(
-                        sourceStart + row * stride,
-                        yDestinationStart + row * yDestinationStride,
-                        yDestinationStride,
-                        width);
-                }
-
-                var uvDestinationStart = mappedUvPointer + (nint)_nv12UvFootprint.Offset;
-                var uvDestinationStride = (nint)_nv12UvFootprint.Footprint.RowPitch;
-                for (var row = 0; row < uvHeight; row++)
-                {
-                    Buffer.MemoryCopy(
-                        sourceStart + uvOffset + row * stride,
-                        uvDestinationStart + row * uvDestinationStride,
-                        uvDestinationStride,
-                        width);
-                }
-            }
-        }
-
-        private void SetNv12ShaderConstants(
-            int width,
-            int height,
-            VideoFrameColorSettings colorSettings,
-            bool denoiseEnabled,
-            double denoiseStrength)
-        {
-            var hasColor = colorSettings.HasVisibleAdjustments;
-            _commandList.SetGraphicsRoot32BitConstant(1, BitConverter.SingleToUInt32Bits(hasColor ? (float)(Math.Clamp(colorSettings.Exposure, -30d, 30d) * 2.2d) : 0f), 0);
-            _commandList.SetGraphicsRoot32BitConstant(1, BitConverter.SingleToUInt32Bits(hasColor ? (float)(1d + Math.Clamp(colorSettings.Contrast, -40d, 40d) / 100d) : 1f), 1);
-            _commandList.SetGraphicsRoot32BitConstant(1, BitConverter.SingleToUInt32Bits(hasColor ? (float)(1d + Math.Clamp(colorSettings.Saturation, -40d, 40d) / 100d) : 1f), 2);
-            _commandList.SetGraphicsRoot32BitConstant(1, BitConverter.SingleToUInt32Bits(hasColor ? (float)(Math.Clamp(colorSettings.Warmth, -40d, 40d) * 0.9d) : 0f), 3);
-            var strength = (float)Math.Clamp(denoiseStrength, 0.5d, 5d);
-            var amount = denoiseEnabled ? Math.Clamp(0.08f + strength * 0.11f, 0.14f, 0.58f) : 0f;
-            var edgeThreshold = denoiseEnabled ? Math.Clamp(0.018f + strength * 0.006f, 0.024f, 0.052f) : 0f;
-            _commandList.SetGraphicsRoot32BitConstant(1, BitConverter.SingleToUInt32Bits(amount), 4);
-            _commandList.SetGraphicsRoot32BitConstant(1, BitConverter.SingleToUInt32Bits(edgeThreshold), 5);
-            _commandList.SetGraphicsRoot32BitConstant(1, BitConverter.SingleToUInt32Bits(1f / Math.Max(1, width)), 6);
-            _commandList.SetGraphicsRoot32BitConstant(1, BitConverter.SingleToUInt32Bits(1f / Math.Max(1, height)), 7);
-        }
-
-        private void TryCreatePreviewShaderPipeline()
-        {
-            try
-            {
-                var vertexShader = CompileShader("VSMain", "vs_5_0");
-                var pixelShader = CompileShader("PSMain", "ps_5_0");
-                var textureRanges = new[]
-                {
-                    new DescriptorRange(DescriptorRangeType.ShaderResourceView, 1, 0)
-                };
-                var colorRanges = new[]
-                {
-                    new DescriptorRange(DescriptorRangeType.ConstantBufferView, 1, 0)
-                };
-                var parameters = new[]
-                {
-                    new RootParameter(new RootDescriptorTable(textureRanges), ShaderVisibility.Pixel),
-                    new RootParameter(new RootDescriptorTable(colorRanges), ShaderVisibility.Pixel)
-                };
-                var samplers = new[]
-                {
-                    new StaticSamplerDescription(
-                        0,
-                        Filter.MinMagMipLinear,
-                        TextureAddressMode.Clamp,
-                        TextureAddressMode.Clamp,
-                        TextureAddressMode.Clamp,
-                        0,
-                        0,
-                        ComparisonFunction.Never,
-                        StaticBorderColor.TransparentBlack,
-                        0,
-                        float.MaxValue,
-                        ShaderVisibility.Pixel,
-                        0)
-                };
-                var rootDescription = new RootSignatureDescription(
-                    RootSignatureFlags.AllowInputAssemblerInputLayout,
-                    parameters,
-                    samplers);
-                _previewRootSignature = _device.CreateRootSignature(in rootDescription, RootSignatureVersion.Version1);
-
-                var pipelineDescription = new GraphicsPipelineStateDescription
-                {
-                    RootSignature = _previewRootSignature,
-                    VertexShader = vertexShader,
-                    PixelShader = pixelShader,
-                    BlendState = BlendDescription.Opaque,
-                    RasterizerState = RasterizerDescription.CullNone,
-                    DepthStencilState = DepthStencilDescription.None,
-                    SampleMask = uint.MaxValue,
-                    PrimitiveTopologyType = PrimitiveTopologyType.Triangle,
-                    RenderTargetFormats = [Format.B8G8R8A8_UNorm],
-                    SampleDescription = new SampleDescription(1, 0)
-                };
-                _previewPipelineState = _device.CreateGraphicsPipelineState<ID3D12PipelineState>(pipelineDescription);
-            }
-            catch
-            {
-                _shaderPreviewUnavailable = true;
-            }
-        }
-
-        private void TryCreateNv12PreviewShaderPipeline()
-        {
-            try
-            {
-                var vertexShader = CompileShader(Nv12PreviewShaderSource, "VSMain", "vs_5_0");
-                var pixelShader = CompileShader(Nv12PreviewShaderSource, "PSMain", "ps_5_0");
-                var ranges = new[]
-                {
-                    new DescriptorRange(DescriptorRangeType.ShaderResourceView, 2, 0)
-                };
-                var parameters = new[]
-                {
-                    new RootParameter(new RootDescriptorTable(ranges), ShaderVisibility.Pixel),
-                    new RootParameter(new RootConstants(0, 0, 8), ShaderVisibility.Pixel)
-                };
-                var samplers = new[]
-                {
-                    new StaticSamplerDescription(
-                        0,
-                        Filter.MinMagMipLinear,
-                        TextureAddressMode.Clamp,
-                        TextureAddressMode.Clamp,
-                        TextureAddressMode.Clamp,
-                        0,
-                        0,
-                        ComparisonFunction.Never,
-                        StaticBorderColor.TransparentBlack,
-                        0,
-                        float.MaxValue,
-                        ShaderVisibility.Pixel,
-                        0)
-                };
-                var rootDescription = new RootSignatureDescription(
-                    RootSignatureFlags.AllowInputAssemblerInputLayout,
-                    parameters,
-                    samplers);
-                _nv12PreviewRootSignature = _device.CreateRootSignature(in rootDescription, RootSignatureVersion.Version1);
-
-                var pipelineDescription = new GraphicsPipelineStateDescription
-                {
-                    RootSignature = _nv12PreviewRootSignature,
-                    VertexShader = vertexShader,
-                    PixelShader = pixelShader,
-                    BlendState = BlendDescription.Opaque,
-                    RasterizerState = RasterizerDescription.CullNone,
-                    DepthStencilState = DepthStencilDescription.None,
-                    SampleMask = uint.MaxValue,
-                    PrimitiveTopologyType = PrimitiveTopologyType.Triangle,
-                    RenderTargetFormats = [Format.B8G8R8A8_UNorm],
-                    SampleDescription = new SampleDescription(1, 0)
-                };
-                _nv12PreviewPipelineState = _device.CreateGraphicsPipelineState<ID3D12PipelineState>(pipelineDescription);
-            }
-            catch (Exception ex)
-            {
-                _nv12PreviewUnavailable = true;
-                _nv12PreviewFailureReason = $"NV12 shader pipeline creation failed: {ex.Message}";
-            }
-        }
-
-        private static byte[] CompileShader(string entryPoint, string profile)
-        {
-            return CompileShader(PreviewShaderSource, entryPoint, profile);
-        }
-
-        private static byte[] CompileShader(string shaderSource, string entryPoint, string profile)
-        {
-            return Compiler.Compile(
-                    shaderSource,
-                    entryPoint,
-                    "AvatarBuilderPreview.hlsl",
-                    profile,
-                    ShaderFlags.OptimizationLevel3,
-                    EffectFlags.None)
-                .ToArray();
-        }
-
-        private const string PreviewShaderSource = """
-            Texture2D<float4> CameraFrame : register(t0);
-            SamplerState CameraSampler : register(s0);
-
-            cbuffer ColorSettings : register(b0)
-            {
-                float ExposureOffset;
-                float Contrast;
-                float Saturation;
-                float Warmth;
-                float DenoiseAmount;
-                float DenoiseEdgeThreshold;
-                float TexelWidth;
-                float TexelHeight;
-            };
-
-            struct VertexOutput
-            {
-                float4 Position : SV_POSITION;
-                float2 TexCoord : TEXCOORD0;
-            };
-
-            VertexOutput VSMain(uint vertexId : SV_VertexID)
-            {
-                float2 positions[3] =
-                {
-                    float2(-1.0, -1.0),
-                    float2(-1.0, 3.0),
-                    float2(3.0, -1.0)
-                };
-                float2 texCoords[3] =
-                {
-                    float2(0.0, 1.0),
-                    float2(0.0, -1.0),
-                    float2(2.0, 1.0)
-                };
-
-                VertexOutput output;
-                output.Position = float4(positions[vertexId], 0.0, 1.0);
-                output.TexCoord = texCoords[vertexId];
-                return output;
-            }
-
-            float3 ApplyColorPolish(float3 rgb)
-            {
-                float3 rgb255 = rgb * 255.0;
-                rgb255.r = ((rgb255.r + ExposureOffset + Warmth - 128.0) * Contrast) + 128.0;
-                rgb255.g = ((rgb255.g + ExposureOffset - 128.0) * Contrast) + 128.0;
-                rgb255.b = ((rgb255.b + ExposureOffset - Warmth - 128.0) * Contrast) + 128.0;
-
-                float luma = dot(rgb255, float3(0.2126, 0.7152, 0.0722));
-                rgb255 = luma + (rgb255 - luma) * Saturation;
-                return saturate(rgb255 / 255.0);
-            }
-
-            float Luma(float3 rgb)
-            {
-                return dot(rgb, float3(0.2126, 0.7152, 0.0722));
-            }
-
-            float EdgeAwareWeight(float sampleY, float centerY)
-            {
-                return saturate(1.0 - abs(sampleY - centerY) / max(DenoiseEdgeThreshold, 0.0001));
-            }
-
-            float3 ApplyBgraDenoise(float3 centerRgb, float2 texCoord)
-            {
-                if (DenoiseAmount <= 0.001)
-                {
-                    return centerRgb;
-                }
-
-                float2 xOffset = float2(TexelWidth, 0.0);
-                float2 yOffset = float2(0.0, TexelHeight);
-                float3 leftRgb = CameraFrame.Sample(CameraSampler, texCoord - xOffset).rgb;
-                float3 rightRgb = CameraFrame.Sample(CameraSampler, texCoord + xOffset).rgb;
-                float3 upRgb = CameraFrame.Sample(CameraSampler, texCoord - yOffset).rgb;
-                float3 downRgb = CameraFrame.Sample(CameraSampler, texCoord + yOffset).rgb;
-
-                float centerY = Luma(centerRgb);
-                float centerWeight = 2.0;
-                float leftWeight = EdgeAwareWeight(Luma(leftRgb), centerY);
-                float rightWeight = EdgeAwareWeight(Luma(rightRgb), centerY);
-                float upWeight = EdgeAwareWeight(Luma(upRgb), centerY);
-                float downWeight = EdgeAwareWeight(Luma(downRgb), centerY);
-                float totalWeight = centerWeight + leftWeight + rightWeight + upWeight + downWeight;
-                float3 smoothedRgb = (
-                    centerRgb * centerWeight
-                    + leftRgb * leftWeight
-                    + rightRgb * rightWeight
-                    + upRgb * upWeight
-                    + downRgb * downWeight) / max(totalWeight, 0.0001);
-                return lerp(centerRgb, smoothedRgb, DenoiseAmount);
-            }
-
-            float4 PSMain(VertexOutput input) : SV_TARGET
-            {
-                float4 color = CameraFrame.Sample(CameraSampler, input.TexCoord);
-                float3 denoised = ApplyBgraDenoise(color.rgb, input.TexCoord);
-                return float4(ApplyColorPolish(denoised), 1.0);
-            }
-            """;
-
-        private const string Nv12PreviewShaderSource = """
-            Texture2D<float> CameraLuma : register(t0);
-            Texture2D<float2> CameraChroma : register(t1);
-            SamplerState CameraSampler : register(s0);
-
-            cbuffer Nv12PreviewSettings : register(b0)
-            {
-                float ExposureOffset;
-                float Contrast;
-                float Saturation;
-                float Warmth;
-                float DenoiseAmount;
-                float DenoiseEdgeThreshold;
-                float TexelWidth;
-                float TexelHeight;
-            };
-
-            struct VertexOutput
-            {
-                float4 Position : SV_POSITION;
-                float2 TexCoord : TEXCOORD0;
-            };
-
-            VertexOutput VSMain(uint vertexId : SV_VertexID)
-            {
-                float2 positions[3] =
-                {
-                    float2(-1.0, -1.0),
-                    float2(-1.0, 3.0),
-                    float2(3.0, -1.0)
-                };
-                float2 texCoords[3] =
-                {
-                    float2(0.0, 1.0),
-                    float2(0.0, -1.0),
-                    float2(2.0, 1.0)
-                };
-
-                VertexOutput output;
-                output.Position = float4(positions[vertexId], 0.0, 1.0);
-                output.TexCoord = texCoords[vertexId];
-                return output;
-            }
-
-            float NormalizeLuma(float rawY)
-            {
-                return saturate((rawY - (16.0 / 255.0)) * (255.0 / 219.0));
-            }
-
-            float EdgeAwareWeight(float sampleY, float centerY)
-            {
-                return saturate(1.0 - abs(sampleY - centerY) / max(DenoiseEdgeThreshold, 0.0001));
-            }
-
-            float SampleNormalizedLuma(float2 texCoord)
-            {
-                return NormalizeLuma(CameraLuma.Sample(CameraSampler, texCoord));
-            }
-
-            float ApplyLumaDenoise(float centerY, float2 texCoord)
-            {
-                if (DenoiseAmount <= 0.001)
-                {
-                    return centerY;
-                }
-
-                float2 xOffset = float2(TexelWidth, 0.0);
-                float2 yOffset = float2(0.0, TexelHeight);
-                float leftY = SampleNormalizedLuma(texCoord - xOffset);
-                float rightY = SampleNormalizedLuma(texCoord + xOffset);
-                float upY = SampleNormalizedLuma(texCoord - yOffset);
-                float downY = SampleNormalizedLuma(texCoord + yOffset);
-
-                float centerWeight = 2.0;
-                float leftWeight = EdgeAwareWeight(leftY, centerY);
-                float rightWeight = EdgeAwareWeight(rightY, centerY);
-                float upWeight = EdgeAwareWeight(upY, centerY);
-                float downWeight = EdgeAwareWeight(downY, centerY);
-                float totalWeight = centerWeight + leftWeight + rightWeight + upWeight + downWeight;
-                float smoothedY = (
-                    centerY * centerWeight
-                    + leftY * leftWeight
-                    + rightY * rightWeight
-                    + upY * upWeight
-                    + downY * downWeight) / max(totalWeight, 0.0001);
-                return lerp(centerY, smoothedY, DenoiseAmount);
-            }
-
-            float3 ApplyColorPolish(float3 rgb)
-            {
-                float3 rgb255 = rgb * 255.0;
-                rgb255.r = ((rgb255.r + ExposureOffset + Warmth - 128.0) * Contrast) + 128.0;
-                rgb255.g = ((rgb255.g + ExposureOffset - 128.0) * Contrast) + 128.0;
-                rgb255.b = ((rgb255.b + ExposureOffset - Warmth - 128.0) * Contrast) + 128.0;
-
-                float luma = dot(rgb255, float3(0.2126, 0.7152, 0.0722));
-                rgb255 = luma + (rgb255 - luma) * Saturation;
-                return saturate(rgb255 / 255.0);
-            }
-
-            float4 PSMain(VertexOutput input) : SV_TARGET
-            {
-                float y = NormalizeLuma(CameraLuma.Sample(CameraSampler, input.TexCoord));
-                y = ApplyLumaDenoise(y, input.TexCoord);
-                float2 uv = CameraChroma.Sample(CameraSampler, input.TexCoord) - float2(0.5, 0.5);
-                float3 rgb = float3(
-                    y + 1.5748 * uv.y,
-                    y - 0.1873 * uv.x - 0.4681 * uv.y,
-                    y + 1.8556 * uv.x);
-                return float4(ApplyColorPolish(saturate(rgb)), 1.0);
-            }
-            """;
-
-        public void Resize(int width, int height)
-        {
-            if (_disposed || width <= 0 || height <= 0
-                || width == _viewportWidth && height == _viewportHeight)
-            {
-                return;
-            }
-
-            WaitForGpu();
-            _trackingOverlayRenderer?.ReleaseBackBuffers();
-            ReleaseRenderTargets();
-            _swapChain.ResizeBuffers(FrameCount, (uint)width, (uint)height, Format.B8G8R8A8_UNorm, SwapChainFlags.None);
-            _viewportWidth = width;
-            _viewportHeight = height;
-            CreateRenderTargetViews();
-            TryAttachTrackingOverlayRenderer();
-        }
-
-        public void RequestPresentationRefresh()
-        {
-            if (!_disposed)
-            {
-                Interlocked.Exchange(ref _presentationRefreshRequested, 1);
-            }
-        }
-
-        public void Dispose()
-        {
-            if (_disposed)
-            {
-                return;
-            }
-
-            WaitForGpu();
-            _disposed = true;
-            _trackingOverlayRenderer?.Dispose();
-            _trackingOverlayRenderer = null;
-            ReleaseRenderTargets();
-            _swapChain.Dispose();
-            _rtvHeap.Dispose();
-            _srvHeap.Dispose();
-            _cameraTexture?.Dispose();
-            _nv12YTexture?.Dispose();
-            _nv12UvTexture?.Dispose();
-            _previewPipelineState?.Dispose();
-            _previewRootSignature?.Dispose();
-            _nv12PreviewPipelineState?.Dispose();
-            _nv12PreviewRootSignature?.Dispose();
-            _fence.Dispose();
-            _fenceEvent.Dispose();
-            _commandList.Dispose();
-            foreach (var frameResource in _frameResources)
-            {
-                frameResource.Dispose();
-            }
-
-            _factory.Dispose();
-            _commandQueue.Dispose();
-            _device.Dispose();
-        }
-
-        private void CreateRenderTargetViews()
-        {
-            var handle = _rtvHeap.GetCPUDescriptorHandleForHeapStart();
-            for (var i = 0; i < FrameCount; i++)
-            {
-                _renderTargets[i] = _swapChain.GetBuffer<ID3D12Resource>((uint)i);
-                _device.CreateRenderTargetView(_renderTargets[i], null, handle);
-                handle += _rtvDescriptorSize;
-            }
-        }
-
-        private void TryAttachTrackingOverlayRenderer()
-        {
-            if (_trackingOverlayRenderer is null)
-            {
-                return;
-            }
-
-            try
-            {
-                _trackingOverlayRenderer.AttachBackBuffers(_renderTargets);
-            }
-            catch
-            {
-                _trackingOverlayRenderer.Dispose();
-                _trackingOverlayRenderer = null;
-            }
-        }
-
-        private CpuDescriptorHandle GetRtvHandle(int frameIndex)
-        {
-            return _rtvHeap.GetCPUDescriptorHandleForHeapStart() + frameIndex * _rtvDescriptorSize;
-        }
-
-        private CpuDescriptorHandle GetSrvCpuHandle(int descriptorIndex)
-        {
-            return _srvHeap.GetCPUDescriptorHandleForHeapStart() + descriptorIndex * _srvDescriptorSize;
-        }
-
-        private GpuDescriptorHandle GetSrvGpuHandle(int descriptorIndex)
-        {
-            return _srvHeap.GetGPUDescriptorHandleForHeapStart() + descriptorIndex * _srvDescriptorSize;
-        }
-
-        private void ReleaseRenderTargets()
-        {
-            for (var i = 0; i < _renderTargets.Length; i++)
-            {
-                _renderTargets[i]?.Dispose();
-                _renderTargets[i] = null;
-            }
-        }
-
-        private FrameResource BeginFrame(out int frameIndex)
-        {
-            RefreshPresentationResourcesIfRequested();
-            frameIndex = (int)_swapChain.CurrentBackBufferIndex;
-            var frameResource = _frameResources[frameIndex];
-            WaitForFrameResource(frameResource);
-            frameResource.CommandAllocator.Reset();
-            _commandList.Reset(frameResource.CommandAllocator);
-            return frameResource;
-        }
-
-        private void RefreshPresentationResourcesIfRequested()
-        {
-            if (Interlocked.Exchange(ref _presentationRefreshRequested, 0) == 0
-                || _trackingOverlayRenderer is null)
-            {
-                return;
-            }
-
-            _trackingOverlayRenderer.ResetOverlayCache();
-        }
-
-        private void ExecuteAndPresent(FrameResource frameResource)
-        {
-            _commandList.Close();
-            _commandQueue.ExecuteCommandList(_commandList);
-            _swapChain.Present(0, PresentFlags.None);
-            SignalFrameSubmitted(frameResource);
-        }
-
-        private void ExecuteAndPresent(
-            FrameResource frameResource,
-            int frameIndex,
-            PreviewTrackingOverlay trackingOverlay,
-            bool useDirect2DOverlay)
-        {
-            _commandList.Close();
-            _commandQueue.ExecuteCommandList(_commandList);
-            if (useDirect2DOverlay)
-            {
-                _trackingOverlayRenderer!.Draw(
-                    frameIndex,
-                    _viewportWidth,
-                    _viewportHeight,
-                    trackingOverlay);
-            }
-
-            _swapChain.Present(0, PresentFlags.None);
-            SignalFrameSubmitted(frameResource);
-        }
-
-        private void WaitForGpu()
-        {
-            if (_disposed)
-            {
-                return;
-            }
-
-            _fenceValue++;
-            _commandQueue.Signal(_fence, _fenceValue);
-            if (_fence.CompletedValue >= _fenceValue)
-            {
-                ClearFrameFenceValues();
-                return;
-            }
-
-            _fence.SetEventOnCompletion(_fenceValue, _fenceEvent);
-            _fenceEvent.WaitOne();
-            ClearFrameFenceValues();
-        }
-
-        private void SignalFrameSubmitted(FrameResource frameResource)
-        {
-            if (_disposed)
-            {
-                return;
-            }
-
-            _fenceValue++;
-            _commandQueue.Signal(_fence, _fenceValue);
-            frameResource.FenceValue = _fenceValue;
-        }
-
-        private void WaitForFrameResource(FrameResource frameResource)
-        {
-            if (_disposed || frameResource.FenceValue == 0)
-            {
-                return;
-            }
-
-            if (_fence.CompletedValue < frameResource.FenceValue)
-            {
-                _fence.SetEventOnCompletion(frameResource.FenceValue, _fenceEvent);
-                _fenceEvent.WaitOne();
-            }
-
-            frameResource.FenceValue = 0;
-        }
-
-        private void ClearFrameFenceValues()
-        {
-            foreach (var frameResource in _frameResources)
-            {
-                frameResource.FenceValue = 0;
-            }
-        }
-
-        private sealed class FrameResource : IDisposable
-        {
-            public FrameResource(ID3D12CommandAllocator commandAllocator)
-            {
-                CommandAllocator = commandAllocator;
-            }
-
-            public ID3D12CommandAllocator CommandAllocator { get; }
-
-            public ID3D12Resource? CameraUploadBuffer { get; private set; }
-
-            public IntPtr CameraUploadPointer { get; private set; }
-
-            public ID3D12Resource? BgraColorSettingsBuffer { get; private set; }
-
-            public IntPtr BgraColorSettingsPointer { get; private set; }
-
-            public ID3D12Resource? Nv12YUploadBuffer { get; private set; }
-
-            public IntPtr Nv12YUploadPointer { get; private set; }
-
-            public ID3D12Resource? Nv12UvUploadBuffer { get; private set; }
-
-            public IntPtr Nv12UvUploadPointer { get; private set; }
-
-            public ulong FenceValue { get; set; }
-
-            public unsafe void CreateCameraUploadBuffer(ID3D12Device device, ulong uploadBytes)
-            {
-                ReleaseCameraUploadBuffer();
-                CameraUploadBuffer = CreateMappedUploadBuffer(device, uploadBytes, out var mappedPointer);
-                CameraUploadPointer = mappedPointer;
-            }
-
-            public unsafe void CreateBgraColorSettingsBuffer(ID3D12Device device, ulong uploadBytes)
-            {
-                ReleaseBgraColorSettingsBuffer();
-                BgraColorSettingsBuffer = CreateMappedUploadBuffer(device, uploadBytes, out var mappedPointer);
-                BgraColorSettingsPointer = mappedPointer;
-            }
-
-            public unsafe void CreateNv12UploadBuffers(ID3D12Device device, ulong yUploadBytes, ulong uvUploadBytes)
-            {
-                ReleaseNv12UploadBuffers();
-                Nv12YUploadBuffer = CreateMappedUploadBuffer(device, yUploadBytes, out var mappedYPointer);
-                Nv12YUploadPointer = mappedYPointer;
-                Nv12UvUploadBuffer = CreateMappedUploadBuffer(device, uvUploadBytes, out var mappedUvPointer);
-                Nv12UvUploadPointer = mappedUvPointer;
-            }
-
-            public void ReleaseCameraUploadBuffer()
-            {
-                if (CameraUploadBuffer is not null)
-                {
-                    CameraUploadBuffer.Unmap(0, null);
-                    CameraUploadBuffer.Dispose();
-                    CameraUploadBuffer = null;
-                }
-
-                CameraUploadPointer = IntPtr.Zero;
-            }
-
-            public void ReleaseBgraColorSettingsBuffer()
-            {
-                if (BgraColorSettingsBuffer is not null)
-                {
-                    BgraColorSettingsBuffer.Unmap(0, null);
-                    BgraColorSettingsBuffer.Dispose();
-                    BgraColorSettingsBuffer = null;
-                }
-
-                BgraColorSettingsPointer = IntPtr.Zero;
-            }
-
-            public void ReleaseNv12UploadBuffers()
-            {
-                if (Nv12YUploadBuffer is not null)
-                {
-                    Nv12YUploadBuffer.Unmap(0, null);
-                    Nv12YUploadBuffer.Dispose();
-                    Nv12YUploadBuffer = null;
-                }
-
-                if (Nv12UvUploadBuffer is not null)
-                {
-                    Nv12UvUploadBuffer.Unmap(0, null);
-                    Nv12UvUploadBuffer.Dispose();
-                    Nv12UvUploadBuffer = null;
-                }
-
-                Nv12YUploadPointer = IntPtr.Zero;
-                Nv12UvUploadPointer = IntPtr.Zero;
-            }
-
-            public void Dispose()
-            {
-                ReleaseCameraUploadBuffer();
-                ReleaseBgraColorSettingsBuffer();
-                ReleaseNv12UploadBuffers();
-                CommandAllocator.Dispose();
-            }
-
-            private static unsafe ID3D12Resource CreateMappedUploadBuffer(
-                ID3D12Device device,
-                ulong uploadBytes,
-                out IntPtr mappedPointer)
-            {
-                var uploadBuffer = device.CreateCommittedResource<ID3D12Resource>(
-                    new HeapProperties(HeapType.Upload),
-                    HeapFlags.None,
-                    ResourceDescription.Buffer(uploadBytes, ResourceFlags.None, 0),
-                    ResourceStates.GenericRead);
-                void* mapped = null;
-                uploadBuffer.Map(0, null, &mapped).CheckError();
-                mappedPointer = (IntPtr)mapped;
-                return uploadBuffer;
-            }
-        }
-    }
+	private sealed record QueuedCameraFrame(CameraFrame Frame, VideoFrameColorSettings ColorSettings, bool DenoiseEnabled, double DenoiseStrength, long FrameNumber) : IDisposable
+	{
+		public byte[] BgraBytes => Frame.BgraBytes;
+
+		public int Width => Frame.Width;
+
+		public int Height => Frame.Height;
+
+		public int Stride => Frame.Stride;
+
+		public byte[]? Nv12Bytes => Frame.Nv12Bytes;
+
+		public int Nv12Stride => Frame.Nv12Stride;
+
+		public string FrameFormat => Frame.Format;
+
+		public void Dispose()
+		{
+			Frame.Dispose();
+		}
+	}
+
+	private sealed record QueuedTextureFrame(TextureNativeFrameLease Frame, VideoFrameColorSettings ColorSettings, bool DenoiseEnabled, double DenoiseStrength, string? SharedBridgeFailureReason) : IDisposable
+	{
+		public void Dispose()
+		{
+			Frame.Dispose();
+		}
+	}
+
+	private sealed class Direct3D12SwapChainRenderer : IDisposable
+	{
+		private sealed class FrameResource : IDisposable
+		{
+			public ID3D12CommandAllocator CommandAllocator { get; }
+
+			public ID3D12Resource? CameraUploadBuffer { get; private set; }
+
+			public nint CameraUploadPointer { get; private set; }
+
+			public ID3D12Resource? BgraColorSettingsBuffer { get; private set; }
+
+			public nint BgraColorSettingsPointer { get; private set; }
+
+			public ID3D12Resource? Nv12YUploadBuffer { get; private set; }
+
+			public nint Nv12YUploadPointer { get; private set; }
+
+			public ID3D12Resource? Nv12UvUploadBuffer { get; private set; }
+
+			public nint Nv12UvUploadPointer { get; private set; }
+
+			public ulong FenceValue { get; set; }
+
+			public FrameResource(ID3D12CommandAllocator commandAllocator)
+			{
+				CommandAllocator = commandAllocator;
+			}
+
+			public void CreateCameraUploadBuffer(ID3D12Device device, ulong uploadBytes)
+			{
+				ReleaseCameraUploadBuffer();
+				CameraUploadBuffer = CreateMappedUploadBuffer(device, uploadBytes, out var mappedPointer);
+				CameraUploadPointer = mappedPointer;
+			}
+
+			public void CreateBgraColorSettingsBuffer(ID3D12Device device, ulong uploadBytes)
+			{
+				ReleaseBgraColorSettingsBuffer();
+				BgraColorSettingsBuffer = CreateMappedUploadBuffer(device, uploadBytes, out var mappedPointer);
+				BgraColorSettingsPointer = mappedPointer;
+			}
+
+			public void CreateNv12UploadBuffers(ID3D12Device device, ulong yUploadBytes, ulong uvUploadBytes)
+			{
+				ReleaseNv12UploadBuffers();
+				Nv12YUploadBuffer = CreateMappedUploadBuffer(device, yUploadBytes, out var mappedPointer);
+				Nv12YUploadPointer = mappedPointer;
+				Nv12UvUploadBuffer = CreateMappedUploadBuffer(device, uvUploadBytes, out var mappedPointer2);
+				Nv12UvUploadPointer = mappedPointer2;
+			}
+
+			public void ReleaseCameraUploadBuffer()
+			{
+				if ((object)CameraUploadBuffer != null)
+				{
+					CameraUploadBuffer.Unmap(0u);
+					CameraUploadBuffer.Dispose();
+					CameraUploadBuffer = null;
+				}
+				CameraUploadPointer = IntPtr.Zero;
+			}
+
+			public void ReleaseBgraColorSettingsBuffer()
+			{
+				if ((object)BgraColorSettingsBuffer != null)
+				{
+					BgraColorSettingsBuffer.Unmap(0u);
+					BgraColorSettingsBuffer.Dispose();
+					BgraColorSettingsBuffer = null;
+				}
+				BgraColorSettingsPointer = IntPtr.Zero;
+			}
+
+			public void ReleaseNv12UploadBuffers()
+			{
+				if ((object)Nv12YUploadBuffer != null)
+				{
+					Nv12YUploadBuffer.Unmap(0u);
+					Nv12YUploadBuffer.Dispose();
+					Nv12YUploadBuffer = null;
+				}
+				if ((object)Nv12UvUploadBuffer != null)
+				{
+					Nv12UvUploadBuffer.Unmap(0u);
+					Nv12UvUploadBuffer.Dispose();
+					Nv12UvUploadBuffer = null;
+				}
+				Nv12YUploadPointer = IntPtr.Zero;
+				Nv12UvUploadPointer = IntPtr.Zero;
+			}
+
+			public void Dispose()
+			{
+				ReleaseCameraUploadBuffer();
+				ReleaseBgraColorSettingsBuffer();
+				ReleaseNv12UploadBuffers();
+				CommandAllocator.Dispose();
+			}
+
+			private unsafe static ID3D12Resource CreateMappedUploadBuffer(ID3D12Device device, ulong uploadBytes, out nint mappedPointer)
+			{
+				ID3D12Resource iD3D12Resource = device.CreateCommittedResource<ID3D12Resource>(new HeapProperties(HeapType.Upload), HeapFlags.None, ResourceDescription.Buffer(uploadBytes, ResourceFlags.None, 0uL), ResourceStates.GenericRead);
+				void* ptr = null;
+				iD3D12Resource.Map(0u, null, &ptr).CheckError();
+				mappedPointer = (nint)ptr;
+				return iD3D12Resource;
+			}
+		}
+
+		private const int FrameCount = 3;
+
+		private const int D3D12DefaultShader4ComponentMappingValue = 5768;
+
+		private const int BgraColorSettingsDescriptorStart = 3;
+
+		private const int BgraColorSettingsBufferBytes = 256;
+
+		private readonly ID3D12Device _device;
+
+		private readonly ID3D12CommandQueue _commandQueue;
+
+		private readonly IDXGIFactory4 _factory;
+
+		private readonly ID3D12GraphicsCommandList _commandList;
+
+		private readonly ID3D12Fence _fence;
+
+		private readonly AutoResetEvent _fenceEvent = new AutoResetEvent(initialState: false);
+
+		private readonly ID3D12DescriptorHeap _rtvHeap;
+
+		private readonly ID3D12DescriptorHeap _srvHeap;
+
+		private readonly int _rtvDescriptorSize;
+
+		private readonly int _srvDescriptorSize;
+
+		private readonly ID3D12Resource?[] _renderTargets = new ID3D12Resource[3];
+
+		private ID3D12RootSignature? _previewRootSignature;
+
+		private ID3D12PipelineState? _previewPipelineState;
+
+		private ID3D12RootSignature? _nv12PreviewRootSignature;
+
+		private ID3D12PipelineState? _nv12PreviewPipelineState;
+
+		private Direct2DTrackingOverlayRenderer? _trackingOverlayRenderer;
+
+		private readonly FrameResource[] _frameResources = new FrameResource[3];
+
+		private ID3D12Resource? _cameraTexture;
+
+		private PlacedSubresourceFootPrint _cameraTextureFootprint;
+
+		private ResourceStates _cameraTextureState;
+
+		private ID3D12Resource? _nv12YTexture;
+
+		private ID3D12Resource? _nv12UvTexture;
+
+		private PlacedSubresourceFootPrint _nv12YFootprint;
+
+		private PlacedSubresourceFootPrint _nv12UvFootprint;
+
+		private ResourceStates _nv12YTextureState;
+
+		private ResourceStates _nv12UvTextureState;
+
+		private IDXGISwapChain3 _swapChain;
+
+		private ulong _fenceValue;
+
+		private int _cameraTextureWidth;
+
+		private int _cameraTextureHeight;
+
+		private int _nv12TextureWidth;
+
+		private int _nv12TextureHeight;
+
+		private int _viewportWidth;
+
+		private int _viewportHeight;
+
+		private int _presentationRefreshRequested;
+
+		private bool _disposed;
+
+		private bool _shaderPreviewUnavailable;
+
+		private bool _nv12PreviewUnavailable;
+
+		private string? _nv12PreviewFailureReason;
+
+		private bool _nativeTexturePreviewUnavailable;
+
+		private string? _nativeTexturePreviewFailureReason;
+
+		private bool _sharedD3D11BridgePreviewUnavailable;
+
+		private string? _sharedD3D11BridgePreviewFailureReason;
+
+		private readonly bool _usesSharedCaptureDevice;
+
+		private const string PreviewShaderSource = "Texture2D<float4> CameraFrame : register(t0);\r\nSamplerState CameraSampler : register(s0);\r\n\r\ncbuffer ColorSettings : register(b0)\r\n{\r\n    float ExposureOffset;\r\n    float Contrast;\r\n    float Saturation;\r\n    float Warmth;\r\n    float DenoiseAmount;\r\n    float DenoiseEdgeThreshold;\n    float TexelWidth;\n    float TexelHeight;\n};\n\r\nstruct VertexOutput\r\n{\r\n    float4 Position : SV_POSITION;\r\n    float2 TexCoord : TEXCOORD0;\r\n};\r\n\r\nVertexOutput VSMain(uint vertexId : SV_VertexID)\r\n{\r\n    float2 positions[3] =\r\n    {\r\n        float2(-1.0, -1.0),\r\n        float2(-1.0, 3.0),\r\n        float2(3.0, -1.0)\r\n    };\r\n    float2 texCoords[3] =\r\n    {\r\n        float2(0.0, 1.0),\r\n        float2(0.0, -1.0),\r\n        float2(2.0, 1.0)\r\n    };\r\n\r\n    VertexOutput output;\r\n    output.Position = float4(positions[vertexId], 0.0, 1.0);\r\n    output.TexCoord = texCoords[vertexId];\r\n    return output;\r\n}\r\n\r\nfloat3 ApplyColorPolish(float3 rgb)\r\n{\r\n    float3 rgb255 = rgb * 255.0;\r\n    rgb255.r = ((rgb255.r + ExposureOffset + Warmth - 128.0) * Contrast) + 128.0;\r\n    rgb255.g = ((rgb255.g + ExposureOffset - 128.0) * Contrast) + 128.0;\r\n    rgb255.b = ((rgb255.b + ExposureOffset - Warmth - 128.0) * Contrast) + 128.0;\r\n\r\n    float luma = dot(rgb255, float3(0.2126, 0.7152, 0.0722));\r\n    rgb255 = luma + (rgb255 - luma) * Saturation;\r\n    return saturate(rgb255 / 255.0);\r\n}\r\n\r\nfloat Luma(float3 rgb)\r\n{\r\n    return dot(rgb, float3(0.2126, 0.7152, 0.0722));\r\n}\r\n\r\nfloat EdgeAwareWeight(float sampleY, float centerY)\r\n{\r\n    return saturate(1.0 - abs(sampleY - centerY) / max(DenoiseEdgeThreshold, 0.0001));\r\n}\r\n\r\nfloat3 ApplyBgraDenoise(float3 centerRgb, float2 texCoord)\r\n{\r\n    if (DenoiseAmount <= 0.001)\r\n    {\r\n        return centerRgb;\r\n    }\r\n\r\n    float2 xOffset = float2(TexelWidth, 0.0);\r\n    float2 yOffset = float2(0.0, TexelHeight);\r\n    float3 leftRgb = CameraFrame.Sample(CameraSampler, texCoord - xOffset).rgb;\r\n    float3 rightRgb = CameraFrame.Sample(CameraSampler, texCoord + xOffset).rgb;\r\n    float3 upRgb = CameraFrame.Sample(CameraSampler, texCoord - yOffset).rgb;\r\n    float3 downRgb = CameraFrame.Sample(CameraSampler, texCoord + yOffset).rgb;\r\n\r\n    float centerY = Luma(centerRgb);\r\n    float centerWeight = 2.0;\r\n    float leftWeight = EdgeAwareWeight(Luma(leftRgb), centerY);\r\n    float rightWeight = EdgeAwareWeight(Luma(rightRgb), centerY);\r\n    float upWeight = EdgeAwareWeight(Luma(upRgb), centerY);\r\n    float downWeight = EdgeAwareWeight(Luma(downRgb), centerY);\r\n    float totalWeight = centerWeight + leftWeight + rightWeight + upWeight + downWeight;\r\n    float3 smoothedRgb = (\r\n        centerRgb * centerWeight\r\n        + leftRgb * leftWeight\r\n        + rightRgb * rightWeight\r\n        + upRgb * upWeight\r\n        + downRgb * downWeight) / max(totalWeight, 0.0001);\r\n    return lerp(centerRgb, smoothedRgb, DenoiseAmount);\r\n}\r\n\r\nfloat4 PSMain(VertexOutput input) : SV_TARGET\r\n{\r\n    float4 color = CameraFrame.Sample(CameraSampler, input.TexCoord);\r\n    float3 denoised = ApplyBgraDenoise(color.rgb, input.TexCoord);\r\n    return float4(ApplyColorPolish(denoised), 1.0);\r\n}";
+
+		private const string Nv12PreviewShaderSource = "Texture2D<float> CameraLuma : register(t0);\r\nTexture2D<float2> CameraChroma : register(t1);\r\nSamplerState CameraSampler : register(s0);\r\n\r\ncbuffer Nv12PreviewSettings : register(b0)\r\n{\r\n    float ExposureOffset;\r\n    float Contrast;\r\n    float Saturation;\r\n    float Warmth;\r\n    float DenoiseAmount;\r\n    float DenoiseEdgeThreshold;\n    float TexelWidth;\n    float TexelHeight;\n    float SwapChromaChannels;\n};\n\r\nstruct VertexOutput\r\n{\r\n    float4 Position : SV_POSITION;\r\n    float2 TexCoord : TEXCOORD0;\r\n};\r\n\r\nVertexOutput VSMain(uint vertexId : SV_VertexID)\r\n{\r\n    float2 positions[3] =\r\n    {\r\n        float2(-1.0, -1.0),\r\n        float2(-1.0, 3.0),\r\n        float2(3.0, -1.0)\r\n    };\r\n    float2 texCoords[3] =\r\n    {\r\n        float2(0.0, 1.0),\r\n        float2(0.0, -1.0),\r\n        float2(2.0, 1.0)\r\n    };\r\n\r\n    VertexOutput output;\r\n    output.Position = float4(positions[vertexId], 0.0, 1.0);\r\n    output.TexCoord = texCoords[vertexId];\r\n    return output;\r\n}\r\n\r\nfloat NormalizeLuma(float rawY)\r\n{\r\n    return saturate((rawY - (16.0 / 255.0)) * (255.0 / 219.0));\r\n}\r\n\r\nfloat EdgeAwareWeight(float sampleY, float centerY)\r\n{\r\n    return saturate(1.0 - abs(sampleY - centerY) / max(DenoiseEdgeThreshold, 0.0001));\r\n}\r\n\r\nfloat SampleNormalizedLuma(float2 texCoord)\r\n{\r\n    return NormalizeLuma(CameraLuma.Sample(CameraSampler, texCoord));\r\n}\r\n\r\nfloat ApplyLumaDenoise(float centerY, float2 texCoord)\r\n{\r\n    if (DenoiseAmount <= 0.001)\r\n    {\r\n        return centerY;\r\n    }\r\n\r\n    float2 xOffset = float2(TexelWidth, 0.0);\r\n    float2 yOffset = float2(0.0, TexelHeight);\r\n    float leftY = SampleNormalizedLuma(texCoord - xOffset);\r\n    float rightY = SampleNormalizedLuma(texCoord + xOffset);\r\n    float upY = SampleNormalizedLuma(texCoord - yOffset);\r\n    float downY = SampleNormalizedLuma(texCoord + yOffset);\r\n\r\n    float centerWeight = 2.0;\r\n    float leftWeight = EdgeAwareWeight(leftY, centerY);\r\n    float rightWeight = EdgeAwareWeight(rightY, centerY);\r\n    float upWeight = EdgeAwareWeight(upY, centerY);\r\n    float downWeight = EdgeAwareWeight(downY, centerY);\r\n    float totalWeight = centerWeight + leftWeight + rightWeight + upWeight + downWeight;\r\n    float smoothedY = (\r\n        centerY * centerWeight\r\n        + leftY * leftWeight\r\n        + rightY * rightWeight\r\n        + upY * upWeight\r\n        + downY * downWeight) / max(totalWeight, 0.0001);\r\n    return lerp(centerY, smoothedY, DenoiseAmount);\r\n}\r\n\r\nfloat3 ApplyColorPolish(float3 rgb)\r\n{\r\n    float3 rgb255 = rgb * 255.0;\r\n    rgb255.r = ((rgb255.r + ExposureOffset + Warmth - 128.0) * Contrast) + 128.0;\r\n    rgb255.g = ((rgb255.g + ExposureOffset - 128.0) * Contrast) + 128.0;\r\n    rgb255.b = ((rgb255.b + ExposureOffset - Warmth - 128.0) * Contrast) + 128.0;\r\n\r\n    float luma = dot(rgb255, float3(0.2126, 0.7152, 0.0722));\r\n    rgb255 = luma + (rgb255 - luma) * Saturation;\r\n    return saturate(rgb255 / 255.0);\r\n}\r\n\r\nfloat4 PSMain(VertexOutput input) : SV_TARGET\r\n{\r\n    float y = NormalizeLuma(CameraLuma.Sample(CameraSampler, input.TexCoord));\n    y = ApplyLumaDenoise(y, input.TexCoord);\n    float2 uv = CameraChroma.Sample(CameraSampler, input.TexCoord) - float2(0.5, 0.5);\n    uv = SwapChromaChannels > 0.5 ? uv.yx : uv;\n    float3 rgb = float3(\n        y + 1.5748 * uv.y,\r\n        y - 0.1873 * uv.x - 0.4681 * uv.y,\r\n        y + 1.8556 * uv.x);\r\n    return float4(ApplyColorPolish(saturate(rgb)), 1.0);\r\n}";
+
+		public string DeviceDescription
+		{
+			get
+			{
+				if (!_usesSharedCaptureDevice)
+				{
+					return "Direct3D 12 / DXGI flip model";
+				}
+				return "Direct3D 12 / DXGI flip model on shared capture device";
+			}
+		}
+
+		public string LastNv12PreviewFailureReason => _nv12PreviewFailureReason ?? "no NV12 failure detail";
+
+		public Direct3D12SwapChainRenderer(nint hwnd, int width, int height, nint nativeD3D12Device = 0)
+		{
+			_viewportWidth = width;
+			_viewportHeight = height;
+			if (nativeD3D12Device != IntPtr.Zero)
+			{
+				_device = new ID3D12Device(nativeD3D12Device);
+				_usesSharedCaptureDevice = true;
+			}
+			else
+			{
+				_device = D3D12.D3D12CreateDevice<ID3D12Device>(null, FeatureLevel.Level_12_0);
+			}
+			_commandQueue = _device.CreateCommandQueue<ID3D12CommandQueue>(new CommandQueueDescription(CommandListType.Direct));
+			_factory = DXGI.CreateDXGIFactory2<IDXGIFactory4>(debug: false);
+			SwapChainDescription1 desc = new SwapChainDescription1
+			{
+				Width = (uint)width,
+				Height = (uint)height,
+				Format = Format.B8G8R8A8_UNorm,
+				Stereo = false,
+				SampleDescription = new SampleDescription(1u, 0u),
+				BufferUsage = Usage.RenderTargetOutput,
+				BufferCount = 3u,
+				Scaling = Scaling.Stretch,
+				SwapEffect = SwapEffect.FlipDiscard,
+				AlphaMode = AlphaMode.Ignore,
+				Flags = SwapChainFlags.None
+			};
+			using IDXGISwapChain1 iDXGISwapChain = _factory.CreateSwapChainForHwnd(_commandQueue, hwnd, desc);
+			_swapChain = iDXGISwapChain.QueryInterface<IDXGISwapChain3>();
+			_factory.MakeWindowAssociation(hwnd, WindowAssociationFlags.IgnoreAltEnter);
+			_rtvHeap = _device.CreateDescriptorHeap<ID3D12DescriptorHeap>(new DescriptorHeapDescription(DescriptorHeapType.RenderTargetView, 3u));
+			_srvHeap = _device.CreateDescriptorHeap<ID3D12DescriptorHeap>(new DescriptorHeapDescription(DescriptorHeapType.ConstantBufferViewShaderResourceViewUnorderedAccessView, 6u, DescriptorHeapFlags.ShaderVisible));
+			_rtvDescriptorSize = (int)_device.GetDescriptorHandleIncrementSize(DescriptorHeapType.RenderTargetView);
+			_srvDescriptorSize = (int)_device.GetDescriptorHandleIncrementSize(DescriptorHeapType.ConstantBufferViewShaderResourceViewUnorderedAccessView);
+			CreateRenderTargetViews();
+			TryCreatePreviewShaderPipeline();
+			TryCreateNv12PreviewShaderPipeline();
+			_trackingOverlayRenderer = Direct2DTrackingOverlayRenderer.TryCreate(_device, _commandQueue, 3);
+			TryAttachTrackingOverlayRenderer();
+			for (int i = 0; i < 3; i++)
+			{
+				_frameResources[i] = new FrameResource(_device.CreateCommandAllocator<ID3D12CommandAllocator>(CommandListType.Direct));
+				_frameResources[i].CreateBgraColorSettingsBuffer(_device, 256uL);
+				_device.CreateConstantBufferView(new ConstantBufferViewDescription
+				{
+					BufferLocation = _frameResources[i].BgraColorSettingsBuffer.GPUVirtualAddress,
+					SizeInBytes = 256u
+				}, GetSrvCpuHandle(3 + i));
+			}
+			_commandList = _device.CreateCommandList<ID3D12GraphicsCommandList>(0u, CommandListType.Direct, _frameResources[0].CommandAllocator);
+			_commandList.Close();
+			_fence = _device.CreateFence<ID3D12Fence>(0uL);
+		}
+
+		public void RenderProofFrame(long frameNumber)
+		{
+			if (!_disposed)
+			{
+				int frameIndex;
+				FrameResource frameResource = BeginFrame(out frameIndex);
+				ID3D12Resource? resource = _renderTargets[frameIndex] ?? throw new InvalidOperationException("DX12 render target is not ready.");
+				ResourceBarrier resourceBarrier = ResourceBarrier.BarrierTransition(resource, ResourceStates.Common, ResourceStates.RenderTarget);
+				ID3D12GraphicsCommandList commandList = _commandList;
+				ResourceBarrier reference = resourceBarrier;
+				commandList.ResourceBarrier(new Span<ResourceBarrier>(ref reference));
+				CpuDescriptorHandle rtvHandle = GetRtvHandle(frameIndex);
+				float num = (float)((double)(frameNumber % 120) / 120.0);
+				_commandList.OMSetRenderTargets(rtvHandle);
+				_commandList.ClearRenderTargetView(rtvHandle, new Color4(0.02f + num * 0.08f, 0.08f, 0.12f + num * 0.18f), 0u, null);
+				ResourceBarrier resourceBarrier2 = ResourceBarrier.BarrierTransition(resource, ResourceStates.RenderTarget, ResourceStates.Common);
+				ID3D12GraphicsCommandList commandList2 = _commandList;
+				ResourceBarrier reference2 = resourceBarrier2;
+				commandList2.ResourceBarrier(new Span<ResourceBarrier>(ref reference2));
+				ExecuteAndPresent(frameResource);
+			}
+		}
+
+		public void RenderBgraFrame(byte[] bgraBytes, int width, int height, int stride, long frameNumber, VideoFrameColorSettings colorSettings = default(VideoFrameColorSettings), bool denoiseEnabled = false, double denoiseStrength = 0.0, PreviewTrackingOverlay? trackingOverlay = null)
+		{
+			if (!_disposed && bgraBytes.Length >= stride * height)
+			{
+				PreviewTrackingOverlay trackingOverlay2 = trackingOverlay ?? PreviewTrackingOverlay.Empty;
+				if (!TryRenderBgraFrameWithShader(bgraBytes, width, height, stride, colorSettings, denoiseEnabled, denoiseStrength, trackingOverlay2))
+				{
+					RenderBgraFrameToBackBuffer(bgraBytes, width, height, stride, trackingOverlay2);
+				}
+			}
+		}
+
+		public bool RenderNv12Frame(byte[] nv12Bytes, int width, int height, int stride, long frameNumber, VideoFrameColorSettings colorSettings, bool denoiseEnabled, double denoiseStrength, PreviewTrackingOverlay trackingOverlay, bool swapChromaChannels = false)
+		{
+			int num = (height + 1) / 2;
+			if (_disposed || stride < width || nv12Bytes.Length < stride * height + stride * num)
+			{
+				_nv12PreviewFailureReason = (_disposed ? "renderer disposed" : $"invalid NV12 payload: stride {stride}, width {width}, bytes {nv12Bytes.Length}, expected {stride * height + stride * num}");
+				return false;
+			}
+			bool num2 = TryRenderNv12FrameWithShader(nv12Bytes, width, height, stride, colorSettings, denoiseEnabled, denoiseStrength, trackingOverlay, swapChromaChannels);
+			if (num2)
+			{
+				_nv12PreviewFailureReason = null;
+			}
+			return num2;
+		}
+
+		public bool RenderNativeTextureFrame(TextureNativeFrameLease frame, VideoFrameColorSettings colorSettings, bool denoiseEnabled, double denoiseStrength, PreviewTrackingOverlay trackingOverlay, out string? failureReason)
+		{
+			failureReason = null;
+			if (_disposed)
+			{
+				failureReason = "renderer disposed";
+				return false;
+			}
+			if (!_usesSharedCaptureDevice)
+			{
+				failureReason = "presenter is not using the capture D3D12 device";
+				return false;
+			}
+			if (_nativeTexturePreviewUnavailable)
+			{
+				failureReason = _nativeTexturePreviewFailureReason ?? "direct texture rendering disabled after an earlier failure";
+				return false;
+			}
+			if ((object)_nv12PreviewRootSignature == null || (object)_nv12PreviewPipelineState == null)
+			{
+				failureReason = "NV12 shader pipeline unavailable";
+				return false;
+			}
+			if (frame.Resource == IntPtr.Zero)
+			{
+				failureReason = "frame texture resource is missing";
+				return false;
+			}
+			if (!frame.MediaSubtype.Contains("NV12", StringComparison.OrdinalIgnoreCase))
+			{
+				failureReason = "media subtype " + frame.MediaSubtype + " is not NV12";
+				return false;
+			}
+			try
+			{
+				Marshal.AddRef(frame.Resource);
+				using ID3D12Resource cameraResource = new ID3D12Resource(frame.Resource);
+				RenderNativeNv12Resource(cameraResource, frame.Width, frame.Height, colorSettings, denoiseEnabled, denoiseStrength, trackingOverlay);
+				_nativeTexturePreviewFailureReason = null;
+				return true;
+			}
+			catch (Exception ex)
+			{
+				_nativeTexturePreviewUnavailable = true;
+				_nativeTexturePreviewFailureReason = ex.Message;
+				failureReason = ex.Message;
+				return false;
+			}
+		}
+
+		public bool RenderSharedD3D11BridgeFrame(TextureNativeFrameLease frame, VideoFrameColorSettings colorSettings, bool denoiseEnabled, double denoiseStrength, PreviewTrackingOverlay trackingOverlay, out string? failureReason)
+		{
+			failureReason = null;
+			if (_disposed)
+			{
+				failureReason = "renderer disposed";
+				return false;
+			}
+			if (_sharedD3D11BridgePreviewUnavailable)
+			{
+				failureReason = _sharedD3D11BridgePreviewFailureReason ?? "D3D11 bridge texture rendering disabled after an earlier failure";
+				return false;
+			}
+			if ((object)_nv12PreviewRootSignature == null || (object)_nv12PreviewPipelineState == null)
+			{
+				failureReason = "NV12 shader pipeline unavailable";
+				return false;
+			}
+			if (frame.D3D12SharedTextureHandle == IntPtr.Zero)
+			{
+				failureReason = "D3D11 bridge shared texture handle is missing";
+				return false;
+			}
+			if (!frame.MediaSubtype.Contains("NV12", StringComparison.OrdinalIgnoreCase))
+			{
+				failureReason = "media subtype " + frame.MediaSubtype + " is not NV12";
+				return false;
+			}
+			try
+			{
+				using ID3D12Resource cameraResource = _device.OpenSharedHandle<ID3D12Resource>(frame.D3D12SharedTextureHandle);
+				RenderNativeNv12Resource(cameraResource, frame.Width, frame.Height, colorSettings, denoiseEnabled, denoiseStrength, trackingOverlay);
+				WaitForGpu();
+				_sharedD3D11BridgePreviewFailureReason = null;
+				return true;
+			}
+			catch (Exception ex)
+			{
+				_sharedD3D11BridgePreviewUnavailable = true;
+				_sharedD3D11BridgePreviewFailureReason = ex.Message;
+				failureReason = ex.Message;
+				return false;
+			}
+		}
+
+		private void RenderNativeNv12Resource(ID3D12Resource cameraResource, int width, int height, VideoFrameColorSettings colorSettings, bool denoiseEnabled, double denoiseStrength, PreviewTrackingOverlay trackingOverlay)
+		{
+			ShaderResourceViewDescription value = new ShaderResourceViewDescription
+			{
+				Format = Format.R8_UNorm,
+				ViewDimension = Vortice.Direct3D12.ShaderResourceViewDimension.Texture2D,
+				Shader4ComponentMapping = 5768u,
+				Texture2D = new Texture2DShaderResourceView
+				{
+					MipLevels = 1u,
+					PlaneSlice = 0u
+				}
+			};
+			ShaderResourceViewDescription value2 = new ShaderResourceViewDescription
+			{
+				Format = Format.R8G8_UNorm,
+				ViewDimension = Vortice.Direct3D12.ShaderResourceViewDimension.Texture2D,
+				Shader4ComponentMapping = 5768u,
+				Texture2D = new Texture2DShaderResourceView
+				{
+					MipLevels = 1u,
+					PlaneSlice = 1u
+				}
+			};
+			_device.CreateShaderResourceView(cameraResource, value, GetSrvCpuHandle(1));
+			_device.CreateShaderResourceView(cameraResource, value2, GetSrvCpuHandle(2));
+			int frameIndex;
+			FrameResource frameResource = BeginFrame(out frameIndex);
+			ID3D12Resource resource = _renderTargets[frameIndex] ?? throw new InvalidOperationException("DX12 render target is not ready.");
+			ResourceBarrier resourceBarrier = ResourceBarrier.BarrierTransition(cameraResource, ResourceStates.Common, ResourceStates.PixelShaderResource);
+			ResourceBarrier resourceBarrier2 = ResourceBarrier.BarrierTransition(resource, ResourceStates.Common, ResourceStates.RenderTarget);
+			ID3D12GraphicsCommandList commandList = _commandList;
+			InlineArray2<ResourceBarrier> buffer = default(InlineArray2<ResourceBarrier>);
+			buffer[0] = resourceBarrier;
+			buffer[1] = resourceBarrier2;
+			commandList.ResourceBarrier(buffer);
+			CpuDescriptorHandle rtvHandle = GetRtvHandle(frameIndex);
+			_commandList.SetGraphicsRootSignature(_nv12PreviewRootSignature);
+			_commandList.SetPipelineState(_nv12PreviewPipelineState);
+			_commandList.SetDescriptorHeaps(new ReadOnlySpan<ID3D12DescriptorHeap>(_srvHeap));
+			_commandList.SetGraphicsRootDescriptorTable(0u, GetSrvGpuHandle(1));
+			SetNv12ShaderConstants(width, height, colorSettings, denoiseEnabled, denoiseStrength);
+			Viewport viewport = new Viewport(0f, 0f, _viewportWidth, _viewportHeight);
+			RawRect rawRect = new RawRect(0, 0, _viewportWidth, _viewportHeight);
+			_commandList.RSSetViewports(viewport);
+			_commandList.RSSetScissorRects(rawRect);
+			_commandList.OMSetRenderTargets(rtvHandle);
+			_commandList.IASetPrimitiveTopology(PrimitiveTopology.TriangleList);
+			_commandList.DrawInstanced(3u, 1u, 0u, 0u);
+			bool flag = _trackingOverlayRenderer?.PrepareDraw(frameIndex, trackingOverlay, _viewportWidth, _viewportHeight) ?? false;
+			ResourceBarrier resourceBarrier3 = ResourceBarrier.BarrierTransition(resource, ResourceStates.RenderTarget, ResourceStates.Common);
+			ResourceBarrier resourceBarrier4 = ResourceBarrier.BarrierTransition(cameraResource, ResourceStates.PixelShaderResource, ResourceStates.Common);
+			_commandList.ResourceBarrier((!flag) ? new ResourceBarrier[2] { resourceBarrier3, resourceBarrier4 } : new ResourceBarrier[1] { resourceBarrier4 });
+			ExecuteAndPresent(frameResource, frameIndex, trackingOverlay, flag);
+		}
+
+		private bool TryRenderNv12FrameWithShader(byte[] nv12Bytes, int width, int height, int stride, VideoFrameColorSettings colorSettings, bool denoiseEnabled, double denoiseStrength, PreviewTrackingOverlay trackingOverlay, bool swapChromaChannels)
+		{
+			if (_nv12PreviewUnavailable || (object)_nv12PreviewRootSignature == null || (object)_nv12PreviewPipelineState == null)
+			{
+				_nv12PreviewFailureReason = (_nv12PreviewUnavailable ? (_nv12PreviewFailureReason ?? "NV12 preview disabled after earlier failure") : "NV12 shader pipeline unavailable");
+				return false;
+			}
+			try
+			{
+				EnsureNv12Textures(width, height);
+				ID3D12Resource nv12YTexture = _nv12YTexture;
+				ID3D12Resource nv12UvTexture = _nv12UvTexture;
+				int frameIndex;
+				FrameResource frameResource = BeginFrame(out frameIndex);
+				ID3D12Resource nv12YUploadBuffer = frameResource.Nv12YUploadBuffer;
+				ID3D12Resource nv12UvUploadBuffer = frameResource.Nv12UvUploadBuffer;
+				if ((object)nv12YTexture == null || (object)nv12UvTexture == null || (object)nv12YUploadBuffer == null || (object)nv12UvUploadBuffer == null)
+				{
+					return false;
+				}
+				CopyNv12FrameToUploadBuffers(frameResource, nv12Bytes, width, height, stride);
+				ID3D12Resource resource = _renderTargets[frameIndex] ?? throw new InvalidOperationException("DX12 render target is not ready.");
+				if (_nv12YTextureState != ResourceStates.CopyDest)
+				{
+					ResourceBarrier resourceBarrier = ResourceBarrier.BarrierTransition(nv12YTexture, _nv12YTextureState, ResourceStates.CopyDest);
+					ID3D12GraphicsCommandList commandList = _commandList;
+					ResourceBarrier reference = resourceBarrier;
+					commandList.ResourceBarrier(new Span<ResourceBarrier>(ref reference));
+					_nv12YTextureState = ResourceStates.CopyDest;
+				}
+				if (_nv12UvTextureState != ResourceStates.CopyDest)
+				{
+					ResourceBarrier resourceBarrier2 = ResourceBarrier.BarrierTransition(nv12UvTexture, _nv12UvTextureState, ResourceStates.CopyDest);
+					ID3D12GraphicsCommandList commandList2 = _commandList;
+					ResourceBarrier reference2 = resourceBarrier2;
+					commandList2.ResourceBarrier(new Span<ResourceBarrier>(ref reference2));
+					_nv12UvTextureState = ResourceStates.CopyDest;
+				}
+				_commandList.CopyTextureRegion(new TextureCopyLocation(nv12YTexture), 0u, 0u, 0u, new TextureCopyLocation(nv12YUploadBuffer, _nv12YFootprint));
+				_commandList.CopyTextureRegion(new TextureCopyLocation(nv12UvTexture), 0u, 0u, 0u, new TextureCopyLocation(nv12UvUploadBuffer, _nv12UvFootprint));
+				ResourceBarrier resourceBarrier3 = ResourceBarrier.BarrierTransition(nv12YTexture, ResourceStates.CopyDest, ResourceStates.PixelShaderResource);
+				ResourceBarrier resourceBarrier4 = ResourceBarrier.BarrierTransition(nv12UvTexture, ResourceStates.CopyDest, ResourceStates.PixelShaderResource);
+				ID3D12GraphicsCommandList commandList3 = _commandList;
+				InlineArray2<ResourceBarrier> buffer = default(InlineArray2<ResourceBarrier>);
+				buffer[0] = resourceBarrier3;
+				buffer[1] = resourceBarrier4;
+				commandList3.ResourceBarrier(buffer);
+				_nv12YTextureState = ResourceStates.PixelShaderResource;
+				_nv12UvTextureState = ResourceStates.PixelShaderResource;
+				ResourceBarrier resourceBarrier5 = ResourceBarrier.BarrierTransition(resource, ResourceStates.Common, ResourceStates.RenderTarget);
+				ID3D12GraphicsCommandList commandList4 = _commandList;
+				ResourceBarrier reference3 = resourceBarrier5;
+				commandList4.ResourceBarrier(new Span<ResourceBarrier>(ref reference3));
+				CpuDescriptorHandle rtvHandle = GetRtvHandle(frameIndex);
+				_commandList.SetGraphicsRootSignature(_nv12PreviewRootSignature);
+				_commandList.SetPipelineState(_nv12PreviewPipelineState);
+				_commandList.SetDescriptorHeaps(new ReadOnlySpan<ID3D12DescriptorHeap>(_srvHeap));
+				_commandList.SetGraphicsRootDescriptorTable(0u, GetSrvGpuHandle(1));
+				SetNv12ShaderConstants(width, height, colorSettings, denoiseEnabled, denoiseStrength, swapChromaChannels);
+				Viewport viewport = new Viewport(0f, 0f, _viewportWidth, _viewportHeight);
+				RawRect rawRect = new RawRect(0, 0, _viewportWidth, _viewportHeight);
+				_commandList.RSSetViewports(viewport);
+				_commandList.RSSetScissorRects(rawRect);
+				_commandList.OMSetRenderTargets(rtvHandle);
+				_commandList.IASetPrimitiveTopology(PrimitiveTopology.TriangleList);
+				_commandList.DrawInstanced(3u, 1u, 0u, 0u);
+				bool flag = _trackingOverlayRenderer?.PrepareDraw(frameIndex, trackingOverlay, _viewportWidth, _viewportHeight) ?? false;
+				ResourceBarrier resourceBarrier6 = ResourceBarrier.BarrierTransition(resource, ResourceStates.RenderTarget, ResourceStates.Common);
+				if (!flag)
+				{
+					ID3D12GraphicsCommandList commandList5 = _commandList;
+					ResourceBarrier reference4 = resourceBarrier6;
+					commandList5.ResourceBarrier(new Span<ResourceBarrier>(ref reference4));
+				}
+				ExecuteAndPresent(frameResource, frameIndex, trackingOverlay, flag);
+				return true;
+			}
+			catch (Exception ex)
+			{
+				_nv12PreviewUnavailable = true;
+				_nv12PreviewFailureReason = ex.Message;
+				return false;
+			}
+		}
+
+		private bool TryRenderBgraFrameWithShader(byte[] bgraBytes, int width, int height, int stride, VideoFrameColorSettings colorSettings, bool denoiseEnabled, double denoiseStrength, PreviewTrackingOverlay trackingOverlay)
+		{
+			if (_shaderPreviewUnavailable || (object)_previewRootSignature == null || (object)_previewPipelineState == null)
+			{
+				return false;
+			}
+			try
+			{
+				EnsureCameraTexture(width, height);
+				ID3D12Resource cameraTexture = _cameraTexture;
+				int frameIndex;
+				FrameResource frameResource = BeginFrame(out frameIndex);
+				ID3D12Resource cameraUploadBuffer = frameResource.CameraUploadBuffer;
+				if ((object)cameraTexture == null || (object)cameraUploadBuffer == null)
+				{
+					return false;
+				}
+				CopyBgraFrameToUploadBuffer(frameResource, bgraBytes, width, height, stride);
+				WriteBgraColorSettings(frameResource, colorSettings, denoiseEnabled, denoiseStrength, width, height);
+				ID3D12Resource resource = _renderTargets[frameIndex] ?? throw new InvalidOperationException("DX12 render target is not ready.");
+				if (_cameraTextureState != ResourceStates.CopyDest)
+				{
+					ResourceBarrier resourceBarrier = ResourceBarrier.BarrierTransition(cameraTexture, _cameraTextureState, ResourceStates.CopyDest);
+					ID3D12GraphicsCommandList commandList = _commandList;
+					ResourceBarrier reference = resourceBarrier;
+					commandList.ResourceBarrier(new Span<ResourceBarrier>(ref reference));
+					_cameraTextureState = ResourceStates.CopyDest;
+				}
+				_commandList.CopyTextureRegion(new TextureCopyLocation(cameraTexture), 0u, 0u, 0u, new TextureCopyLocation(cameraUploadBuffer, _cameraTextureFootprint));
+				ResourceBarrier resourceBarrier2 = ResourceBarrier.BarrierTransition(cameraTexture, ResourceStates.CopyDest, ResourceStates.PixelShaderResource);
+				ID3D12GraphicsCommandList commandList2 = _commandList;
+				ResourceBarrier reference2 = resourceBarrier2;
+				commandList2.ResourceBarrier(new Span<ResourceBarrier>(ref reference2));
+				_cameraTextureState = ResourceStates.PixelShaderResource;
+				ResourceBarrier resourceBarrier3 = ResourceBarrier.BarrierTransition(resource, ResourceStates.Common, ResourceStates.RenderTarget);
+				ID3D12GraphicsCommandList commandList3 = _commandList;
+				ResourceBarrier reference3 = resourceBarrier3;
+				commandList3.ResourceBarrier(new Span<ResourceBarrier>(ref reference3));
+				CpuDescriptorHandle rtvHandle = GetRtvHandle(frameIndex);
+				_commandList.SetGraphicsRootSignature(_previewRootSignature);
+				_commandList.SetPipelineState(_previewPipelineState);
+				_commandList.SetDescriptorHeaps(new ReadOnlySpan<ID3D12DescriptorHeap>(_srvHeap));
+				_commandList.SetGraphicsRootDescriptorTable(0u, _srvHeap.GetGPUDescriptorHandleForHeapStart());
+				_commandList.SetGraphicsRootDescriptorTable(1u, GetSrvGpuHandle(3 + frameIndex));
+				Viewport viewport = new Viewport(0f, 0f, _viewportWidth, _viewportHeight);
+				RawRect rawRect = new RawRect(0, 0, _viewportWidth, _viewportHeight);
+				_commandList.RSSetViewports(viewport);
+				_commandList.RSSetScissorRects(rawRect);
+				_commandList.OMSetRenderTargets(rtvHandle);
+				_commandList.IASetPrimitiveTopology(PrimitiveTopology.TriangleList);
+				_commandList.DrawInstanced(3u, 1u, 0u, 0u);
+				bool flag = _trackingOverlayRenderer?.PrepareDraw(frameIndex, trackingOverlay, _viewportWidth, _viewportHeight) ?? false;
+				ResourceBarrier resourceBarrier4 = ResourceBarrier.BarrierTransition(resource, ResourceStates.RenderTarget, ResourceStates.Common);
+				if (!flag)
+				{
+					ID3D12GraphicsCommandList commandList4 = _commandList;
+					ResourceBarrier reference4 = resourceBarrier4;
+					commandList4.ResourceBarrier(new Span<ResourceBarrier>(ref reference4));
+				}
+				ExecuteAndPresent(frameResource, frameIndex, trackingOverlay, flag);
+				return true;
+			}
+			catch
+			{
+				_shaderPreviewUnavailable = true;
+				return false;
+			}
+		}
+
+		private unsafe void RenderBgraFrameToBackBuffer(byte[] bgraBytes, int width, int height, int stride, PreviewTrackingOverlay trackingOverlay)
+		{
+			if (width == _viewportWidth && height == _viewportHeight)
+			{
+				int frameIndex;
+				FrameResource frameResource = BeginFrame(out frameIndex);
+				ID3D12Resource iD3D12Resource = _renderTargets[frameIndex] ?? throw new InvalidOperationException("DX12 render target is not ready.");
+				ResourceBarrier resourceBarrier = ResourceBarrier.BarrierTransition(iD3D12Resource, ResourceStates.Common, ResourceStates.Common);
+				ID3D12GraphicsCommandList commandList = _commandList;
+				ResourceBarrier reference = resourceBarrier;
+				commandList.ResourceBarrier(new Span<ResourceBarrier>(ref reference));
+				_commandList.Close();
+				_commandQueue.ExecuteCommandList(_commandList);
+				WaitForGpu();
+				fixed (byte* srcData = bgraBytes)
+				{
+					iD3D12Resource.WriteToSubresource(0u, null, (nint)srcData, (uint)stride, (uint)(stride * height));
+				}
+				frameResource.CommandAllocator.Reset();
+				_commandList.Reset(frameResource.CommandAllocator);
+				ResourceBarrier resourceBarrier2 = ResourceBarrier.BarrierTransition(iD3D12Resource, ResourceStates.Common, ResourceStates.RenderTarget);
+				ID3D12GraphicsCommandList commandList2 = _commandList;
+				ResourceBarrier reference2 = resourceBarrier2;
+				commandList2.ResourceBarrier(new Span<ResourceBarrier>(ref reference2));
+				CpuDescriptorHandle rtvHandle = GetRtvHandle(frameIndex);
+				Viewport viewport = new Viewport(0f, 0f, _viewportWidth, _viewportHeight);
+				RawRect rawRect = new RawRect(0, 0, _viewportWidth, _viewportHeight);
+				_commandList.RSSetViewports(viewport);
+				_commandList.RSSetScissorRects(rawRect);
+				_commandList.OMSetRenderTargets(rtvHandle);
+				bool flag = _trackingOverlayRenderer?.PrepareDraw(frameIndex, trackingOverlay, _viewportWidth, _viewportHeight) ?? false;
+				ResourceBarrier resourceBarrier3 = ResourceBarrier.BarrierTransition(iD3D12Resource, ResourceStates.RenderTarget, ResourceStates.Common);
+				if (!flag)
+				{
+					ID3D12GraphicsCommandList commandList3 = _commandList;
+					ResourceBarrier reference3 = resourceBarrier3;
+					commandList3.ResourceBarrier(new Span<ResourceBarrier>(ref reference3));
+				}
+				ExecuteAndPresent(frameResource, frameIndex, trackingOverlay, flag);
+			}
+		}
+
+		private void EnsureCameraTexture(int width, int height)
+		{
+			if ((object)_cameraTexture == null || !CameraUploadBuffersReady() || _cameraTextureWidth != width || _cameraTextureHeight != height)
+			{
+				WaitForGpu();
+				_cameraTexture?.Dispose();
+				ReleaseCameraUploadBuffers();
+				_cameraTexture = null;
+				_cameraTextureWidth = width;
+				_cameraTextureHeight = height;
+				ResourceDescription resourceDescription = new ResourceDescription(ResourceDimension.Texture2D, 0uL, (ulong)width, (uint)height, 1, 1, Format.B8G8R8A8_UNorm, 1u, 0u, TextureLayout.Unknown, ResourceFlags.None);
+				_cameraTexture = _device.CreateCommittedResource<ID3D12Resource>(new HeapProperties(HeapType.Default), HeapFlags.None, resourceDescription, ResourceStates.CopyDest);
+				_cameraTextureState = ResourceStates.CopyDest;
+				PlacedSubresourceFootPrint[] array = new PlacedSubresourceFootPrint[1];
+				uint[] numRows = new uint[1];
+				ulong[] rowSizeInBytes = new ulong[1];
+				_device.GetCopyableFootprints(resourceDescription, 0u, 1u, 0uL, array, numRows, rowSizeInBytes, out var totalBytes);
+				_cameraTextureFootprint = array[0];
+				FrameResource[] frameResources = _frameResources;
+				for (int i = 0; i < frameResources.Length; i++)
+				{
+					frameResources[i].CreateCameraUploadBuffer(_device, totalBytes);
+				}
+				ShaderResourceViewDescription value = new ShaderResourceViewDescription
+				{
+					Format = Format.B8G8R8A8_UNorm,
+					ViewDimension = Vortice.Direct3D12.ShaderResourceViewDimension.Texture2D,
+					Shader4ComponentMapping = 5768u,
+					Texture2D = new Texture2DShaderResourceView
+					{
+						MipLevels = 1u
+					}
+				};
+				_device.CreateShaderResourceView(_cameraTexture, value, _srvHeap.GetCPUDescriptorHandleForHeapStart());
+			}
+		}
+
+		private void EnsureNv12Textures(int width, int height)
+		{
+			if ((object)_nv12YTexture == null || (object)_nv12UvTexture == null || !Nv12UploadBuffersReady() || _nv12TextureWidth != width || _nv12TextureHeight != height)
+			{
+				WaitForGpu();
+				_nv12YTexture?.Dispose();
+				_nv12UvTexture?.Dispose();
+				ReleaseNv12UploadBuffers();
+				_nv12YTexture = null;
+				_nv12UvTexture = null;
+				_nv12TextureWidth = width;
+				_nv12TextureHeight = height;
+				ResourceDescription description = new ResourceDescription(ResourceDimension.Texture2D, 0uL, (ulong)width, (uint)height, 1, 1, Format.R8_UNorm, 1u, 0u, TextureLayout.Unknown, ResourceFlags.None);
+				ResourceDescription description2 = new ResourceDescription(ResourceDimension.Texture2D, 0uL, (ulong)Math.Max(1, width / 2), (uint)Math.Max(1, height / 2), 1, 1, Format.R8G8_UNorm, 1u, 0u, TextureLayout.Unknown, ResourceFlags.None);
+				_nv12YTexture = _device.CreateCommittedResource<ID3D12Resource>(new HeapProperties(HeapType.Default), HeapFlags.None, description, ResourceStates.CopyDest);
+				_nv12UvTexture = _device.CreateCommittedResource<ID3D12Resource>(new HeapProperties(HeapType.Default), HeapFlags.None, description2, ResourceStates.CopyDest);
+				_nv12YTextureState = ResourceStates.CopyDest;
+				_nv12UvTextureState = ResourceStates.CopyDest;
+				_nv12YFootprint = GetTextureFootprint(description, out var uploadBytes);
+				_nv12UvFootprint = GetTextureFootprint(description2, out var uploadBytes2);
+				FrameResource[] frameResources = _frameResources;
+				for (int i = 0; i < frameResources.Length; i++)
+				{
+					frameResources[i].CreateNv12UploadBuffers(_device, uploadBytes, uploadBytes2);
+				}
+				ShaderResourceViewDescription value = new ShaderResourceViewDescription
+				{
+					Format = Format.R8_UNorm,
+					ViewDimension = Vortice.Direct3D12.ShaderResourceViewDimension.Texture2D,
+					Shader4ComponentMapping = 5768u,
+					Texture2D = new Texture2DShaderResourceView
+					{
+						MipLevels = 1u
+					}
+				};
+				ShaderResourceViewDescription value2 = new ShaderResourceViewDescription
+				{
+					Format = Format.R8G8_UNorm,
+					ViewDimension = Vortice.Direct3D12.ShaderResourceViewDimension.Texture2D,
+					Shader4ComponentMapping = 5768u,
+					Texture2D = new Texture2DShaderResourceView
+					{
+						MipLevels = 1u
+					}
+				};
+				_device.CreateShaderResourceView(_nv12YTexture, value, GetSrvCpuHandle(1));
+				_device.CreateShaderResourceView(_nv12UvTexture, value2, GetSrvCpuHandle(2));
+			}
+		}
+
+		private PlacedSubresourceFootPrint GetTextureFootprint(ResourceDescription description, out ulong uploadBytes)
+		{
+			PlacedSubresourceFootPrint[] array = new PlacedSubresourceFootPrint[1];
+			uint[] numRows = new uint[1];
+			ulong[] rowSizeInBytes = new ulong[1];
+			_device.GetCopyableFootprints(description, 0u, 1u, 0uL, array, numRows, rowSizeInBytes, out uploadBytes);
+			return array[0];
+		}
+
+		private bool CameraUploadBuffersReady()
+		{
+			FrameResource[] frameResources = _frameResources;
+			foreach (FrameResource frameResource in frameResources)
+			{
+				if ((object)frameResource.CameraUploadBuffer == null || frameResource.CameraUploadPointer == IntPtr.Zero)
+				{
+					return false;
+				}
+			}
+			return true;
+		}
+
+		private bool Nv12UploadBuffersReady()
+		{
+			FrameResource[] frameResources = _frameResources;
+			foreach (FrameResource frameResource in frameResources)
+			{
+				if ((object)frameResource.Nv12YUploadBuffer == null || (object)frameResource.Nv12UvUploadBuffer == null || frameResource.Nv12YUploadPointer == IntPtr.Zero || frameResource.Nv12UvUploadPointer == IntPtr.Zero)
+				{
+					return false;
+				}
+			}
+			return true;
+		}
+
+		private void ReleaseCameraUploadBuffers()
+		{
+			FrameResource[] frameResources = _frameResources;
+			for (int i = 0; i < frameResources.Length; i++)
+			{
+				frameResources[i].ReleaseCameraUploadBuffer();
+			}
+		}
+
+		private void ReleaseNv12UploadBuffers()
+		{
+			FrameResource[] frameResources = _frameResources;
+			for (int i = 0; i < frameResources.Length; i++)
+			{
+				frameResources[i].ReleaseNv12UploadBuffers();
+			}
+		}
+
+		private unsafe void CopyBgraFrameToUploadBuffer(FrameResource frameResource, byte[] bgraBytes, int width, int height, int stride)
+		{
+			byte* cameraUploadPointer = (byte*)frameResource.CameraUploadPointer;
+			if (cameraUploadPointer == null)
+			{
+				throw new InvalidOperationException("DX12 BGRA upload buffer is not mapped.");
+			}
+			fixed (byte* ptr = bgraBytes)
+			{
+				int num = width * 4;
+				byte* ptr2 = cameraUploadPointer + (nint)_cameraTextureFootprint.Offset;
+				nint num2 = (nint)_cameraTextureFootprint.Footprint.RowPitch;
+				for (int i = 0; i < height; i++)
+				{
+					Buffer.MemoryCopy(ptr + i * stride, ptr2 + i * num2, num2, num);
+				}
+			}
+		}
+
+		private unsafe void WriteBgraColorSettings(FrameResource frameResource, VideoFrameColorSettings settings, bool denoiseEnabled, double denoiseStrength, int width, int height)
+		{
+			float* bgraColorSettingsPointer = (float*)frameResource.BgraColorSettingsPointer;
+			if (bgraColorSettingsPointer == null)
+			{
+				throw new InvalidOperationException("DX12 BGRA color settings buffer is not mapped.");
+			}
+			bool hasVisibleAdjustments = settings.HasVisibleAdjustments;
+			*bgraColorSettingsPointer = (hasVisibleAdjustments ? ((float)(Math.Clamp(settings.Exposure, -30.0, 30.0) * 2.2)) : 0f);
+			bgraColorSettingsPointer[1] = (hasVisibleAdjustments ? ((float)(1.0 + Math.Clamp(settings.Contrast, -40.0, 40.0) / 100.0)) : 1f);
+			bgraColorSettingsPointer[2] = (hasVisibleAdjustments ? ((float)(1.0 + Math.Clamp(settings.Saturation, -40.0, 40.0) / 100.0)) : 1f);
+			bgraColorSettingsPointer[3] = (hasVisibleAdjustments ? ((float)(Math.Clamp(settings.Warmth, -40.0, 40.0) * 0.9)) : 0f);
+			float num = (float)Math.Clamp(denoiseStrength, 0.5, 5.0);
+			bgraColorSettingsPointer[4] = (denoiseEnabled ? Math.Clamp(0.06f + num * 0.08f, 0.1f, 0.42f) : 0f);
+			bgraColorSettingsPointer[5] = (denoiseEnabled ? Math.Clamp(0.018f + num * 0.006f, 0.024f, 0.052f) : 0f);
+			bgraColorSettingsPointer[6] = 1f / (float)Math.Max(1, width);
+			bgraColorSettingsPointer[7] = 1f / (float)Math.Max(1, height);
+		}
+
+		private unsafe void CopyNv12FrameToUploadBuffers(FrameResource frameResource, byte[] nv12Bytes, int width, int height, int stride)
+		{
+			int num = Math.Max(1, height / 2);
+			int num2 = stride * height;
+			byte* nv12YUploadPointer = (byte*)frameResource.Nv12YUploadPointer;
+			byte* nv12UvUploadPointer = (byte*)frameResource.Nv12UvUploadPointer;
+			if (nv12YUploadPointer == null || nv12UvUploadPointer == null)
+			{
+				throw new InvalidOperationException("DX12 NV12 upload buffers are not mapped.");
+			}
+			fixed (byte* ptr = nv12Bytes)
+			{
+				byte* ptr2 = nv12YUploadPointer + (nint)_nv12YFootprint.Offset;
+				nint num3 = (nint)_nv12YFootprint.Footprint.RowPitch;
+				for (int i = 0; i < height; i++)
+				{
+					Buffer.MemoryCopy(ptr + i * stride, ptr2 + i * num3, num3, width);
+				}
+				byte* ptr3 = nv12UvUploadPointer + (nint)_nv12UvFootprint.Offset;
+				nint num4 = (nint)_nv12UvFootprint.Footprint.RowPitch;
+				for (int j = 0; j < num; j++)
+				{
+					Buffer.MemoryCopy(ptr + num2 + j * stride, ptr3 + j * num4, num4, width);
+				}
+			}
+		}
+
+		private void SetNv12ShaderConstants(int width, int height, VideoFrameColorSettings colorSettings, bool denoiseEnabled, double denoiseStrength, bool swapChromaChannels = false)
+		{
+			bool hasVisibleAdjustments = colorSettings.HasVisibleAdjustments;
+			_commandList.SetGraphicsRoot32BitConstant(1u, BitConverter.SingleToUInt32Bits(hasVisibleAdjustments ? ((float)(Math.Clamp(colorSettings.Exposure, -30.0, 30.0) * 2.2)) : 0f), 0u);
+			_commandList.SetGraphicsRoot32BitConstant(1u, BitConverter.SingleToUInt32Bits(hasVisibleAdjustments ? ((float)(1.0 + Math.Clamp(colorSettings.Contrast, -40.0, 40.0) / 100.0)) : 1f), 1u);
+			_commandList.SetGraphicsRoot32BitConstant(1u, BitConverter.SingleToUInt32Bits(hasVisibleAdjustments ? ((float)(1.0 + Math.Clamp(colorSettings.Saturation, -40.0, 40.0) / 100.0)) : 1f), 2u);
+			_commandList.SetGraphicsRoot32BitConstant(1u, BitConverter.SingleToUInt32Bits(hasVisibleAdjustments ? ((float)(Math.Clamp(colorSettings.Warmth, -40.0, 40.0) * 0.9)) : 0f), 3u);
+			float num = (float)Math.Clamp(denoiseStrength, 0.5, 5.0);
+			float value = (denoiseEnabled ? Math.Clamp(0.08f + num * 0.11f, 0.14f, 0.58f) : 0f);
+			float value2 = (denoiseEnabled ? Math.Clamp(0.018f + num * 0.006f, 0.024f, 0.052f) : 0f);
+			_commandList.SetGraphicsRoot32BitConstant(1u, BitConverter.SingleToUInt32Bits(value), 4u);
+			_commandList.SetGraphicsRoot32BitConstant(1u, BitConverter.SingleToUInt32Bits(value2), 5u);
+			_commandList.SetGraphicsRoot32BitConstant(1u, BitConverter.SingleToUInt32Bits(1f / (float)Math.Max(1, width)), 6u);
+			_commandList.SetGraphicsRoot32BitConstant(1u, BitConverter.SingleToUInt32Bits(1f / (float)Math.Max(1, height)), 7u);
+			_commandList.SetGraphicsRoot32BitConstant(1u, BitConverter.SingleToUInt32Bits(swapChromaChannels ? 1f : 0f), 8u);
+		}
+
+		private void TryCreatePreviewShaderPipeline()
+		{
+			try
+			{
+				byte[] array = CompileShader("VSMain", "vs_5_0");
+				byte[] array2 = CompileShader("PSMain", "ps_5_0");
+				DescriptorRange[] ranges = new DescriptorRange[1]
+				{
+					new DescriptorRange(DescriptorRangeType.ShaderResourceView, 1u, 0u)
+				};
+				DescriptorRange[] ranges2 = new DescriptorRange[1]
+				{
+					new DescriptorRange(DescriptorRangeType.ConstantBufferView, 1u, 0u)
+				};
+				RootParameter[] parameters = new RootParameter[2]
+				{
+					new RootParameter(new RootDescriptorTable(ranges), ShaderVisibility.Pixel),
+					new RootParameter(new RootDescriptorTable(ranges2), ShaderVisibility.Pixel)
+				};
+				StaticSamplerDescription[] samplers = new StaticSamplerDescription[1]
+				{
+					new StaticSamplerDescription(0u, Filter.MinMagMipLinear, TextureAddressMode.Clamp, TextureAddressMode.Clamp, TextureAddressMode.Clamp, 0f, 0u, ComparisonFunction.Never, StaticBorderColor.TransparentBlack, 0f, float.MaxValue, ShaderVisibility.Pixel)
+				};
+				RootSignatureDescription description = new RootSignatureDescription(RootSignatureFlags.AllowInputAssemblerInputLayout, parameters, samplers);
+				_previewRootSignature = _device.CreateRootSignature(in description, RootSignatureVersion.Version1);
+				GraphicsPipelineStateDescription graphicsPipelineStateDescription = new GraphicsPipelineStateDescription();
+				graphicsPipelineStateDescription.RootSignature = _previewRootSignature;
+				graphicsPipelineStateDescription.VertexShader = array;
+				graphicsPipelineStateDescription.PixelShader = array2;
+				graphicsPipelineStateDescription.BlendState = BlendDescription.Opaque;
+				graphicsPipelineStateDescription.RasterizerState = RasterizerDescription.CullNone;
+				graphicsPipelineStateDescription.DepthStencilState = DepthStencilDescription.None;
+				graphicsPipelineStateDescription.SampleMask = uint.MaxValue;
+				graphicsPipelineStateDescription.PrimitiveTopologyType = PrimitiveTopologyType.Triangle;
+				graphicsPipelineStateDescription.RenderTargetFormats = new Format[1] { Format.B8G8R8A8_UNorm };
+				graphicsPipelineStateDescription.SampleDescription = new SampleDescription(1u, 0u);
+				GraphicsPipelineStateDescription description2 = graphicsPipelineStateDescription;
+				_previewPipelineState = _device.CreateGraphicsPipelineState<ID3D12PipelineState>(description2);
+			}
+			catch
+			{
+				_shaderPreviewUnavailable = true;
+			}
+		}
+
+		private void TryCreateNv12PreviewShaderPipeline()
+		{
+			try
+			{
+				byte[] array = CompileShader("Texture2D<float> CameraLuma : register(t0);\r\nTexture2D<float2> CameraChroma : register(t1);\r\nSamplerState CameraSampler : register(s0);\r\n\r\ncbuffer Nv12PreviewSettings : register(b0)\r\n{\r\n    float ExposureOffset;\r\n    float Contrast;\r\n    float Saturation;\r\n    float Warmth;\r\n    float DenoiseAmount;\r\n    float DenoiseEdgeThreshold;\n    float TexelWidth;\n    float TexelHeight;\n    float SwapChromaChannels;\n};\n\r\nstruct VertexOutput\r\n{\r\n    float4 Position : SV_POSITION;\r\n    float2 TexCoord : TEXCOORD0;\r\n};\r\n\r\nVertexOutput VSMain(uint vertexId : SV_VertexID)\r\n{\r\n    float2 positions[3] =\r\n    {\r\n        float2(-1.0, -1.0),\r\n        float2(-1.0, 3.0),\r\n        float2(3.0, -1.0)\r\n    };\r\n    float2 texCoords[3] =\r\n    {\r\n        float2(0.0, 1.0),\r\n        float2(0.0, -1.0),\r\n        float2(2.0, 1.0)\r\n    };\r\n\r\n    VertexOutput output;\r\n    output.Position = float4(positions[vertexId], 0.0, 1.0);\r\n    output.TexCoord = texCoords[vertexId];\r\n    return output;\r\n}\r\n\r\nfloat NormalizeLuma(float rawY)\r\n{\r\n    return saturate((rawY - (16.0 / 255.0)) * (255.0 / 219.0));\r\n}\r\n\r\nfloat EdgeAwareWeight(float sampleY, float centerY)\r\n{\r\n    return saturate(1.0 - abs(sampleY - centerY) / max(DenoiseEdgeThreshold, 0.0001));\r\n}\r\n\r\nfloat SampleNormalizedLuma(float2 texCoord)\r\n{\r\n    return NormalizeLuma(CameraLuma.Sample(CameraSampler, texCoord));\r\n}\r\n\r\nfloat ApplyLumaDenoise(float centerY, float2 texCoord)\r\n{\r\n    if (DenoiseAmount <= 0.001)\r\n    {\r\n        return centerY;\r\n    }\r\n\r\n    float2 xOffset = float2(TexelWidth, 0.0);\r\n    float2 yOffset = float2(0.0, TexelHeight);\r\n    float leftY = SampleNormalizedLuma(texCoord - xOffset);\r\n    float rightY = SampleNormalizedLuma(texCoord + xOffset);\r\n    float upY = SampleNormalizedLuma(texCoord - yOffset);\r\n    float downY = SampleNormalizedLuma(texCoord + yOffset);\r\n\r\n    float centerWeight = 2.0;\r\n    float leftWeight = EdgeAwareWeight(leftY, centerY);\r\n    float rightWeight = EdgeAwareWeight(rightY, centerY);\r\n    float upWeight = EdgeAwareWeight(upY, centerY);\r\n    float downWeight = EdgeAwareWeight(downY, centerY);\r\n    float totalWeight = centerWeight + leftWeight + rightWeight + upWeight + downWeight;\r\n    float smoothedY = (\r\n        centerY * centerWeight\r\n        + leftY * leftWeight\r\n        + rightY * rightWeight\r\n        + upY * upWeight\r\n        + downY * downWeight) / max(totalWeight, 0.0001);\r\n    return lerp(centerY, smoothedY, DenoiseAmount);\r\n}\r\n\r\nfloat3 ApplyColorPolish(float3 rgb)\r\n{\r\n    float3 rgb255 = rgb * 255.0;\r\n    rgb255.r = ((rgb255.r + ExposureOffset + Warmth - 128.0) * Contrast) + 128.0;\r\n    rgb255.g = ((rgb255.g + ExposureOffset - 128.0) * Contrast) + 128.0;\r\n    rgb255.b = ((rgb255.b + ExposureOffset - Warmth - 128.0) * Contrast) + 128.0;\r\n\r\n    float luma = dot(rgb255, float3(0.2126, 0.7152, 0.0722));\r\n    rgb255 = luma + (rgb255 - luma) * Saturation;\r\n    return saturate(rgb255 / 255.0);\r\n}\r\n\r\nfloat4 PSMain(VertexOutput input) : SV_TARGET\r\n{\r\n    float y = NormalizeLuma(CameraLuma.Sample(CameraSampler, input.TexCoord));\n    y = ApplyLumaDenoise(y, input.TexCoord);\n    float2 uv = CameraChroma.Sample(CameraSampler, input.TexCoord) - float2(0.5, 0.5);\n    uv = SwapChromaChannels > 0.5 ? uv.yx : uv;\n    float3 rgb = float3(\n        y + 1.5748 * uv.y,\r\n        y - 0.1873 * uv.x - 0.4681 * uv.y,\r\n        y + 1.8556 * uv.x);\r\n    return float4(ApplyColorPolish(saturate(rgb)), 1.0);\r\n}", "VSMain", "vs_5_0");
+				byte[] array2 = CompileShader("Texture2D<float> CameraLuma : register(t0);\r\nTexture2D<float2> CameraChroma : register(t1);\r\nSamplerState CameraSampler : register(s0);\r\n\r\ncbuffer Nv12PreviewSettings : register(b0)\r\n{\r\n    float ExposureOffset;\r\n    float Contrast;\r\n    float Saturation;\r\n    float Warmth;\r\n    float DenoiseAmount;\r\n    float DenoiseEdgeThreshold;\n    float TexelWidth;\n    float TexelHeight;\n    float SwapChromaChannels;\n};\n\r\nstruct VertexOutput\r\n{\r\n    float4 Position : SV_POSITION;\r\n    float2 TexCoord : TEXCOORD0;\r\n};\r\n\r\nVertexOutput VSMain(uint vertexId : SV_VertexID)\r\n{\r\n    float2 positions[3] =\r\n    {\r\n        float2(-1.0, -1.0),\r\n        float2(-1.0, 3.0),\r\n        float2(3.0, -1.0)\r\n    };\r\n    float2 texCoords[3] =\r\n    {\r\n        float2(0.0, 1.0),\r\n        float2(0.0, -1.0),\r\n        float2(2.0, 1.0)\r\n    };\r\n\r\n    VertexOutput output;\r\n    output.Position = float4(positions[vertexId], 0.0, 1.0);\r\n    output.TexCoord = texCoords[vertexId];\r\n    return output;\r\n}\r\n\r\nfloat NormalizeLuma(float rawY)\r\n{\r\n    return saturate((rawY - (16.0 / 255.0)) * (255.0 / 219.0));\r\n}\r\n\r\nfloat EdgeAwareWeight(float sampleY, float centerY)\r\n{\r\n    return saturate(1.0 - abs(sampleY - centerY) / max(DenoiseEdgeThreshold, 0.0001));\r\n}\r\n\r\nfloat SampleNormalizedLuma(float2 texCoord)\r\n{\r\n    return NormalizeLuma(CameraLuma.Sample(CameraSampler, texCoord));\r\n}\r\n\r\nfloat ApplyLumaDenoise(float centerY, float2 texCoord)\r\n{\r\n    if (DenoiseAmount <= 0.001)\r\n    {\r\n        return centerY;\r\n    }\r\n\r\n    float2 xOffset = float2(TexelWidth, 0.0);\r\n    float2 yOffset = float2(0.0, TexelHeight);\r\n    float leftY = SampleNormalizedLuma(texCoord - xOffset);\r\n    float rightY = SampleNormalizedLuma(texCoord + xOffset);\r\n    float upY = SampleNormalizedLuma(texCoord - yOffset);\r\n    float downY = SampleNormalizedLuma(texCoord + yOffset);\r\n\r\n    float centerWeight = 2.0;\r\n    float leftWeight = EdgeAwareWeight(leftY, centerY);\r\n    float rightWeight = EdgeAwareWeight(rightY, centerY);\r\n    float upWeight = EdgeAwareWeight(upY, centerY);\r\n    float downWeight = EdgeAwareWeight(downY, centerY);\r\n    float totalWeight = centerWeight + leftWeight + rightWeight + upWeight + downWeight;\r\n    float smoothedY = (\r\n        centerY * centerWeight\r\n        + leftY * leftWeight\r\n        + rightY * rightWeight\r\n        + upY * upWeight\r\n        + downY * downWeight) / max(totalWeight, 0.0001);\r\n    return lerp(centerY, smoothedY, DenoiseAmount);\r\n}\r\n\r\nfloat3 ApplyColorPolish(float3 rgb)\r\n{\r\n    float3 rgb255 = rgb * 255.0;\r\n    rgb255.r = ((rgb255.r + ExposureOffset + Warmth - 128.0) * Contrast) + 128.0;\r\n    rgb255.g = ((rgb255.g + ExposureOffset - 128.0) * Contrast) + 128.0;\r\n    rgb255.b = ((rgb255.b + ExposureOffset - Warmth - 128.0) * Contrast) + 128.0;\r\n\r\n    float luma = dot(rgb255, float3(0.2126, 0.7152, 0.0722));\r\n    rgb255 = luma + (rgb255 - luma) * Saturation;\r\n    return saturate(rgb255 / 255.0);\r\n}\r\n\r\nfloat4 PSMain(VertexOutput input) : SV_TARGET\r\n{\r\n    float y = NormalizeLuma(CameraLuma.Sample(CameraSampler, input.TexCoord));\n    y = ApplyLumaDenoise(y, input.TexCoord);\n    float2 uv = CameraChroma.Sample(CameraSampler, input.TexCoord) - float2(0.5, 0.5);\n    uv = SwapChromaChannels > 0.5 ? uv.yx : uv;\n    float3 rgb = float3(\n        y + 1.5748 * uv.y,\r\n        y - 0.1873 * uv.x - 0.4681 * uv.y,\r\n        y + 1.8556 * uv.x);\r\n    return float4(ApplyColorPolish(saturate(rgb)), 1.0);\r\n}", "PSMain", "ps_5_0");
+				DescriptorRange[] ranges = new DescriptorRange[1]
+				{
+					new DescriptorRange(DescriptorRangeType.ShaderResourceView, 2u, 0u)
+				};
+				RootParameter[] parameters = new RootParameter[2]
+				{
+					new RootParameter(new RootDescriptorTable(ranges), ShaderVisibility.Pixel),
+					new RootParameter(new RootConstants(0u, 0u, 9u), ShaderVisibility.Pixel)
+				};
+				StaticSamplerDescription[] samplers = new StaticSamplerDescription[1]
+				{
+					new StaticSamplerDescription(0u, Filter.MinMagMipLinear, TextureAddressMode.Clamp, TextureAddressMode.Clamp, TextureAddressMode.Clamp, 0f, 0u, ComparisonFunction.Never, StaticBorderColor.TransparentBlack, 0f, float.MaxValue, ShaderVisibility.Pixel)
+				};
+				RootSignatureDescription description = new RootSignatureDescription(RootSignatureFlags.AllowInputAssemblerInputLayout, parameters, samplers);
+				_nv12PreviewRootSignature = _device.CreateRootSignature(in description, RootSignatureVersion.Version1);
+				GraphicsPipelineStateDescription graphicsPipelineStateDescription = new GraphicsPipelineStateDescription();
+				graphicsPipelineStateDescription.RootSignature = _nv12PreviewRootSignature;
+				graphicsPipelineStateDescription.VertexShader = array;
+				graphicsPipelineStateDescription.PixelShader = array2;
+				graphicsPipelineStateDescription.BlendState = BlendDescription.Opaque;
+				graphicsPipelineStateDescription.RasterizerState = RasterizerDescription.CullNone;
+				graphicsPipelineStateDescription.DepthStencilState = DepthStencilDescription.None;
+				graphicsPipelineStateDescription.SampleMask = uint.MaxValue;
+				graphicsPipelineStateDescription.PrimitiveTopologyType = PrimitiveTopologyType.Triangle;
+				graphicsPipelineStateDescription.RenderTargetFormats = new Format[1] { Format.B8G8R8A8_UNorm };
+				graphicsPipelineStateDescription.SampleDescription = new SampleDescription(1u, 0u);
+				GraphicsPipelineStateDescription description2 = graphicsPipelineStateDescription;
+				_nv12PreviewPipelineState = _device.CreateGraphicsPipelineState<ID3D12PipelineState>(description2);
+			}
+			catch (Exception ex)
+			{
+				_nv12PreviewUnavailable = true;
+				_nv12PreviewFailureReason = "NV12 shader pipeline creation failed: " + ex.Message;
+			}
+		}
+
+		private static byte[] CompileShader(string entryPoint, string profile)
+		{
+			return CompileShader("Texture2D<float4> CameraFrame : register(t0);\r\nSamplerState CameraSampler : register(s0);\r\n\r\ncbuffer ColorSettings : register(b0)\r\n{\r\n    float ExposureOffset;\r\n    float Contrast;\r\n    float Saturation;\r\n    float Warmth;\r\n    float DenoiseAmount;\r\n    float DenoiseEdgeThreshold;\n    float TexelWidth;\n    float TexelHeight;\n};\n\r\nstruct VertexOutput\r\n{\r\n    float4 Position : SV_POSITION;\r\n    float2 TexCoord : TEXCOORD0;\r\n};\r\n\r\nVertexOutput VSMain(uint vertexId : SV_VertexID)\r\n{\r\n    float2 positions[3] =\r\n    {\r\n        float2(-1.0, -1.0),\r\n        float2(-1.0, 3.0),\r\n        float2(3.0, -1.0)\r\n    };\r\n    float2 texCoords[3] =\r\n    {\r\n        float2(0.0, 1.0),\r\n        float2(0.0, -1.0),\r\n        float2(2.0, 1.0)\r\n    };\r\n\r\n    VertexOutput output;\r\n    output.Position = float4(positions[vertexId], 0.0, 1.0);\r\n    output.TexCoord = texCoords[vertexId];\r\n    return output;\r\n}\r\n\r\nfloat3 ApplyColorPolish(float3 rgb)\r\n{\r\n    float3 rgb255 = rgb * 255.0;\r\n    rgb255.r = ((rgb255.r + ExposureOffset + Warmth - 128.0) * Contrast) + 128.0;\r\n    rgb255.g = ((rgb255.g + ExposureOffset - 128.0) * Contrast) + 128.0;\r\n    rgb255.b = ((rgb255.b + ExposureOffset - Warmth - 128.0) * Contrast) + 128.0;\r\n\r\n    float luma = dot(rgb255, float3(0.2126, 0.7152, 0.0722));\r\n    rgb255 = luma + (rgb255 - luma) * Saturation;\r\n    return saturate(rgb255 / 255.0);\r\n}\r\n\r\nfloat Luma(float3 rgb)\r\n{\r\n    return dot(rgb, float3(0.2126, 0.7152, 0.0722));\r\n}\r\n\r\nfloat EdgeAwareWeight(float sampleY, float centerY)\r\n{\r\n    return saturate(1.0 - abs(sampleY - centerY) / max(DenoiseEdgeThreshold, 0.0001));\r\n}\r\n\r\nfloat3 ApplyBgraDenoise(float3 centerRgb, float2 texCoord)\r\n{\r\n    if (DenoiseAmount <= 0.001)\r\n    {\r\n        return centerRgb;\r\n    }\r\n\r\n    float2 xOffset = float2(TexelWidth, 0.0);\r\n    float2 yOffset = float2(0.0, TexelHeight);\r\n    float3 leftRgb = CameraFrame.Sample(CameraSampler, texCoord - xOffset).rgb;\r\n    float3 rightRgb = CameraFrame.Sample(CameraSampler, texCoord + xOffset).rgb;\r\n    float3 upRgb = CameraFrame.Sample(CameraSampler, texCoord - yOffset).rgb;\r\n    float3 downRgb = CameraFrame.Sample(CameraSampler, texCoord + yOffset).rgb;\r\n\r\n    float centerY = Luma(centerRgb);\r\n    float centerWeight = 2.0;\r\n    float leftWeight = EdgeAwareWeight(Luma(leftRgb), centerY);\r\n    float rightWeight = EdgeAwareWeight(Luma(rightRgb), centerY);\r\n    float upWeight = EdgeAwareWeight(Luma(upRgb), centerY);\r\n    float downWeight = EdgeAwareWeight(Luma(downRgb), centerY);\r\n    float totalWeight = centerWeight + leftWeight + rightWeight + upWeight + downWeight;\r\n    float3 smoothedRgb = (\r\n        centerRgb * centerWeight\r\n        + leftRgb * leftWeight\r\n        + rightRgb * rightWeight\r\n        + upRgb * upWeight\r\n        + downRgb * downWeight) / max(totalWeight, 0.0001);\r\n    return lerp(centerRgb, smoothedRgb, DenoiseAmount);\r\n}\r\n\r\nfloat4 PSMain(VertexOutput input) : SV_TARGET\r\n{\r\n    float4 color = CameraFrame.Sample(CameraSampler, input.TexCoord);\r\n    float3 denoised = ApplyBgraDenoise(color.rgb, input.TexCoord);\r\n    return float4(ApplyColorPolish(denoised), 1.0);\r\n}", entryPoint, profile);
+		}
+
+		private static byte[] CompileShader(string shaderSource, string entryPoint, string profile)
+		{
+			return Compiler.Compile(shaderSource, entryPoint, "AvatarBuilderPreview.hlsl", profile, ShaderFlags.OptimizationLevel3).ToArray();
+		}
+
+		public void Resize(int width, int height)
+		{
+			if (!_disposed && width > 0 && height > 0 && (width != _viewportWidth || height != _viewportHeight))
+			{
+				WaitForGpu();
+				_trackingOverlayRenderer?.ReleaseBackBuffers();
+				ReleaseRenderTargets();
+				_swapChain.ResizeBuffers(3u, (uint)width, (uint)height, Format.B8G8R8A8_UNorm, SwapChainFlags.None);
+				_viewportWidth = width;
+				_viewportHeight = height;
+				CreateRenderTargetViews();
+				TryAttachTrackingOverlayRenderer();
+			}
+		}
+
+		public void RequestPresentationRefresh()
+		{
+			if (!_disposed)
+			{
+				Interlocked.Exchange(ref _presentationRefreshRequested, 1);
+			}
+		}
+
+		public void Dispose()
+		{
+			if (!_disposed)
+			{
+				WaitForGpu();
+				_disposed = true;
+				_trackingOverlayRenderer?.Dispose();
+				_trackingOverlayRenderer = null;
+				ReleaseRenderTargets();
+				_swapChain.Dispose();
+				_rtvHeap.Dispose();
+				_srvHeap.Dispose();
+				_cameraTexture?.Dispose();
+				_nv12YTexture?.Dispose();
+				_nv12UvTexture?.Dispose();
+				_previewPipelineState?.Dispose();
+				_previewRootSignature?.Dispose();
+				_nv12PreviewPipelineState?.Dispose();
+				_nv12PreviewRootSignature?.Dispose();
+				_fence.Dispose();
+				_fenceEvent.Dispose();
+				_commandList.Dispose();
+				FrameResource[] frameResources = _frameResources;
+				for (int i = 0; i < frameResources.Length; i++)
+				{
+					frameResources[i].Dispose();
+				}
+				_factory.Dispose();
+				_commandQueue.Dispose();
+				_device.Dispose();
+			}
+		}
+
+		private void CreateRenderTargetViews()
+		{
+			CpuDescriptorHandle cPUDescriptorHandleForHeapStart = _rtvHeap.GetCPUDescriptorHandleForHeapStart();
+			for (int i = 0; i < 3; i++)
+			{
+				_renderTargets[i] = _swapChain.GetBuffer<ID3D12Resource>((uint)i);
+				_device.CreateRenderTargetView(_renderTargets[i], null, cPUDescriptorHandleForHeapStart);
+				cPUDescriptorHandleForHeapStart += _rtvDescriptorSize;
+			}
+		}
+
+		private void TryAttachTrackingOverlayRenderer()
+		{
+			if (_trackingOverlayRenderer == null)
+			{
+				return;
+			}
+			try
+			{
+				_trackingOverlayRenderer.AttachBackBuffers(_renderTargets);
+			}
+			catch
+			{
+				_trackingOverlayRenderer.Dispose();
+				_trackingOverlayRenderer = null;
+			}
+		}
+
+		private CpuDescriptorHandle GetRtvHandle(int frameIndex)
+		{
+			return _rtvHeap.GetCPUDescriptorHandleForHeapStart() + frameIndex * _rtvDescriptorSize;
+		}
+
+		private CpuDescriptorHandle GetSrvCpuHandle(int descriptorIndex)
+		{
+			return _srvHeap.GetCPUDescriptorHandleForHeapStart() + descriptorIndex * _srvDescriptorSize;
+		}
+
+		private GpuDescriptorHandle GetSrvGpuHandle(int descriptorIndex)
+		{
+			return _srvHeap.GetGPUDescriptorHandleForHeapStart() + descriptorIndex * _srvDescriptorSize;
+		}
+
+		private void ReleaseRenderTargets()
+		{
+			for (int i = 0; i < _renderTargets.Length; i++)
+			{
+				_renderTargets[i]?.Dispose();
+				_renderTargets[i] = null;
+			}
+		}
+
+		private FrameResource BeginFrame(out int frameIndex)
+		{
+			RefreshPresentationResourcesIfRequested();
+			frameIndex = (int)_swapChain.CurrentBackBufferIndex;
+			FrameResource frameResource = _frameResources[frameIndex];
+			WaitForFrameResource(frameResource);
+			frameResource.CommandAllocator.Reset();
+			_commandList.Reset(frameResource.CommandAllocator);
+			return frameResource;
+		}
+
+		private void RefreshPresentationResourcesIfRequested()
+		{
+			if (Interlocked.Exchange(ref _presentationRefreshRequested, 0) != 0 && _trackingOverlayRenderer != null)
+			{
+				_trackingOverlayRenderer.ResetOverlayCache();
+			}
+		}
+
+		private void ExecuteAndPresent(FrameResource frameResource)
+		{
+			_commandList.Close();
+			_commandQueue.ExecuteCommandList(_commandList);
+			_swapChain.Present(0u, PresentFlags.None);
+			SignalFrameSubmitted(frameResource);
+		}
+
+		private void ExecuteAndPresent(FrameResource frameResource, int frameIndex, PreviewTrackingOverlay trackingOverlay, bool useDirect2DOverlay)
+		{
+			_commandList.Close();
+			_commandQueue.ExecuteCommandList(_commandList);
+			if (useDirect2DOverlay)
+			{
+				_trackingOverlayRenderer.Draw(frameIndex, _viewportWidth, _viewportHeight, trackingOverlay);
+			}
+			_swapChain.Present(0u, PresentFlags.None);
+			SignalFrameSubmitted(frameResource);
+		}
+
+		private void WaitForGpu()
+		{
+			if (!_disposed)
+			{
+				_fenceValue++;
+				_commandQueue.Signal(_fence, _fenceValue);
+				if (_fence.CompletedValue >= _fenceValue)
+				{
+					ClearFrameFenceValues();
+					return;
+				}
+				_fence.SetEventOnCompletion(_fenceValue, _fenceEvent);
+				_fenceEvent.WaitOne();
+				ClearFrameFenceValues();
+			}
+		}
+
+		private void SignalFrameSubmitted(FrameResource frameResource)
+		{
+			if (!_disposed)
+			{
+				_fenceValue++;
+				_commandQueue.Signal(_fence, _fenceValue);
+				frameResource.FenceValue = _fenceValue;
+			}
+		}
+
+		private void WaitForFrameResource(FrameResource frameResource)
+		{
+			if (!_disposed && frameResource.FenceValue != 0L)
+			{
+				if (_fence.CompletedValue < frameResource.FenceValue)
+				{
+					_fence.SetEventOnCompletion(frameResource.FenceValue, _fenceEvent);
+					_fenceEvent.WaitOne();
+				}
+				frameResource.FenceValue = 0uL;
+			}
+		}
+
+		private void ClearFrameFenceValues()
+		{
+			FrameResource[] frameResources = _frameResources;
+			for (int i = 0; i < frameResources.Length; i++)
+			{
+				frameResources[i].FenceValue = 0uL;
+			}
+		}
+	}
+
+	private static readonly TimeSpan RendererDisposeLockTimeout = TimeSpan.FromMilliseconds(250L);
+
+	private nint _nativeD3D12Device;
+
+	private readonly object _rendererLock = new object();
+
+	private readonly object _renderWorkerLock = new object();
+
+	private readonly object _renderThrottleLock = new object();
+
+	private readonly AutoResetEvent _renderFrameReady = new AutoResetEvent(initialState: false);
+
+	private Direct3D12SwapChainRenderer? _renderer;
+
+	private Thread? _renderThread;
+
+	private QueuedCameraFrame? _pendingCameraFrame;
+
+	private QueuedTextureFrame? _pendingTextureFrame;
+
+	private string _previewPathDescription = "DX12 preview path pending";
+
+	private readonly object _diagnosticsLock = new object();
+
+	private Direct3D12PreviewDiagnostics _diagnostics = Direct3D12PreviewDiagnostics.Empty;
+
+	private DateTimeOffset _diagnosticsFpsWindowStartUtc = DateTimeOffset.UtcNow;
+
+	private long _diagnosticsFpsWindowStartRenderedFrames;
+
+	private long _submittedFrames;
+
+	private long _renderedFrames;
+
+	private long _droppedFrames;
+
+	private double _renderFramesPerSecond;
+
+	private string _recordingMode = "not recording";
+
+	private PreviewTrackingOverlay _trackingOverlay = PreviewTrackingOverlay.Empty;
+
+	private DateTime _lastAcceptedRenderFrameUtc = DateTime.MinValue;
+
+	private double _maxRenderFramesPerSecond;
+
+	private int _renderingSuspended;
+
+	private int _renderFrameBusy;
+
+	private bool _renderWorkerStopping;
+
+	private bool _disposed;
+
+	public bool IsReady => _renderer != null;
+
+	public string DeviceDescription => _renderer?.DeviceDescription ?? "DX12 preview not initialized";
+
+	public string PreviewPathDescription => _previewPathDescription;
+
+	public string RecordingMode => Volatile.Read(in _recordingMode);
+
+	public Direct3D12PreviewDiagnostics Diagnostics
+	{
+		get
+		{
+			lock (_diagnosticsLock)
+			{
+				return _diagnostics;
+			}
+		}
+	}
+
+	private bool IsRenderingSuspended => Volatile.Read(in _renderingSuspended) != 0;
+
+	public event EventHandler<string>? StatusChanged;
+
+	public event EventHandler<Direct3D12PreviewDiagnostics>? DiagnosticsChanged;
+
+	public Direct3D12PreviewHost(nint nativeD3D12Device = 0)
+		: base("Could not create DX12 preview child window.")
+	{
+		_nativeD3D12Device = nativeD3D12Device;
+		_renderThread = new Thread(RenderWorkerLoop)
+		{
+			IsBackground = true,
+			Name = "Avatar Builder DX12 preview"
+		};
+		_renderThread.Start();
+	}
+
+	public void SetRecordingMode(string recordingMode)
+	{
+		Volatile.Write(ref _recordingMode, string.IsNullOrWhiteSpace(recordingMode) ? "not recording" : recordingMode.Trim());
+	}
+
+	public void LimitRenderRate(double maxFramesPerSecond)
+	{
+		lock (_renderThrottleLock)
+		{
+			_maxRenderFramesPerSecond = ((maxFramesPerSecond <= 0.0) ? 0.0 : Math.Clamp(maxFramesPerSecond, 1.0, 120.0));
+			_lastAcceptedRenderFrameUtc = DateTime.MinValue;
+		}
+	}
+
+	public void RenderBgraFrame(CameraFrame frame, long frameNumber, VideoFrameColorSettings colorSettings = default(VideoFrameColorSettings), bool denoiseEnabled = false, double denoiseStrength = 0.0)
+	{
+		if (_disposed || IsRenderingSuspended)
+		{
+			return;
+		}
+		RecordSubmittedFrame();
+		if (!ShouldAcceptRenderFrame())
+		{
+			RecordDroppedFrame();
+			return;
+		}
+		if (Interlocked.CompareExchange(ref _renderFrameBusy, 1, 0) != 0)
+		{
+			RecordDroppedFrame();
+			return;
+		}
+		QueuedCameraFrame queuedCameraFrame = null;
+		bool flag = false;
+		try
+		{
+			queuedCameraFrame = new QueuedCameraFrame(frame.Duplicate(), colorSettings, denoiseEnabled, denoiseStrength, frameNumber);
+			lock (_renderWorkerLock)
+			{
+				if (_renderWorkerStopping || (object)_pendingCameraFrame != null || (object)_pendingTextureFrame != null)
+				{
+					RecordDroppedFrame();
+					return;
+				}
+				_pendingCameraFrame = queuedCameraFrame;
+				queuedCameraFrame = null;
+				flag = true;
+			}
+			_renderFrameReady.Set();
+		}
+		catch (ObjectDisposedException)
+		{
+			RecordDroppedFrame();
+			CancelPendingRenderHandoff();
+			flag = false;
+		}
+		catch
+		{
+			RecordDroppedFrame();
+		}
+		finally
+		{
+			queuedCameraFrame?.Dispose();
+			if (!flag)
+			{
+				Interlocked.Exchange(ref _renderFrameBusy, 0);
+			}
+		}
+	}
+
+	public void RenderProofFrame(TextureNativeFrameInfo frame)
+	{
+		if (_renderer == null || IsRenderingSuspended)
+		{
+			return;
+		}
+		try
+		{
+			lock (_rendererLock)
+			{
+				_renderer.RenderProofFrame(frame.FrameNumber);
+			}
+		}
+		catch (Exception ex)
+		{
+			this.StatusChanged?.Invoke(this, "DX12 preview render failed: " + ex.Message);
+		}
+	}
+
+	public void RenderTextureFrame(TextureNativeFrameLease frame, bool denoiseEnabled, double denoiseStrength, VideoFrameColorSettings colorSettings = default(VideoFrameColorSettings))
+	{
+		RecordSubmittedFrame();
+		if (_disposed || IsRenderingSuspended || !ShouldAcceptRenderFrame())
+		{
+			RecordDroppedFrame();
+			return;
+		}
+		if (Interlocked.CompareExchange(ref _renderFrameBusy, 1, 0) != 0)
+		{
+			RecordDroppedFrame();
+			return;
+		}
+		string failureReason = null;
+		bool flag = false;
+		bool flag2 = string.Equals(frame.DeviceMode, "D3D12", StringComparison.OrdinalIgnoreCase);
+		bool flag3 = TextureNativePreviewPolicy.ShouldPreferNv12UploadFallback(frame.MediaSubtype, frame.Width, frame.Height, frame.Nv12PreviewBytes, frame.Nv12PreviewStride);
+		if (!flag2 && !flag3 && frame.D3D12SharedTextureHandle != IntPtr.Zero)
+		{
+			try
+			{
+				lock (_rendererLock)
+				{
+					if (!IsRenderingSuspended && _renderer != null && _renderer.RenderSharedD3D11BridgeFrame(frame, colorSettings, denoiseEnabled, denoiseStrength, Volatile.Read(in _trackingOverlay), out failureReason))
+					{
+						ReportPreviewPath("DX12 D3D11 bridge texture preview");
+						RecordRenderedFrame("DX12 D3D11 bridge texture preview", frame.MediaSubtype, frame.Width, frame.Height, frame.FramesPerSecond, denoiseEnabled, denoiseStrength, colorSettings, RecordingMode, null, frame.FrameNumber);
+						Interlocked.Exchange(ref _renderFrameBusy, 0);
+						return;
+					}
+				}
+			}
+			catch (Exception ex)
+			{
+				failureReason = ex.Message;
+			}
+		}
+		else if (!flag2 && !flag3)
+		{
+			failureReason = "D3D11 bridge shared texture handle missing";
+		}
+		TextureNativeFrameLease textureNativeFrameLease = null;
+		try
+		{
+			textureNativeFrameLease = frame.Duplicate();
+			if (textureNativeFrameLease == null)
+			{
+				RecordDroppedFrame();
+				return;
+			}
+			lock (_renderWorkerLock)
+			{
+				if (_renderWorkerStopping || (object)_pendingCameraFrame != null || (object)_pendingTextureFrame != null)
+				{
+					RecordDroppedFrame();
+					return;
+				}
+				_pendingTextureFrame = new QueuedTextureFrame(textureNativeFrameLease, colorSettings, denoiseEnabled, denoiseStrength, failureReason);
+				textureNativeFrameLease = null;
+				flag = true;
+			}
+			_renderFrameReady.Set();
+		}
+		catch (ObjectDisposedException)
+		{
+			RecordDroppedFrame();
+			CancelPendingRenderHandoff();
+			flag = false;
+		}
+		finally
+		{
+			textureNativeFrameLease?.Dispose();
+			if (!flag)
+			{
+				Interlocked.Exchange(ref _renderFrameBusy, 0);
+			}
+		}
+	}
+
+	public void UpdateTrackingOverlay(PreviewTrackingOverlay? overlay)
+	{
+		Volatile.Write(ref _trackingOverlay, overlay ?? PreviewTrackingOverlay.Empty);
+	}
+
+	public void ResumeRendering()
+	{
+		if (!_disposed)
+		{
+			lock (_renderThrottleLock)
+			{
+				_lastAcceptedRenderFrameUtc = DateTime.MinValue;
+			}
+			Interlocked.Exchange(ref _renderingSuspended, 0);
+			Volatile.Read(in _renderer)?.RequestPresentationRefresh();
+			_renderFrameReady.Set();
+		}
+	}
+
+	public void SuspendRendering()
+	{
+		if (_disposed)
+		{
+			return;
+		}
+		Interlocked.Exchange(ref _renderingSuspended, 1);
+		lock (_renderWorkerLock)
+		{
+			bool num = (object)_pendingCameraFrame != null || (object)_pendingTextureFrame != null;
+			_pendingCameraFrame?.Dispose();
+			_pendingCameraFrame = null;
+			_pendingTextureFrame?.Dispose();
+			_pendingTextureFrame = null;
+			if (num)
+			{
+				Interlocked.Exchange(ref _renderFrameBusy, 0);
+			}
+		}
+		_renderFrameReady.Set();
+		if (Monitor.TryEnter(_rendererLock, TimeSpan.FromMilliseconds(100L)))
+		{
+			Monitor.Exit(_rendererLock);
+		}
+	}
+
+	private void RenderTextureFrameCore(QueuedTextureFrame queuedFrame)
+	{
+		TextureNativeFrameLease frame = queuedFrame.Frame;
+		if (IsRenderingSuspended)
+		{
+			RecordDroppedFrame();
+			return;
+		}
+		try
+		{
+			lock (_rendererLock)
+			{
+				if (_renderer == null || IsRenderingSuspended)
+				{
+					RecordDroppedFrame();
+					return;
+				}
+				string failureReason = null;
+				if (frame.IsValid && string.Equals(frame.DeviceMode, "D3D12", StringComparison.OrdinalIgnoreCase) && _renderer.RenderNativeTextureFrame(frame, queuedFrame.ColorSettings, queuedFrame.DenoiseEnabled, queuedFrame.DenoiseStrength, Volatile.Read(in _trackingOverlay), out failureReason))
+				{
+					ReportPreviewPath("direct DX12 texture");
+					RecordRenderedFrame("direct DX12 texture", frame.MediaSubtype, frame.Width, frame.Height, frame.FramesPerSecond, queuedFrame.DenoiseEnabled, queuedFrame.DenoiseStrength, queuedFrame.ColorSettings, RecordingMode, null, frame.FrameNumber);
+					return;
+				}
+				string text = CombineTextureFailureReasons(failureReason, queuedFrame.SharedBridgeFailureReason);
+				if (!TryRenderNv12TextureUpload(_renderer, frame, text, queuedFrame.ColorSettings, queuedFrame.DenoiseEnabled, queuedFrame.DenoiseStrength, Volatile.Read(in _trackingOverlay)))
+				{
+					_renderer.RenderProofFrame(frame.FrameNumber);
+					ReportPreviewPath(FormatUploadFallbackPath("DX12 proof-frame fallback", text));
+					RecordDroppedFrame();
+				}
+			}
+		}
+		catch (Exception ex)
+		{
+			RecordDroppedFrame();
+			this.StatusChanged?.Invoke(this, "DX12 camera frame upload failed: " + ex.Message);
+		}
+	}
+
+	private void ReportPreviewPath(string description)
+	{
+		if (!string.Equals(_previewPathDescription, description, StringComparison.Ordinal))
+		{
+			_previewPathDescription = description;
+			this.StatusChanged?.Invoke(this, "DX12 preview path: " + description);
+		}
+	}
+
+	private void RenderWorkerLoop()
+	{
+		try
+		{
+			while (true)
+			{
+				_renderFrameReady.WaitOne();
+				QueuedTextureFrame pendingTextureFrame;
+				QueuedCameraFrame queuedCameraFrame;
+				lock (_renderWorkerLock)
+				{
+					if (_renderWorkerStopping)
+					{
+						break;
+					}
+					pendingTextureFrame = _pendingTextureFrame;
+					_pendingTextureFrame = null;
+					queuedCameraFrame = (((object)pendingTextureFrame == null) ? _pendingCameraFrame : null);
+					_pendingCameraFrame = null;
+				}
+				try
+				{
+					if ((object)pendingTextureFrame != null)
+					{
+						using (pendingTextureFrame)
+						{
+							RenderTextureFrameCore(pendingTextureFrame);
+						}
+					}
+					else
+					{
+						if ((object)queuedCameraFrame == null)
+						{
+							continue;
+						}
+						using (queuedCameraFrame)
+						{
+							try
+							{
+								lock (_rendererLock)
+								{
+									if (_renderer != null && !IsRenderingSuspended)
+									{
+										byte[] nv12Bytes = queuedCameraFrame.Nv12Bytes;
+										if (nv12Bytes == null || nv12Bytes.Length <= 0 || queuedCameraFrame.Nv12Stride <= 0)
+										{
+											goto IL_0216;
+										}
+										if (!_renderer.RenderNv12Frame(nv12Bytes, queuedCameraFrame.Width, queuedCameraFrame.Height, queuedCameraFrame.Nv12Stride, queuedCameraFrame.FrameNumber, queuedCameraFrame.ColorSettings, queuedCameraFrame.DenoiseEnabled, queuedCameraFrame.DenoiseStrength, Volatile.Read(in _trackingOverlay), queuedCameraFrame.FrameFormat == "nv12-ffmpeg"))
+										{
+											this.StatusChanged?.Invoke(this, $"DX12 NV12 preview renderer refused {queuedCameraFrame.Width}x{queuedCameraFrame.Height}, stride {queuedCameraFrame.Nv12Stride}, bytes {nv12Bytes.Length}: {_renderer.LastNv12PreviewFailureReason}");
+											goto IL_0216;
+										}
+										ReportPreviewPath("DX12 NV12 upload preview");
+										RecordRenderedFrame("DX12 NV12 upload preview", queuedCameraFrame.FrameFormat, queuedCameraFrame.Width, queuedCameraFrame.Height, 0.0, queuedCameraFrame.DenoiseEnabled, queuedCameraFrame.DenoiseStrength, queuedCameraFrame.ColorSettings, RecordingMode, null, queuedCameraFrame.FrameNumber);
+									}
+									goto end_IL_0085;
+									IL_0216:
+									if (queuedCameraFrame.BgraBytes.Length == 0 || queuedCameraFrame.Stride <= 0)
+									{
+										this.StatusChanged?.Invoke(this, "DX12 preview skipped: frame had no renderable BGRA or NV12 payload.");
+										continue;
+									}
+									_renderer.RenderBgraFrame(queuedCameraFrame.BgraBytes, queuedCameraFrame.Width, queuedCameraFrame.Height, queuedCameraFrame.Stride, queuedCameraFrame.FrameNumber, queuedCameraFrame.ColorSettings, queuedCameraFrame.DenoiseEnabled, queuedCameraFrame.DenoiseStrength, Volatile.Read(in _trackingOverlay));
+									goto IL_0296;
+									end_IL_0085:;
+								}
+								goto end_IL_007c;
+								IL_0296:
+								ReportPreviewPath("DX12 BGRA upload preview");
+								RecordRenderedFrame("DX12 BGRA upload preview", queuedCameraFrame.FrameFormat, queuedCameraFrame.Width, queuedCameraFrame.Height, 0.0, queuedCameraFrame.DenoiseEnabled, queuedCameraFrame.DenoiseStrength, queuedCameraFrame.ColorSettings, RecordingMode, null, queuedCameraFrame.FrameNumber);
+								end_IL_007c:;
+							}
+							catch (Exception ex)
+							{
+								RecordDroppedFrame();
+								this.StatusChanged?.Invoke(this, "DX12 BGRA preview upload failed: " + ex.Message);
+							}
+						}
+						continue;
+					}
+				}
+				finally
+				{
+					Interlocked.Exchange(ref _renderFrameBusy, 0);
+				}
+			}
+		}
+		finally
+		{
+			DisposeRenderer();
+		}
+	}
+
+	private void StopRenderWorker()
+	{
+		lock (_renderWorkerLock)
+		{
+			_renderWorkerStopping = true;
+			bool num = (object)_pendingCameraFrame != null || (object)_pendingTextureFrame != null;
+			_pendingCameraFrame?.Dispose();
+			_pendingCameraFrame = null;
+			_pendingTextureFrame?.Dispose();
+			_pendingTextureFrame = null;
+			if (num)
+			{
+				Interlocked.Exchange(ref _renderFrameBusy, 0);
+			}
+		}
+		_renderFrameReady.Set();
+		Thread renderThread = _renderThread;
+		if (renderThread != null && renderThread != Thread.CurrentThread)
+		{
+			renderThread.Join();
+		}
+		_renderThread = null;
+		_renderFrameReady.Dispose();
+	}
+
+	private void CancelPendingRenderHandoff()
+	{
+		lock (_renderWorkerLock)
+		{
+			_pendingCameraFrame?.Dispose();
+			_pendingCameraFrame = null;
+			_pendingTextureFrame?.Dispose();
+			_pendingTextureFrame = null;
+		}
+	}
+
+	private void RecordSubmittedFrame()
+	{
+		Interlocked.Increment(ref _submittedFrames);
+	}
+
+	private bool ShouldAcceptRenderFrame()
+	{
+		lock (_renderThrottleLock)
+		{
+			if (_maxRenderFramesPerSecond <= 0.0)
+			{
+				return true;
+			}
+			DateTime utcNow = DateTime.UtcNow;
+			if (utcNow - _lastAcceptedRenderFrameUtc < TimeSpan.FromSeconds(1.0 / _maxRenderFramesPerSecond))
+			{
+				return false;
+			}
+			_lastAcceptedRenderFrameUtc = utcNow;
+			return true;
+		}
+	}
+
+	private void RecordDroppedFrame()
+	{
+		Interlocked.Increment(ref _droppedFrames);
+	}
+
+	private void RecordRenderedFrame(string previewPath, string frameFormat, int width, int height, double sourceFramesPerSecond, bool denoiseEnabled, double denoiseStrength, VideoFrameColorSettings colorSettings, string recordingMode, string? fallbackReason, long frameNumber)
+	{
+		long num = Interlocked.Increment(ref _renderedFrames);
+		long submittedFrames = Interlocked.Read(in _submittedFrames);
+		long droppedFrames = Interlocked.Read(in _droppedFrames);
+		DateTimeOffset utcNow = DateTimeOffset.UtcNow;
+		Direct3D12PreviewDiagnostics e;
+		lock (_diagnosticsLock)
+		{
+			TimeSpan timeSpan = utcNow - _diagnosticsFpsWindowStartUtc;
+			if (timeSpan.TotalSeconds >= 1.0)
+			{
+				long num2 = Math.Max(0L, num - _diagnosticsFpsWindowStartRenderedFrames);
+				_renderFramesPerSecond = (double)num2 / Math.Max(0.001, timeSpan.TotalSeconds);
+				_diagnosticsFpsWindowStartUtc = utcNow;
+				_diagnosticsFpsWindowStartRenderedFrames = num;
+			}
+			e = (_diagnostics = new Direct3D12PreviewDiagnostics(previewPath, DeviceDescription, string.IsNullOrWhiteSpace(frameFormat) ? "unknown" : frameFormat, width, height, sourceFramesPerSecond, submittedFrames, num, droppedFrames, _renderFramesPerSecond, denoiseEnabled, denoiseStrength, colorSettings.HasVisibleAdjustments, recordingMode, fallbackReason, frameNumber, utcNow));
+		}
+		this.DiagnosticsChanged?.Invoke(this, e);
+	}
+
+	private static string FormatUploadFallbackPath(string path, string? directTextureFailureReason)
+	{
+		if (string.IsNullOrWhiteSpace(directTextureFailureReason))
+		{
+			return path;
+		}
+		string text = directTextureFailureReason.Trim();
+		if (text.Length > 160)
+		{
+			text = text.Substring(0, 157) + "...";
+		}
+		return path + "; texture unavailable: " + text;
+	}
+
+	private static string? CombineTextureFailureReasons(string? directTextureFailureReason, string? sharedBridgeFailureReason)
+	{
+		string text = (string.IsNullOrWhiteSpace(directTextureFailureReason) ? null : ("direct: " + directTextureFailureReason.Trim()));
+		string text2 = (string.IsNullOrWhiteSpace(sharedBridgeFailureReason) ? null : ("bridge: " + sharedBridgeFailureReason.Trim()));
+		if (text == null)
+		{
+			if (text2 != null)
+			{
+				return text2;
+			}
+			return null;
+		}
+		if (text2 != null)
+		{
+			return text + "; " + text2;
+		}
+		return text;
+	}
+
+	private bool TryRenderNv12TextureUpload(Direct3D12SwapChainRenderer renderer, TextureNativeFrameLease frame, string? textureFailureReason, VideoFrameColorSettings colorSettings, bool denoiseEnabled, double denoiseStrength, PreviewTrackingOverlay trackingOverlay)
+	{
+		byte[] nv12PreviewBytes = frame.Nv12PreviewBytes;
+		if (nv12PreviewBytes == null || nv12PreviewBytes.Length <= 0 || frame.Nv12PreviewStride <= 0)
+		{
+			return false;
+		}
+		if (!renderer.RenderNv12Frame(nv12PreviewBytes, frame.Width, frame.Height, frame.Nv12PreviewStride, frame.FrameNumber, colorSettings, denoiseEnabled, denoiseStrength, trackingOverlay))
+		{
+			return false;
+		}
+		string text = FormatUploadFallbackPath("DX12 NV12 texture upload", textureFailureReason);
+		ReportPreviewPath(text);
+		RecordRenderedFrame(text, "NV12 texture upload", frame.Width, frame.Height, frame.FramesPerSecond, denoiseEnabled, denoiseStrength, colorSettings, RecordingMode, textureFailureReason, frame.FrameNumber);
+		return true;
+	}
+
+	protected override void OnViewportCreated(nint hwnd, int width, int height)
+	{
+		nint num = Interlocked.Exchange(ref _nativeD3D12Device, IntPtr.Zero);
+		Direct3D12SwapChainRenderer direct3D12SwapChainRenderer;
+		try
+		{
+			lock (_rendererLock)
+			{
+				direct3D12SwapChainRenderer = (_renderer = new Direct3D12SwapChainRenderer(hwnd, width, height, num));
+			}
+			num = IntPtr.Zero;
+		}
+		finally
+		{
+			if (num != IntPtr.Zero)
+			{
+				Marshal.Release(num);
+			}
+		}
+		this.StatusChanged?.Invoke(this, direct3D12SwapChainRenderer.DeviceDescription + " preview surface ready.");
+	}
+
+	protected override void OnViewportCreateFailed(Exception ex)
+	{
+		this.StatusChanged?.Invoke(this, "DX12 preview surface unavailable: " + ex.Message);
+	}
+
+	protected override void OnViewportDestroying()
+	{
+		TryDisposeRenderer("window destroy");
+	}
+
+	protected override void OnViewportResized(int width, int height)
+	{
+		lock (_rendererLock)
+		{
+			_renderer?.Resize(width, height);
+		}
+	}
+
+	protected override void OnViewportResizeFailed(Exception ex)
+	{
+		this.StatusChanged?.Invoke(this, "DX12 preview resize failed: " + ex.Message);
+	}
+
+	public new void Dispose()
+	{
+		if (!_disposed)
+		{
+			_disposed = true;
+			StopRenderWorker();
+			nint num = Interlocked.Exchange(ref _nativeD3D12Device, IntPtr.Zero);
+			if (num != IntPtr.Zero)
+			{
+				Marshal.Release(num);
+			}
+			base.Dispose();
+		}
+	}
+
+	private void DisposeRenderer()
+	{
+		lock (_rendererLock)
+		{
+			DisposeRendererCore();
+		}
+	}
+
+	private void TryDisposeRenderer(string context)
+	{
+		if (!Monitor.TryEnter(_rendererLock, RendererDisposeLockTimeout))
+		{
+			this.StatusChanged?.Invoke(this, "DX12 preview " + context + " deferred because the renderer is busy.");
+			return;
+		}
+		try
+		{
+			DisposeRendererCore();
+		}
+		finally
+		{
+			Monitor.Exit(_rendererLock);
+		}
+	}
+
+	private void DisposeRendererCore()
+	{
+		_renderer?.Dispose();
+		_renderer = null;
+	}
 }
-

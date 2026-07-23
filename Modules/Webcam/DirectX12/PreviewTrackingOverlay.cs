@@ -1,87 +1,43 @@
+using System;
+using System.Collections.Generic;
+
 namespace AvatarBuilder.Modules.Webcam.DirectX12;
 
 public sealed record PreviewTrackingOverlay
 {
-    public static PreviewTrackingOverlay Empty { get; } = new();
+	public static PreviewTrackingOverlay Empty { get; } = new PreviewTrackingOverlay();
 
-    public PreviewOverlayRect? FaceBox { get; init; }
+	public PreviewOverlayRect? FaceBox { get; init; }
 
-    public PreviewOverlayPolyline? FaceContour { get; init; }
+	public PreviewOverlayPolyline? FaceContour { get; init; }
 
-    public PreviewOverlayPolyline? JawContour { get; init; }
+	public PreviewOverlayPolyline? JawContour { get; init; }
 
-    public PreviewOverlayPolyline? LeftEyeContour { get; init; }
+	public PreviewOverlayPolyline? LeftEyeContour { get; init; }
 
-    public PreviewOverlayPolyline? RightEyeContour { get; init; }
+	public PreviewOverlayPolyline? RightEyeContour { get; init; }
 
-    public PreviewOverlayPolyline? LeftBrowContour { get; init; }
+	public PreviewOverlayPolyline? LeftBrowContour { get; init; }
 
-    public PreviewOverlayPolyline? RightBrowContour { get; init; }
+	public PreviewOverlayPolyline? RightBrowContour { get; init; }
 
-    public PreviewOverlayPolyline? OuterLipContour { get; init; }
+	public PreviewOverlayPolyline? OuterLipContour { get; init; }
 
-    public PreviewOverlayPolyline? InnerLipContour { get; init; }
+	public PreviewOverlayPolyline? InnerLipContour { get; init; }
 
-    public PreviewOverlayMesh? FaceMesh { get; init; }
+	public PreviewOverlayMesh? FaceMesh { get; init; }
 
-    public bool HasContent => FaceBox is not null
-        || FaceContour is not null
-        || JawContour is not null
-        || LeftEyeContour is not null
-        || RightEyeContour is not null
-        || LeftBrowContour is not null
-        || RightBrowContour is not null
-        || OuterLipContour is not null
-        || InnerLipContour is not null
-        || FaceMesh is not null;
-}
+	public IReadOnlyList<PreviewOverlayDiagnosticMesh> DiagnosticMeshes { get; init; } = Array.Empty<PreviewOverlayDiagnosticMesh>();
 
-public sealed record PreviewOverlayPolyline(
-    IReadOnlyList<PreviewOverlayPoint> Points,
-    bool Closed,
-    bool Inferred = false);
-
-public sealed record PreviewOverlayMesh(
-    IReadOnlyList<PreviewOverlayPoint> Points,
-    IReadOnlyList<PreviewOverlayEdge> Edges,
-    IReadOnlyList<PreviewOverlayIndexedPath> FeaturePaths,
-    IReadOnlyList<bool> FeaturePointMask);
-
-public readonly record struct PreviewOverlayEdge(int FromIndex, int ToIndex);
-
-public sealed record PreviewOverlayIndexedPath(
-    IReadOnlyList<int> PointIndices,
-    bool Closed,
-    PreviewOverlayMeshFeatureRole Role);
-
-public enum PreviewOverlayMeshFeatureRole
-{
-    Eye,
-    Brow,
-    Mouth,
-    Jaw,
-    Nose,
-    Face
-}
-
-public readonly record struct PreviewOverlayPoint(double X, double Y)
-{
-    public PreviewOverlayPoint Clamp()
-    {
-        return new PreviewOverlayPoint(
-            Math.Clamp(X, 0d, 1d),
-            Math.Clamp(Y, 0d, 1d));
-    }
-}
-
-public readonly record struct PreviewOverlayRect(double Left, double Top, double Right, double Bottom)
-{
-    public PreviewOverlayRect Clamp()
-    {
-        var left = Math.Clamp(Math.Min(Left, Right), 0d, 1d);
-        var top = Math.Clamp(Math.Min(Top, Bottom), 0d, 1d);
-        var right = Math.Clamp(Math.Max(Left, Right), 0d, 1d);
-        var bottom = Math.Clamp(Math.Max(Top, Bottom), 0d, 1d);
-        return new PreviewOverlayRect(left, top, right, bottom);
-    }
+	public bool HasContent
+	{
+		get
+		{
+			if (!FaceBox.HasValue && (object)FaceContour == null && (object)JawContour == null && (object)LeftEyeContour == null && (object)RightEyeContour == null && (object)LeftBrowContour == null && (object)RightBrowContour == null && (object)OuterLipContour == null && (object)InnerLipContour == null && (object)FaceMesh == null)
+			{
+				return DiagnosticMeshes.Count > 0;
+			}
+			return true;
+		}
+	}
 }
