@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics.CodeAnalysis;
 using System.Linq;
 
 namespace AvatarBuilder.Modules.Vision.MediaPipe.Reconstruction.Stereo;
@@ -19,7 +20,7 @@ public static class MediaPipeStereoProbabilityFaceBuilder
 		public void Add(MediaPipeStereoRawPointBinState bin)
 		{
 			int key = Quantize(bin.MeanZInches, 0.08);
-			if (!_depthClusters.TryGetValue(key, out DepthCluster value))
+			if (!_depthClusters.TryGetValue(key, out DepthCluster? value))
 			{
 				value = new DepthCluster();
 				_depthClusters.Add(key, value);
@@ -28,7 +29,7 @@ public static class MediaPipeStereoProbabilityFaceBuilder
 			_totalAcceptedVotes += bin.AcceptedObservationCount;
 		}
 
-		public bool TryCreateCandidate(out CandidateVertex candidate)
+		public bool TryCreateCandidate([NotNullWhen(true)] out CandidateVertex? candidate)
 		{
 			candidate = null;
 			if (_depthClusters.Count == 0 || _totalAcceptedVotes < 3)
@@ -49,7 +50,7 @@ public static class MediaPipeStereoProbabilityFaceBuilder
 			DepthCluster depthCluster = new DepthCluster();
 			for (int i = -1; i <= 1; i++)
 			{
-				if (_depthClusters.TryGetValue(num + i, out DepthCluster value))
+				if (_depthClusters.TryGetValue(num + i, out DepthCluster? value))
 				{
 					depthCluster.Add(value);
 				}
@@ -71,7 +72,7 @@ public static class MediaPipeStereoProbabilityFaceBuilder
 			long num2 = 0L;
 			for (int i = -1; i <= 1; i++)
 			{
-				if (_depthClusters.TryGetValue(center + i, out DepthCluster value))
+				if (_depthClusters.TryGetValue(center + i, out DepthCluster? value))
 				{
 					num += value.ObservationCount;
 					num2 += value.AcceptedVotes;
@@ -228,7 +229,7 @@ public static class MediaPipeStereoProbabilityFaceBuilder
 		Dictionary<GridKey, CandidateVertex> dictionary2 = new Dictionary<GridKey, CandidateVertex>();
 		foreach (KeyValuePair<GridKey, SurfaceCell> item5 in dictionary)
 		{
-			if (item5.Value.TryCreateCandidate(out CandidateVertex candidate))
+			if (item5.Value.TryCreateCandidate(out CandidateVertex? candidate))
 			{
 				dictionary2.Add(item5.Key, candidate);
 			}
@@ -365,7 +366,7 @@ public static class MediaPipeStereoProbabilityFaceBuilder
 		{
 			for (int x = -1; x <= 1; x++)
 			{
-				if ((x != 0 || y != 0) && surface.TryGetValue(new GridKey(center.X + x, center.Y + y), out CandidateVertex value))
+				if ((x != 0 || y != 0) && surface.TryGetValue(new GridKey(center.X + x, center.Y + y), out CandidateVertex? value))
 				{
 					yield return value;
 				}
@@ -498,7 +499,7 @@ public static class MediaPipeStereoProbabilityFaceBuilder
 			{
 				for (int j = -1; j <= 1; j++)
 				{
-					if (candidates.TryGetValue(new GridKey(candidate.Key.X + j, candidate.Key.Y + i), out CandidateVertex value) && !(Math.Abs(value.Z - candidate.Value.Z) > 0.55))
+					if (candidates.TryGetValue(new GridKey(candidate.Key.X + j, candidate.Key.Y + i), out CandidateVertex? value) && !(Math.Abs(value.Z - candidate.Value.Z) > 0.55))
 					{
 						double num3 = ((j == 0 && i == 0) ? 2.0 : ((j == 0 || i == 0) ? 1.0 : 0.7)) * (0.25 + value.Confidence);
 						num += value.Z * num3;

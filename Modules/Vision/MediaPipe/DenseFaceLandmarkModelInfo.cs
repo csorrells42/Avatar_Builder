@@ -164,7 +164,7 @@ public sealed class DenseFaceLandmarkModelInfo
 		}
 		try
 		{
-			Manifest manifest = JsonSerializer.Deserialize<Manifest>(File.ReadAllText(text2), ManifestJsonOptions);
+			Manifest? manifest = JsonSerializer.Deserialize<Manifest>(File.ReadAllText(text2), ManifestJsonOptions);
 			string path = (string.IsNullOrWhiteSpace(manifest?.ModelFile) ? "face_landmarker.task" : manifest.ModelFile);
 			return new DenseFaceLandmarkModelInfo
 			{

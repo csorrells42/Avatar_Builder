@@ -738,8 +738,8 @@ public sealed class FaceLandmarkTemporalReconstructor
 
 	private static IReadOnlyList<Point> CreateOvalContour(double centerX, double centerY, double halfWidth, double halfHeight)
 	{
-		return new global::_003C_003Ez__ReadOnlyArray<Point>(new Point[8]
-		{
+		return
+		[
 			new Point(centerX - halfWidth, centerY),
 			new Point(centerX - halfWidth * 0.72, centerY - halfHeight * 0.7),
 			new Point(centerX, centerY - halfHeight),
@@ -748,6 +748,6 @@ public sealed class FaceLandmarkTemporalReconstructor
 			new Point(centerX + halfWidth * 0.72, centerY + halfHeight * 0.7),
 			new Point(centerX, centerY + halfHeight),
 			new Point(centerX - halfWidth * 0.72, centerY + halfHeight * 0.7)
-		});
+		];
 	}
 }

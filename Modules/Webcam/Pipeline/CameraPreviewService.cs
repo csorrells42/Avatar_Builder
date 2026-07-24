@@ -141,9 +141,9 @@ public sealed class CameraPreviewService : ICameraPreviewService, IDisposable
 
 	private async Task<bool> StartDirectShowAsync(CameraDevice camera, CameraVideoMode? requestedMode, CancellationToken cancellationToken)
 	{
-		foreach (CameraVideoMode item in CreateDirectShowModeAttempts(requestedMode))
+		foreach (CameraVideoMode? item in CreateDirectShowModeAttempts(requestedMode))
 		{
-			if (item != requestedMode)
+			if (item is not null && item != requestedMode)
 			{
 				this.StatusChanged?.Invoke(this, "Requested camera format did not open; retrying " + item.Label + " without lowering resolution.");
 			}

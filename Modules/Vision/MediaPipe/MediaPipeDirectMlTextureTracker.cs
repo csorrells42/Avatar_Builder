@@ -1,4 +1,5 @@
 using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
@@ -43,6 +44,10 @@ internal sealed class MediaPipeDirectMlTextureTracker : IDisposable
 
 	private readonly InferenceSession _landmarker;
 
+	private readonly OrtValue[] _detectorInputValues;
+
+	private readonly OrtValue[] _landmarkerInputValues;
+
 	private readonly RunOptions _runOptions = new();
 
 	private MediaPipeGpuRoi? _trackedRoi;
@@ -72,6 +77,8 @@ internal sealed class MediaPipeDirectMlTextureTracker : IDisposable
 		}
 
 		_preprocessor = new MediaPipeGpuTensorPreprocessor(firstFrame);
+		_detectorInputValues = [_preprocessor.DetectorTensor];
+		_landmarkerInputValues = [_preprocessor.LandmarkTensor];
 		InferenceSession? detector = null;
 		InferenceSession? landmarker = null;
 		try
@@ -109,32 +116,27 @@ internal sealed class MediaPipeDirectMlTextureTracker : IDisposable
 	{
 		ObjectDisposedException.ThrowIf(_disposed, this);
 		long totalStarted = Stopwatch.GetTimestamp();
-		var stages = new Dictionary<string, double>(
-			StringComparer.OrdinalIgnoreCase);
+		var stages = new DirectMlStageTimings();
 
 		MediaPipeGpuRoi roi;
 		float detectorScore = 0f;
 		if (_trackedRoi is MediaPipeGpuRoi tracked)
 		{
 			roi = tracked;
-			stages["detector"] = 0d;
+			stages.DetectorMilliseconds = 0d;
 		}
 		else
 		{
 			long preprocessStarted = Stopwatch.GetTimestamp();
 			MediaPipeDetectorTransform transform =
 				_preprocessor.PreprocessDetector(frame);
-			stages["detectorGpuPreprocess"] =
+			stages.DetectorGpuPreprocessMilliseconds =
 				Stopwatch.GetElapsedTime(preprocessStarted).TotalMilliseconds;
 
 			long detectorStarted = Stopwatch.GetTimestamp();
 			using IDisposableReadOnlyCollection<OrtValue> detectorOutputs =
-				_detector.Run(
-					_runOptions,
-					DetectorInputNames,
-					[_preprocessor.DetectorTensor],
-					DetectorOutputNames);
-			stages["detector"] =
+				RunDetector();
+			stages.DetectorMilliseconds =
 				Stopwatch.GetElapsedTime(detectorStarted).TotalMilliseconds;
 
 			ReadOnlySpan<float> regressors =
@@ -161,17 +163,13 @@ internal sealed class MediaPipeDirectMlTextureTracker : IDisposable
 
 		long cropStarted = Stopwatch.GetTimestamp();
 		_preprocessor.PreprocessLandmarks(frame, roi);
-		stages["landmarkGpuPreprocess"] =
+		stages.LandmarkGpuPreprocessMilliseconds =
 			Stopwatch.GetElapsedTime(cropStarted).TotalMilliseconds;
 
 		long landmarkStarted = Stopwatch.GetTimestamp();
 		using IDisposableReadOnlyCollection<OrtValue> landmarkOutputs =
-			_landmarker.Run(
-				_runOptions,
-				LandmarkerInputNames,
-				[_preprocessor.LandmarkTensor],
-				LandmarkerOutputNames);
-		stages["landmarker"] =
+			RunLandmarker();
+		stages.LandmarkerMilliseconds =
 			Stopwatch.GetElapsedTime(landmarkStarted).TotalMilliseconds;
 
 		ReadOnlySpan<float> rawLandmarks =
@@ -194,13 +192,13 @@ internal sealed class MediaPipeDirectMlTextureTracker : IDisposable
 		MediaPipeSidecarLandmark[] landmarks =
 			ProjectLandmarks(rawLandmarks, roi, frame.Width, frame.Height);
 		_trackedRoi = RoiFromLandmarks(landmarks, frame.Width, frame.Height);
-		stages["project"] =
+		stages.ProjectMilliseconds =
 			Stopwatch.GetElapsedTime(projectionStarted).TotalMilliseconds;
 
 		double totalMilliseconds =
 			Stopwatch.GetElapsedTime(totalStarted).TotalMilliseconds;
-		stages["detectorScore"] = detectorScore;
-		stages["presence"] = presence;
+		stages.DetectorScore = detectorScore;
+		stages.Presence = presence;
 		MediaPipeSidecarResponse response = new()
 		{
 			Ok = true,
@@ -300,6 +298,38 @@ internal sealed class MediaPipeDirectMlTextureTracker : IDisposable
 		};
 	}
 
+	private IDisposableReadOnlyCollection<OrtValue> RunDetector()
+	{
+		try
+		{
+			return _detector.Run(
+				_runOptions,
+				DetectorInputNames,
+				_detectorInputValues,
+				DetectorOutputNames);
+		}
+		finally
+		{
+			_preprocessor.SignalDetectorInferenceSubmitted();
+		}
+	}
+
+	private IDisposableReadOnlyCollection<OrtValue> RunLandmarker()
+	{
+		try
+		{
+			return _landmarker.Run(
+				_runOptions,
+				LandmarkerInputNames,
+				_landmarkerInputValues,
+				LandmarkerOutputNames);
+		}
+		finally
+		{
+			_preprocessor.SignalLandmarkInferenceSubmitted();
+		}
+	}
+
 	private static InferenceSession CreateSession(
 		string modelPath,
 		nint d3d12Device,
@@ -363,20 +393,22 @@ internal sealed class MediaPipeDirectMlTextureTracker : IDisposable
 				centerX + width * 0.5f,
 				centerY + height * 0.5f,
 				transform);
-			DetectorPoint[] keypoints = new DetectorPoint[6];
-			for (int keypointIndex = 0; keypointIndex < keypoints.Length; keypointIndex++)
-			{
-				int keypointOffset = rawOffset + 4 + keypointIndex * 2;
-				(float x, float y) = DetectorPointToFrame(
-					regressors[keypointOffset] /
-						MediaPipeGpuTensorPreprocessor.DetectorSize +
-						anchor.X,
-					regressors[keypointOffset + 1] /
-						MediaPipeGpuTensorPreprocessor.DetectorSize +
-						anchor.Y,
-					transform);
-				keypoints[keypointIndex] = new DetectorPoint(x, y);
-			}
+			(float firstEyeX, float firstEyeY) = DetectorPointToFrame(
+				regressors[rawOffset + 4] /
+					MediaPipeGpuTensorPreprocessor.DetectorSize +
+					anchor.X,
+				regressors[rawOffset + 5] /
+					MediaPipeGpuTensorPreprocessor.DetectorSize +
+					anchor.Y,
+				transform);
+			(float secondEyeX, float secondEyeY) = DetectorPointToFrame(
+				regressors[rawOffset + 6] /
+					MediaPipeGpuTensorPreprocessor.DetectorSize +
+					anchor.X,
+				regressors[rawOffset + 7] /
+					MediaPipeGpuTensorPreprocessor.DetectorSize +
+					anchor.Y,
+				transform);
 
 			bestScore = score;
 			best = new DetectorCandidate(
@@ -385,7 +417,8 @@ internal sealed class MediaPipeDirectMlTextureTracker : IDisposable
 				minimumY,
 				maximumX,
 				maximumY,
-				keypoints);
+				new DetectorPoint(firstEyeX, firstEyeY),
+				new DetectorPoint(secondEyeX, secondEyeY));
 			found = true;
 		}
 		return found;
@@ -408,8 +441,8 @@ internal sealed class MediaPipeDirectMlTextureTracker : IDisposable
 	private static MediaPipeGpuRoi RoiFromDetection(
 		DetectorCandidate candidate)
 	{
-		DetectorPoint firstEye = candidate.Keypoints[0];
-		DetectorPoint secondEye = candidate.Keypoints[1];
+		DetectorPoint firstEye = candidate.FirstEye;
+		DetectorPoint secondEye = candidate.SecondEye;
 		DetectorPoint leftEye =
 			firstEye.X <= secondEye.X ? firstEye : secondEye;
 		DetectorPoint rightEye =
@@ -600,5 +633,125 @@ internal sealed class MediaPipeDirectMlTextureTracker : IDisposable
 		float MinimumY,
 		float MaximumX,
 		float MaximumY,
-		DetectorPoint[] Keypoints);
+		DetectorPoint FirstEye,
+		DetectorPoint SecondEye);
+
+	private sealed class DirectMlStageTimings
+		: IReadOnlyDictionary<string, double>
+	{
+		public double? DetectorGpuPreprocessMilliseconds { get; set; }
+
+		public double? DetectorMilliseconds { get; set; }
+
+		public double? LandmarkGpuPreprocessMilliseconds { get; set; }
+
+		public double? LandmarkerMilliseconds { get; set; }
+
+		public double? ProjectMilliseconds { get; set; }
+
+		public double? DetectorScore { get; set; }
+
+		public double? Presence { get; set; }
+
+		public int Count =>
+			(DetectorGpuPreprocessMilliseconds.HasValue ? 1 : 0) +
+			(DetectorMilliseconds.HasValue ? 1 : 0) +
+			(LandmarkGpuPreprocessMilliseconds.HasValue ? 1 : 0) +
+			(LandmarkerMilliseconds.HasValue ? 1 : 0) +
+			(ProjectMilliseconds.HasValue ? 1 : 0) +
+			(DetectorScore.HasValue ? 1 : 0) +
+			(Presence.HasValue ? 1 : 0);
+
+		public IEnumerable<string> Keys
+		{
+			get
+			{
+				foreach (KeyValuePair<string, double> pair in this)
+				{
+					yield return pair.Key;
+				}
+			}
+		}
+
+		public IEnumerable<double> Values
+		{
+			get
+			{
+				foreach (KeyValuePair<string, double> pair in this)
+				{
+					yield return pair.Value;
+				}
+			}
+		}
+
+		public double this[string key] =>
+			TryGetValue(key, out double value)
+				? value
+				: throw new KeyNotFoundException(key);
+
+		public bool ContainsKey(string key)
+		{
+			return TryGetValue(key, out _);
+		}
+
+		public bool TryGetValue(string key, out double value)
+		{
+			double? candidate = key switch
+			{
+				"detectorGpuPreprocess" =>
+					DetectorGpuPreprocessMilliseconds,
+				"detector" => DetectorMilliseconds,
+				"landmarkGpuPreprocess" =>
+					LandmarkGpuPreprocessMilliseconds,
+				"landmarker" => LandmarkerMilliseconds,
+				"project" => ProjectMilliseconds,
+				"detectorScore" => DetectorScore,
+				"presence" => Presence,
+				_ => null
+			};
+			value = candidate.GetValueOrDefault();
+			return candidate.HasValue;
+		}
+
+		public IEnumerator<KeyValuePair<string, double>> GetEnumerator()
+		{
+			if (DetectorGpuPreprocessMilliseconds is double detectorPreprocess)
+			{
+				yield return new(
+					"detectorGpuPreprocess",
+					detectorPreprocess);
+			}
+			if (DetectorMilliseconds is double detector)
+			{
+				yield return new("detector", detector);
+			}
+			if (LandmarkGpuPreprocessMilliseconds is double landmarkPreprocess)
+			{
+				yield return new(
+					"landmarkGpuPreprocess",
+					landmarkPreprocess);
+			}
+			if (LandmarkerMilliseconds is double landmarker)
+			{
+				yield return new("landmarker", landmarker);
+			}
+			if (ProjectMilliseconds is double project)
+			{
+				yield return new("project", project);
+			}
+			if (DetectorScore is double detectorScore)
+			{
+				yield return new("detectorScore", detectorScore);
+			}
+			if (Presence is double presence)
+			{
+				yield return new("presence", presence);
+			}
+		}
+
+		IEnumerator IEnumerable.GetEnumerator()
+		{
+			return GetEnumerator();
+		}
+	}
 }

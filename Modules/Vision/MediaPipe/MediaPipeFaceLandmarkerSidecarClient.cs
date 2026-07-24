@@ -109,9 +109,10 @@ internal sealed class MediaPipeFaceLandmarkerSidecarClient : IDisposable
 					}
 					double prepareMilliseconds = ElapsedMilliseconds(prepareStartedAt);
 					long roundTripStartedAt = _collectDiagnostics ? Stopwatch.GetTimestamp() : 0L;
-					_process.StandardInput.WriteLine(value);
-					_process.StandardInput.Flush();
-					Task<string> task = _process.StandardOutput.ReadLineAsync();
+					Process process = _process ?? throw new InvalidOperationException("MediaPipe sidecar process is unavailable.");
+					process.StandardInput.WriteLine(value);
+					process.StandardInput.Flush();
+					Task<string?> task = process.StandardOutput.ReadLineAsync();
 					TimeSpan timeout = (_firstResponseAfterStart ? TimeSpan.FromMilliseconds(ReadStartupTimeoutMilliseconds()) : _timeout);
 					if (!task.Wait(timeout))
 					{
@@ -119,7 +120,7 @@ internal sealed class MediaPipeFaceLandmarkerSidecarClient : IDisposable
 						return Error(Status);
 					}
 					_firstResponseAfterStart = false;
-					string result = task.Result;
+					string? result = task.Result;
 					double roundTripMilliseconds = ElapsedMilliseconds(roundTripStartedAt);
 					if (string.IsNullOrWhiteSpace(result))
 					{
@@ -127,7 +128,7 @@ internal sealed class MediaPipeFaceLandmarkerSidecarClient : IDisposable
 						return Error(Status);
 					}
 					long parseStartedAt = _collectDiagnostics ? Stopwatch.GetTimestamp() : 0L;
-					MediaPipeSidecarResponse mediaPipeSidecarResponse = JsonSerializer.Deserialize<MediaPipeSidecarResponse>(result, JsonOptions);
+					MediaPipeSidecarResponse? mediaPipeSidecarResponse = JsonSerializer.Deserialize<MediaPipeSidecarResponse>(result, JsonOptions);
 					double parseMilliseconds = ElapsedMilliseconds(parseStartedAt);
 					if (mediaPipeSidecarResponse == null)
 					{
@@ -209,13 +210,13 @@ internal sealed class MediaPipeFaceLandmarkerSidecarClient : IDisposable
 			Status = "MediaPipe sidecar client is stopped.";
 			return false;
 		}
-		Process process = _process;
+		Process? process = _process;
 		if (process != null && !process.HasExited)
 		{
 			return true;
 		}
 		StopProcess();
-		Process process2 = null;
+		Process? process2 = null;
 		try
 		{
 			process2 = new Process
@@ -268,7 +269,7 @@ internal sealed class MediaPipeFaceLandmarkerSidecarClient : IDisposable
 
 	private void StopProcess()
 	{
-		Process process = Interlocked.Exchange(ref _process, null);
+		Process? process = Interlocked.Exchange(ref _process, null);
 		_lastSentFrameDescriptor = default;
 		if (process == null)
 		{
@@ -296,7 +297,7 @@ internal sealed class MediaPipeFaceLandmarkerSidecarClient : IDisposable
 		{
 			while (!process.HasExited)
 			{
-				string text = process.StandardError.ReadLine();
+				string? text = process.StandardError.ReadLine();
 				if (text != null)
 				{
 					if (!string.IsNullOrWhiteSpace(text))

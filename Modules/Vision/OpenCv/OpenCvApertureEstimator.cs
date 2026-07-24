@@ -483,8 +483,8 @@ public static class OpenCvApertureEstimator
 
 	private static IReadOnlyList<System.Windows.Point> CreateOvalContour(double centerX, double centerY, double halfWidth, double halfHeight)
 	{
-		return new global::_003C_003Ez__ReadOnlyArray<System.Windows.Point>(new System.Windows.Point[8]
-		{
+		return
+		[
 			new System.Windows.Point(centerX - halfWidth, centerY),
 			new System.Windows.Point(centerX - halfWidth * 0.72, centerY - halfHeight * 0.7),
 			new System.Windows.Point(centerX, centerY - halfHeight),
@@ -493,7 +493,7 @@ public static class OpenCvApertureEstimator
 			new System.Windows.Point(centerX + halfWidth * 0.72, centerY + halfHeight * 0.7),
 			new System.Windows.Point(centerX, centerY + halfHeight),
 			new System.Windows.Point(centerX - halfWidth * 0.72, centerY + halfHeight * 0.7)
-		});
+		];
 	}
 
 	private static OpenCvSharp.Rect ClampRect(OpenCvSharp.Rect rect, int width, int height)

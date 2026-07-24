@@ -107,8 +107,8 @@ internal sealed class MediaFoundationVideoRecorder : IDisposable
 				LastSkipReason = "writer is already finalized";
 				return false;
 			}
-			IMFMediaBuffer buffer = null;
-			IMFSample sample = null;
+			IMFMediaBuffer? buffer = null;
+			IMFSample? sample = null;
 			try
 			{
 				MediaFoundationInterop.ThrowIfFailed(MediaFoundationInterop.MFCreateMemoryBuffer(_frameBytes, out buffer));
@@ -188,8 +188,8 @@ internal sealed class MediaFoundationVideoRecorder : IDisposable
 		{
 			MediaFoundationInterop.ReleaseComObject(attributes);
 		}
-		IMFMediaType mediaType = null;
-		IMFMediaType mediaType2 = null;
+		IMFMediaType? mediaType = null;
+		IMFMediaType? mediaType2 = null;
 		try
 		{
 			MediaFoundationInterop.ThrowIfFailed(MediaFoundationInterop.MFCreateMediaType(out mediaType));

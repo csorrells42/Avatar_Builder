@@ -30,7 +30,7 @@ public static class TextureNativePreviewPolicy
 	public static bool TryGetPreviewFailure(CameraDevice camera, CameraVideoMode mode, out string reason)
 	{
 		string key = CreatePreviewFailureKey(camera, mode);
-		if (!PreviewFailures.TryGetValue(key, out PreviewFailure value))
+		if (!PreviewFailures.TryGetValue(key, out PreviewFailure? value))
 		{
 			reason = string.Empty;
 			return false;

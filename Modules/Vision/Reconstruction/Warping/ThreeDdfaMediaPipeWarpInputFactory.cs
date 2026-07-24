@@ -219,7 +219,7 @@ public static class ThreeDdfaMediaPipeWarpInputFactory
 
 	private static Vector3 GetVector(IReadOnlyDictionary<int, MediaPipeNormalizedFaceVertex> vertices, int index)
 	{
-		if (!vertices.TryGetValue(index, out MediaPipeNormalizedFaceVertex value))
+			if (!vertices.TryGetValue(index, out MediaPipeNormalizedFaceVertex? value))
 		{
 			throw new InvalidOperationException($"MediaPipe geometry is missing required landmark {index}.");
 		}

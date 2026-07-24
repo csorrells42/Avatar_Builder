@@ -25,18 +25,18 @@ internal sealed class DenseFaceWarpControlDocument
 			MediaPipeLandmarkIndex = control.MediaPipeLandmarkIndex,
 			Role = control.Role,
 			Confidence = control.Confidence,
-			Source = new global::_003C_003Ez__ReadOnlyArray<double>(new double[3]
-			{
+			Source =
+			[
 				control.Source.X,
 				control.Source.Y,
 				control.Source.Z
-			}),
-			Target = new global::_003C_003Ez__ReadOnlyArray<double>(new double[3]
-			{
+			],
+			Target =
+			[
 				control.Target.X,
 				control.Target.Y,
 				control.Target.Z
-			})
+			]
 		};
 	}
 }

@@ -89,7 +89,7 @@ public sealed class OpenCvFaceFeatureTracker : IDisposable
 			return FaceFeatureDetection.None;
 		}
 		RememberFace(face);
-		YuNetCueBoxes yuNetCueBoxes = (((object)faceLocatorResult.YuNetFace == null) ? null : EstimateCueBoxesFromYuNet(faceLocatorResult.YuNetFace, mat2.Width, mat2.Height));
+		YuNetCueBoxes? yuNetCueBoxes = ((faceLocatorResult.YuNetFace is null) ? null : EstimateCueBoxesFromYuNet(faceLocatorResult.YuNetFace, mat2.Width, mat2.Height));
 		OpenCvSharp.Rect? rect = DetectEye(mat2, face, _eyeCascade, leftSide: true);
 		OpenCvSharp.Rect? rect2 = DetectEye(mat2, face, _eyeCascade, leftSide: false);
 		OpenCvSharp.Rect? rect3 = DetectMouth(mat2, face, _mouthCascade);
@@ -120,7 +120,7 @@ public sealed class OpenCvFaceFeatureTracker : IDisposable
 		return new FaceFeatureDetection
 		{
 			HasFace = true,
-			Source = "OpenCV Haar dynamic face tracker with aperture refinement (" + faceLocatorResult.Source + (((object)yuNetCueBoxes == null) ? "" : ", YuNet cue boxes") + ")",
+			Source = "OpenCV Haar dynamic face tracker with aperture refinement (" + faceLocatorResult.Source + ((yuNetCueBoxes is null) ? "" : ", YuNet cue boxes") + ")",
 			FaceBox = ToNormalizedRect(face, mat2.Width, mat2.Height),
 			LeftEyeBox = ToNormalizedRect(box, mat2.Width, mat2.Height),
 			RightEyeBox = ToNormalizedRect(box2, mat2.Width, mat2.Height),
@@ -183,14 +183,14 @@ public sealed class OpenCvFaceFeatureTracker : IDisposable
 				return new FaceLocatorResult(face, "local reacquire", null);
 			}
 		}
-		FaceCandidate faceCandidate = FaceCandidateSelector.SelectBest(from yuNetFaceDetection in _yuNetDetector.DetectAll(gray)
+		FaceCandidate? faceCandidate = FaceCandidateSelector.SelectBest(from yuNetFaceDetection in _yuNetDetector.DetectAll(gray)
 			select new FaceCandidate(yuNetFaceDetection.FaceBox, $"YuNet DNN lock {yuNetFaceDetection.Score:P0}", yuNetFaceDetection, yuNetFaceDetection.Score), _lastFace, gray.Width, gray.Height);
-		if ((object)faceCandidate != null && FaceCandidateSelector.IsAcceptableTrackingCandidate(faceCandidate, _lastFace, gray.Width, gray.Height, _framesSinceFaceLock))
+		if (faceCandidate is not null && FaceCandidateSelector.IsAcceptableTrackingCandidate(faceCandidate, _lastFace, gray.Width, gray.Height, _framesSinceFaceLock))
 		{
 			return new FaceLocatorResult(faceCandidate.Face, FormatFaceSelectionSource(faceCandidate, _lastFace), faceCandidate.YuNetFace);
 		}
-		FaceCandidate faceCandidate2 = FaceCandidateSelector.SelectBest((_faceCascade?.DetectMultiScale(gray, 1.08, 4, HaarDetectionTypes.ScaleImage, new OpenCvSharp.Size(Math.Max(40, gray.Width / 12), Math.Max(40, gray.Height / 12))) ?? Array.Empty<OpenCvSharp.Rect>()).Select((OpenCvSharp.Rect face2) => new FaceCandidate(face2, "global Haar lock", null, 0.58)), _lastFace, gray.Width, gray.Height);
-		if ((object)faceCandidate2 != null && FaceCandidateSelector.IsAcceptableTrackingCandidate(faceCandidate2, _lastFace, gray.Width, gray.Height, _framesSinceFaceLock))
+		FaceCandidate? faceCandidate2 = FaceCandidateSelector.SelectBest((_faceCascade?.DetectMultiScale(gray, 1.08, 4, HaarDetectionTypes.ScaleImage, new OpenCvSharp.Size(Math.Max(40, gray.Width / 12), Math.Max(40, gray.Height / 12))) ?? Array.Empty<OpenCvSharp.Rect>()).Select((OpenCvSharp.Rect face2) => new FaceCandidate(face2, "global Haar lock", null, 0.58)), _lastFace, gray.Width, gray.Height);
+		if (faceCandidate2 is not null && FaceCandidateSelector.IsAcceptableTrackingCandidate(faceCandidate2, _lastFace, gray.Width, gray.Height, _framesSinceFaceLock))
 		{
 			return new FaceLocatorResult(faceCandidate2.Face, FormatFaceSelectionSource(faceCandidate2, _lastFace), null);
 		}
@@ -348,7 +348,7 @@ public sealed class OpenCvFaceFeatureTracker : IDisposable
 
 	private static ApertureRegionRefinement ChooseBestEyeRefinement(Mat gray, OpenCvSharp.Rect face, bool leftSide, params OpenCvSharp.Rect?[] seeds)
 	{
-		ApertureRegionRefinement apertureRegionRefinement = null;
+			ApertureRegionRefinement? apertureRegionRefinement = null;
 		for (int i = 0; i < seeds.Length; i++)
 		{
 			OpenCvSharp.Rect? rect = seeds[i];
@@ -367,7 +367,7 @@ public sealed class OpenCvFaceFeatureTracker : IDisposable
 
 	private static ApertureRegionRefinement ChooseBestMouthRefinement(Mat gray, OpenCvSharp.Rect face, params OpenCvSharp.Rect?[] seeds)
 	{
-		ApertureRegionRefinement apertureRegionRefinement = null;
+			ApertureRegionRefinement? apertureRegionRefinement = null;
 		for (int i = 0; i < seeds.Length; i++)
 		{
 			OpenCvSharp.Rect? rect = seeds[i];
@@ -390,7 +390,7 @@ public sealed class OpenCvFaceFeatureTracker : IDisposable
 		{
 			return false;
 		}
-		if ((object)best == null)
+		if (best is null)
 		{
 			return true;
 		}
@@ -570,13 +570,13 @@ public sealed class OpenCvFaceFeatureTracker : IDisposable
 
 	private static IReadOnlyList<System.Windows.Point> CreateJawContour(OpenCvSharp.Rect face)
 	{
-		return new global::_003C_003Ez__ReadOnlyArray<System.Windows.Point>(new System.Windows.Point[5]
-		{
+		return
+		[
 			new System.Windows.Point((double)face.X + (double)face.Width * 0.12, (double)face.Y + (double)face.Height * 0.62),
 			new System.Windows.Point((double)face.X + (double)face.Width * 0.22, (double)face.Y + (double)face.Height * 0.8),
 			new System.Windows.Point((double)face.X + (double)face.Width * 0.5, face.Bottom),
 			new System.Windows.Point((double)face.X + (double)face.Width * 0.78, (double)face.Y + (double)face.Height * 0.8),
 			new System.Windows.Point((double)face.X + (double)face.Width * 0.88, (double)face.Y + (double)face.Height * 0.62)
-		});
+		];
 	}
 }

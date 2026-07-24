@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Diagnostics.CodeAnalysis;
 using System.Linq;
 using System.Numerics;
 using System.Threading;
@@ -308,7 +309,7 @@ internal sealed class DualCameraRegistrationCoordinator : IAsyncDisposable
 
 	public void SetPhysicalCalibration(DualCameraCalibrationModel? calibration)
 	{
-		Volatile.Write(ref _physicalCalibration, ((object)calibration != null && calibration.IsUsable) ? calibration : null);
+		Volatile.Write(ref _physicalCalibration, (calibration is not null && calibration.IsUsable) ? calibration : null);
 	}
 
 	public void SetEnabled(bool enabled)
@@ -380,7 +381,7 @@ internal sealed class DualCameraRegistrationCoordinator : IAsyncDisposable
 			{
 				break;
 			}
-			if (IsEnabled && TryClaimCurrentPair(out DualCameraObservation cameraA, out DualCameraObservation cameraB))
+			if (IsEnabled && TryClaimCurrentPair(out DualCameraObservation? cameraA, out DualCameraObservation? cameraB))
 			{
 				try
 				{
@@ -398,13 +399,15 @@ internal sealed class DualCameraRegistrationCoordinator : IAsyncDisposable
 		}
 	}
 
-	private bool TryClaimCurrentPair(out DualCameraObservation cameraA, out DualCameraObservation cameraB)
+	private bool TryClaimCurrentPair(
+		[NotNullWhen(true)] out DualCameraObservation? cameraA,
+		[NotNullWhen(true)] out DualCameraObservation? cameraB)
 	{
 		lock (_observationLock)
 		{
 			cameraA = _cameraAObservation;
 			cameraB = _cameraBObservation;
-			if ((object)cameraA == null || (object)cameraB == null || Volatile.Read(in _pairBusy) != 0)
+			if (cameraA is null || cameraB is null || Volatile.Read(in _pairBusy) != 0)
 			{
 				return false;
 			}
@@ -439,8 +442,8 @@ internal sealed class DualCameraRegistrationCoordinator : IAsyncDisposable
 
 	private void ProcessPair(DualCameraObservation cameraA, DualCameraObservation cameraB)
 	{
-		DualCameraCalibrationModel dualCameraCalibrationModel = Volatile.Read(in _physicalCalibration);
-		if ((object)dualCameraCalibrationModel != null && TryCreatePhysicalRegistration(cameraA, cameraB, dualCameraCalibrationModel, out DualCameraRegistrationFrame frameA, out DualCameraRegistrationFrame frameB, out DualCameraRegistrationDiagnostics diagnostics))
+		DualCameraCalibrationModel? dualCameraCalibrationModel = Volatile.Read(in _physicalCalibration);
+		if (dualCameraCalibrationModel is not null && TryCreatePhysicalRegistration(cameraA, cameraB, dualCameraCalibrationModel, out DualCameraRegistrationFrame? frameA, out DualCameraRegistrationFrame? frameB, out DualCameraRegistrationDiagnostics? diagnostics))
 		{
 			this.RegistrationAvailable?.Invoke(frameA, frameB, diagnostics);
 			PublishLiveStatus(diagnostics.ToStatusText());
@@ -472,7 +475,13 @@ internal sealed class DualCameraRegistrationCoordinator : IAsyncDisposable
 		}
 	}
 
-	private static bool TryCreatePhysicalRegistration(DualCameraObservation cameraA, DualCameraObservation cameraB, DualCameraCalibrationModel calibration, out DualCameraRegistrationFrame frameA, out DualCameraRegistrationFrame frameB, out DualCameraRegistrationDiagnostics diagnostics)
+	private static bool TryCreatePhysicalRegistration(
+		DualCameraObservation cameraA,
+		DualCameraObservation cameraB,
+		DualCameraCalibrationModel calibration,
+		[NotNullWhen(true)] out DualCameraRegistrationFrame? frameA,
+		[NotNullWhen(true)] out DualCameraRegistrationFrame? frameB,
+		[NotNullWhen(true)] out DualCameraRegistrationDiagnostics? diagnostics)
 	{
 		frameA = null;
 		frameB = null;

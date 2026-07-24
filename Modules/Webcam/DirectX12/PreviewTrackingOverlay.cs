@@ -47,7 +47,7 @@ public sealed record PreviewTrackingOverlay
 	{
 		get
 		{
-			if (!FaceBox.HasValue && (object)FaceContour == null && (object)JawContour == null && (object)LeftEyeContour == null && (object)RightEyeContour == null && (object)LeftBrowContour == null && (object)RightBrowContour == null && (object)OuterLipContour == null && (object)InnerLipContour == null && (object)FaceMesh == null)
+			if (!FaceBox.HasValue && FaceContour is null && JawContour is null && LeftEyeContour is null && RightEyeContour is null && LeftBrowContour is null && RightBrowContour is null && OuterLipContour is null && InnerLipContour is null && FaceMesh is null)
 			{
 				return DiagnosticMeshes.Count > 0;
 			}

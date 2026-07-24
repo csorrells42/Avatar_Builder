@@ -34,11 +34,13 @@ public static class DirectShowCameraEnumerator
 	public static IReadOnlyList<CameraDevice> GetVideoInputDevices()
 	{
 		List<CameraDevice> list = new List<CameraDevice>();
-		object obj = null;
-		IEnumMoniker enumMoniker = null;
+		object? obj = null;
+		IEnumMoniker? enumMoniker = null;
 		try
 		{
-			obj = Activator.CreateInstance(Type.GetTypeFromCLSID(SystemDeviceEnumClsid, throwOnError: true));
+			Type deviceEnumeratorType = Type.GetTypeFromCLSID(SystemDeviceEnumClsid, throwOnError: true)
+				?? throw new InvalidOperationException("DirectShow system device enumerator type is unavailable.");
+			obj = Activator.CreateInstance(deviceEnumeratorType);
 			if (!(obj is ICreateDevEnum createDevEnum))
 			{
 				return list;
@@ -86,16 +88,16 @@ public static class DirectShowCameraEnumerator
 
 	private static string? ReadProperty(IMoniker moniker, string propertyName)
 	{
-		object ppvObj = null;
+				object? ppvObj = null;
 		try
 		{
 			Guid riid = typeof(IPropertyBag).GUID;
-			moniker.BindToStorage(null, null, ref riid, out ppvObj);
+					moniker.BindToStorage(null!, null!, ref riid, out ppvObj);
 			if (!(ppvObj is IPropertyBag propertyBag))
 			{
 				return null;
 			}
-			propertyBag.Read(propertyName, out object value, IntPtr.Zero);
+					propertyBag.Read(propertyName, out object? value, IntPtr.Zero);
 			return value as string;
 		}
 		catch (Exception)
@@ -115,7 +117,7 @@ public static class DirectShowCameraEnumerator
 	{
 		try
 		{
-			moniker.GetDisplayName(null, null, out string ppszDisplayName);
+			moniker.GetDisplayName(null!, null!, out string ppszDisplayName);
 			return ppszDisplayName;
 		}
 		catch (Exception)

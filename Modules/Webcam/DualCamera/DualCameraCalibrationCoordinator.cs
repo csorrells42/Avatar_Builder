@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics.CodeAnalysis;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -201,7 +202,7 @@ internal sealed class DualCameraCalibrationCoordinator : IAsyncDisposable
 			{
 				break;
 			}
-			if (IsEnabled && TryClaimCurrentPair(out DualCameraCalibrationFrame cameraA, out DualCameraCalibrationFrame cameraB))
+			if (IsEnabled && TryClaimCurrentPair(out DualCameraCalibrationFrame? cameraA, out DualCameraCalibrationFrame? cameraB))
 			{
 				try
 				{
@@ -219,13 +220,15 @@ internal sealed class DualCameraCalibrationCoordinator : IAsyncDisposable
 		}
 	}
 
-	private bool TryClaimCurrentPair(out DualCameraCalibrationFrame cameraA, out DualCameraCalibrationFrame cameraB)
+	private bool TryClaimCurrentPair(
+		[NotNullWhen(true)] out DualCameraCalibrationFrame? cameraA,
+		[NotNullWhen(true)] out DualCameraCalibrationFrame? cameraB)
 	{
 		lock (_frameLock)
 		{
 			cameraA = _cameraAFrame;
 			cameraB = _cameraBFrame;
-			if ((object)cameraA == null || (object)cameraB == null || Volatile.Read(in _pairBusy) != 0)
+			if (cameraA is null || cameraB is null || Volatile.Read(in _pairBusy) != 0)
 			{
 				return false;
 			}
@@ -261,9 +264,9 @@ internal sealed class DualCameraCalibrationCoordinator : IAsyncDisposable
 	private void ProcessPair(DualCameraCalibrationFrame cameraA, DualCameraCalibrationFrame cameraB)
 	{
 		Point2f[] corners;
-		DualCameraCalibrationOverlay overlay;
+		DualCameraCalibrationOverlay? overlay;
 		bool flag = TryFindBoard(cameraA, out corners, out overlay);
-		DualCameraCalibrationOverlay overlay2;
+		DualCameraCalibrationOverlay? overlay2;
 		Point2f[] corners2;
 		bool flag2 = TryFindBoard(cameraB, out corners2, out overlay2);
 		this.OverlaysChanged?.Invoke(overlay, overlay2);

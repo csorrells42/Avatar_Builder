@@ -94,7 +94,7 @@ public sealed class TextureNativeCameraRecordingSession : IDisposable
 		_fps = tuple2.Item3;
 		_subtype = tuple2.Item4;
 		_sampleDuration = Math.Max(1L, (long)Math.Round(10000000.0 / Math.Clamp(_fps, 1.0, 120.0)));
-		if ((object)options != null && options.ProcessedOutputEnabled)
+		if (options is not null && options.ProcessedOutputEnabled)
 		{
 			_processedRecorder = new MediaFoundationVideoRecorder(path, _width, _height, _fps, null);
 			_recordingPipeline = "Texture-native processed BGRA bridge";
@@ -110,11 +110,11 @@ public sealed class TextureNativeCameraRecordingSession : IDisposable
 			_recorder = new MediaFoundationTextureVideoRecorder(path, _width, _height, _fps, _subtype, _deviceManager.Manager);
 			_recordingPipeline = "Media Foundation texture-native raw camera samples";
 			_recordingDenoiseApplied = false;
-			_recordingMatchesPreviewDenoise = (object)options == null || !options.DenoiseEnabled;
+			_recordingMatchesPreviewDenoise = options is null || !options.DenoiseEnabled;
 			_recordingDenoiseStrength = options?.DenoiseStrength ?? 2.0;
 			_recordingColorSettings = VideoFrameColorSettings.Off;
 			_recordingColorPolishApplied = false;
-			_recordingMatchesPreviewColor = (object)options == null || !options.ColorSettings.HasVisibleAdjustments;
+			_recordingMatchesPreviewColor = options is null || !options.ColorSettings.HasVisibleAdjustments;
 		}
 		_recordingTask = Task.Run(delegate
 		{
@@ -198,7 +198,7 @@ public sealed class TextureNativeCameraRecordingSession : IDisposable
 				int actualStreamIndex;
 				int streamFlags;
 				long timestamp;
-				object sample;
+				object? sample;
 				int num = _reader.ReadSample(-4, 0, out actualStreamIndex, out streamFlags, out timestamp, out sample);
 				if (MediaFoundationInterop.Failed(num))
 				{
@@ -273,7 +273,7 @@ public sealed class TextureNativeCameraRecordingSession : IDisposable
 	private bool TryCreateBgraFrame(IMFSample sample, out byte[] bgraBytes)
 	{
 		bgraBytes = Array.Empty<byte>();
-		IMFMediaBuffer buffer = null;
+		IMFMediaBuffer? buffer = null;
 		try
 		{
 			if (MediaFoundationInterop.Failed(sample.GetBufferByIndex(0, out buffer)) || buffer == null)
@@ -290,7 +290,7 @@ public sealed class TextureNativeCameraRecordingSession : IDisposable
 			}
 			try
 			{
-				byte[] array = Nv12FrameConverter.ConvertToBgra(buffer2, currentLength, _width, _height, out maxLength);
+				byte[]? array = Nv12FrameConverter.ConvertToBgra(buffer2, currentLength, _width, _height, out maxLength);
 				if (array == null)
 				{
 					return false;

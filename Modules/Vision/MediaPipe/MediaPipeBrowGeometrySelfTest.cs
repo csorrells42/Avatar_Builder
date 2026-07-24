@@ -13,8 +13,8 @@ public static class MediaPipeBrowGeometrySelfTest
 		{
 			VerifyGeneratedOutline("left", CreateBrow(mirror: false));
 			VerifyGeneratedOutline("right", CreateBrow(mirror: true));
-			Require(!MediaPipeBrowOutlineGeometry.TryValidateClosedOutline(CreatePoints((0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)), new global::_003C_003Ez__ReadOnlyArray<int>(new int[4] { 0, 1, 2, 3 }), closed: false, out string _), "An open eyebrow outline passed validation.");
-			Require(!MediaPipeBrowOutlineGeometry.TryValidateClosedOutline(CreatePoints((0.0, 0.0), (1.0, 1.0), (0.0, 1.0), (1.0, 0.0)), new global::_003C_003Ez__ReadOnlyArray<int>(new int[4] { 0, 1, 2, 3 }), closed: true, out string failureReason2) && failureReason2.Contains("cross", StringComparison.OrdinalIgnoreCase), "A self-crossing eyebrow outline passed validation.");
+			Require(!MediaPipeBrowOutlineGeometry.TryValidateClosedOutline(CreatePoints((0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)), [0, 1, 2, 3], closed: false, out string _), "An open eyebrow outline passed validation.");
+			Require(!MediaPipeBrowOutlineGeometry.TryValidateClosedOutline(CreatePoints((0.0, 0.0), (1.0, 1.0), (0.0, 1.0), (1.0, 0.0)), [0, 1, 2, 3], closed: true, out string failureReason2) && failureReason2.Contains("cross", StringComparison.OrdinalIgnoreCase), "A self-crossing eyebrow outline passed validation.");
 			return new MediaPipeBrowGeometrySelfTestResult(Succeeded: true, "PASS: mirrored brow hulls are closed and simple; open and crossing outlines are rejected.");
 		}
 		catch (Exception ex)

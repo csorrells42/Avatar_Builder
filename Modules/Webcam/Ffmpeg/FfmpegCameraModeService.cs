@@ -73,7 +73,7 @@ public sealed class FfmpegCameraModeService
 		processStartInfo.ArgumentList.Add("dshow");
 		processStartInfo.ArgumentList.Add("-i");
 		processStartInfo.ArgumentList.Add("video=" + name);
-		Process process = null;
+			Process? process = null;
 		try
 		{
 			using CancellationTokenSource timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
@@ -144,7 +144,7 @@ public sealed class FfmpegCameraModeService
 				int width = int.Parse(match2.Groups["width"].Value, CultureInfo.InvariantCulture);
 				int height = int.Parse(match2.Groups["height"].Value, CultureInfo.InvariantCulture);
 				double fps = NormalizeFrameRate(double.Parse(match2.Groups["fps"].Value, CultureInfo.InvariantCulture));
-				string format = (match2.Groups["format"].Success ? match2.Groups["format"].Value : null);
+				string? format = (match2.Groups["format"].Success ? match2.Groups["format"].Value : null);
 				yield return CreateMode(width, height, fps, format);
 			}
 		}
@@ -162,7 +162,7 @@ public sealed class FfmpegCameraModeService
 		}
 		double minFps = double.Parse(match.Groups["minFps"].Value, CultureInfo.InvariantCulture);
 		double maxFps = double.Parse(match.Groups["maxFps"].Value, CultureInfo.InvariantCulture);
-		string format = (match.Groups["format"].Success ? match.Groups["format"].Value : null);
+		string? format = (match.Groups["format"].Success ? match.Groups["format"].Value : null);
 		foreach (double item in CommonFrameRates.Where((double fps) => fps >= minFps - 0.01 && fps <= maxFps + 0.25))
 		{
 			yield return CreateMode(minWidth, minHeight, item, format);
@@ -171,7 +171,7 @@ public sealed class FfmpegCameraModeService
 
 	private static CameraVideoMode CreateMode(int width, int height, double fps, string? format)
 	{
-		string text = NormalizeFormat(format);
+		string? text = NormalizeFormat(format);
 		return new CameraVideoMode((text == null) ? $"{width}x{height} @ {fps:0.###} fps" : $"{width}x{height} @ {fps:0.###} fps ({text.ToUpperInvariant()})", width, height, fps, text);
 	}
 
@@ -190,14 +190,14 @@ public sealed class FfmpegCameraModeService
 
 	private static string? NormalizeFormat(string? format)
 	{
-		string text = format?.ToLowerInvariant();
-		if (text != null && (text == null || text.Length != 0))
+		string? text = format?.ToLowerInvariant();
+		if (!string.IsNullOrEmpty(text))
 		{
 			if (text == "mjpg")
 			{
 				return "mjpeg";
 			}
-			return format.ToLowerInvariant();
+			return text;
 		}
 		return null;
 	}

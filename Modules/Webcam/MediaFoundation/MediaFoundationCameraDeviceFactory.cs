@@ -51,7 +51,7 @@ internal static class MediaFoundationCameraDeviceFactory
 
 	public static IMFSourceReader CreateModeProbeReader(CameraDevice camera, out object mediaSource)
 	{
-		mediaSource = null;
+		mediaSource = null!;
 		IMFActivate iMFActivate = FindCameraActivate(camera) ?? throw new InvalidOperationException("Media Foundation could not find camera: " + camera.Name);
 		try
 		{
@@ -76,7 +76,7 @@ internal static class MediaFoundationCameraDeviceFactory
 
 	public static IMFSourceReader CreatePreviewReader(CameraDevice camera, CameraVideoMode? mode, out object mediaSource)
 	{
-		mediaSource = null;
+		mediaSource = null!;
 		IMFActivate iMFActivate = FindCameraActivate(camera) ?? throw new InvalidOperationException("Media Foundation could not find camera: " + camera.Name);
 		try
 		{
@@ -127,7 +127,7 @@ internal static class MediaFoundationCameraDeviceFactory
 
 	public static IMFSourceReader CreateTextureSourceReader(CameraDevice camera, CameraVideoMode? mode, IMFDXGIDeviceManager d3dManager, out object mediaSource, bool enableAdvancedVideoProcessing = true, Guid? preferredSubtype = null, bool configureMediaType = true)
 	{
-		mediaSource = null;
+		mediaSource = null!;
 		IMFActivate iMFActivate = FindCameraActivate(camera) ?? throw new InvalidOperationException("Media Foundation could not find camera: " + camera.Name);
 		try
 		{
@@ -170,13 +170,13 @@ internal static class MediaFoundationCameraDeviceFactory
 
 	public static object CreateMediaSource(IMFActivate activate, string cameraName)
 	{
-		object objectInstance;
+		object? objectInstance;
 		int num = activate.ActivateObject(new Guid("279a808d-aec7-40c8-9c6b-a6b492c78a66"), out objectInstance);
 		if (!MediaFoundationInterop.Failed(num) && objectInstance != null)
 		{
 			return objectInstance;
 		}
-		string allocatedString = MediaFoundationInterop.GetAllocatedString(activate, MediaFoundationGuids.MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_SYMBOLIC_LINK);
+		string? allocatedString = MediaFoundationInterop.GetAllocatedString(activate, MediaFoundationGuids.MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_SYMBOLIC_LINK);
 		if (string.IsNullOrWhiteSpace(allocatedString))
 		{
 			throw new InvalidOperationException($"Media Foundation camera activation failed for {cameraName}: 0x{num:X8}");
@@ -186,7 +186,7 @@ internal static class MediaFoundationCameraDeviceFactory
 		{
 			MediaFoundationInterop.ThrowIfFailed(attributes.SetGUID(in MediaFoundationGuids.MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE, in MediaFoundationGuids.MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_GUID));
 			MediaFoundationInterop.ThrowIfFailed(attributes.SetString(in MediaFoundationGuids.MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_SYMBOLIC_LINK, allocatedString));
-			object mediaSource;
+			object? mediaSource;
 			int num2 = MediaFoundationInterop.MFCreateDeviceSource(attributes, out mediaSource);
 			if (MediaFoundationInterop.Failed(num2) || mediaSource == null)
 			{
@@ -235,12 +235,12 @@ internal static class MediaFoundationCameraDeviceFactory
 	private static IMFActivate? FindCameraActivate(CameraDevice camera)
 	{
 		IReadOnlyList<IMFActivate> readOnlyList = EnumerateVideoActivates();
-		IMFActivate iMFActivate = null;
-		string text = CameraDeviceCatalog.TryCreatePhysicalDeviceKey(camera);
+			IMFActivate? iMFActivate = null;
+		string? text = CameraDeviceCatalog.TryCreatePhysicalDeviceKey(camera);
 		foreach (IMFActivate item in readOnlyList)
 		{
-			string allocatedString = MediaFoundationInterop.GetAllocatedString(item, MediaFoundationGuids.MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME);
-			string allocatedString2 = MediaFoundationInterop.GetAllocatedString(item, MediaFoundationGuids.MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_SYMBOLIC_LINK);
+			string? allocatedString = MediaFoundationInterop.GetAllocatedString(item, MediaFoundationGuids.MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME);
+			string? allocatedString2 = MediaFoundationInterop.GetAllocatedString(item, MediaFoundationGuids.MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_SYMBOLIC_LINK);
 			if (!string.IsNullOrWhiteSpace(camera.DevicePath) && string.Equals(allocatedString2, camera.DevicePath, StringComparison.OrdinalIgnoreCase))
 			{
 				ReleaseAllExcept(readOnlyList, item);
@@ -251,7 +251,7 @@ internal static class MediaFoundationCameraDeviceFactory
 				ReleaseAllExcept(readOnlyList, item);
 				return item;
 			}
-			string a = (string.IsNullOrWhiteSpace(allocatedString2) ? null : CameraDeviceCatalog.TryCreatePhysicalDeviceKey(new CameraDevice(-1, allocatedString ?? "", allocatedString2, "Media Foundation")));
+			string? a = (string.IsNullOrWhiteSpace(allocatedString2) ? null : CameraDeviceCatalog.TryCreatePhysicalDeviceKey(new CameraDevice(-1, allocatedString ?? "", allocatedString2, "Media Foundation")));
 			if (!string.IsNullOrWhiteSpace(text) && string.Equals(a, text, StringComparison.OrdinalIgnoreCase))
 			{
 				ReleaseAllExcept(readOnlyList, item);

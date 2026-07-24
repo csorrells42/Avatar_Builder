@@ -95,7 +95,7 @@ public sealed class ThreeDdfaOnnxSidecarEnvironment
 
 	private static string FindRepositoryPath(ThreeDdfaOnnxModelInfo modelInfo)
 	{
-		string environmentVariable = Environment.GetEnvironmentVariable("AVATAR_BUILDER_3DDFA_REPO");
+		string? environmentVariable = Environment.GetEnvironmentVariable("AVATAR_BUILDER_3DDFA_REPO");
 		if (!string.IsNullOrWhiteSpace(environmentVariable) && File.Exists(Path.Combine(environmentVariable, "TDDFA_ONNX.py")))
 		{
 			return environmentVariable;
@@ -112,7 +112,7 @@ public sealed class ThreeDdfaOnnxSidecarEnvironment
 
 	private static string FindConfigPath(string repositoryPath)
 	{
-		string environmentVariable = Environment.GetEnvironmentVariable("AVATAR_BUILDER_3DDFA_CONFIG");
+		string? environmentVariable = Environment.GetEnvironmentVariable("AVATAR_BUILDER_3DDFA_CONFIG");
 		if (!string.IsNullOrWhiteSpace(environmentVariable) && File.Exists(environmentVariable))
 		{
 			return environmentVariable;
@@ -143,7 +143,7 @@ public sealed class ThreeDdfaOnnxSidecarEnvironment
 		string[] array = new string[2] { "AVATAR_BUILDER_3DDFA_PYTHON", "AVATAR_BUILDER_PYTHON" };
 		for (int i = 0; i < array.Length; i++)
 		{
-			string environmentVariable = Environment.GetEnvironmentVariable(array[i]);
+			string? environmentVariable = Environment.GetEnvironmentVariable(array[i]);
 			if (!string.IsNullOrWhiteSpace(environmentVariable) && File.Exists(environmentVariable))
 			{
 				return environmentVariable;
@@ -217,7 +217,7 @@ public sealed class ThreeDdfaOnnxSidecarEnvironment
 
 	private static IEnumerable<string> EnumerateAncestors(string start)
 	{
-		DirectoryInfo directory = new DirectoryInfo(start);
+		DirectoryInfo? directory = new DirectoryInfo(start);
 		if (File.Exists(start))
 		{
 			directory = Directory.GetParent(start) ?? directory;

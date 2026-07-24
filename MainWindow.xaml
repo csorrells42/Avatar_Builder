@@ -352,6 +352,7 @@
                       <CheckBox Name="FaceAutoFollowCheckBox" Content="Auto-follow face field" IsChecked="True" Checked="FaceTrackingFieldChanged" Unchecked="FaceTrackingFieldChanged" />
                     </StackPanel>
                   </Expander>
+                  <TextBlock Name="PeopleMemoryStatusText" Text="People memory waiting" TextWrapping="Wrap" Margin="0,10,0,0" Foreground="#80e0a4" />
                   <TextBlock Name="MonitorStatusText" Text="Avatar tracking idle." TextWrapping="Wrap" Margin="0,8,0,0" Foreground="#b9d7ef" />
                   <Separator Margin="0,18,0,14" Background="#243545" />
                   <Expander Header="Camera Controls" IsExpanded="False">

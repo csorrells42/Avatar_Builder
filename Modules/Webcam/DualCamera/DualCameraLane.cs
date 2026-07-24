@@ -279,7 +279,7 @@ internal sealed class DualCameraLane : IAsyncDisposable
 	public async Task StopAsync()
 	{
 		Volatile.Write(ref _acceptFrames, 0);
-		Dx12Camera dx12Camera = Interlocked.Exchange(ref _camera, null);
+		Dx12Camera? dx12Camera = Interlocked.Exchange(ref _camera, null);
 		if (dx12Camera != null)
 		{
 			dx12Camera.FrameAvailable -= CameraFrameAvailable;
@@ -290,7 +290,7 @@ internal sealed class DualCameraLane : IAsyncDisposable
 			dx12Camera.Dispose();
 			Interlocked.Exchange(ref _lastCameraStoppedTimestamp, Stopwatch.GetTimestamp());
 		}
-		Dx12UploadCamera dx12UploadCamera = Interlocked.Exchange(ref _uploadCamera, null);
+		Dx12UploadCamera? dx12UploadCamera = Interlocked.Exchange(ref _uploadCamera, null);
 		if (dx12UploadCamera != null)
 		{
 			dx12UploadCamera.FrameAvailable -= DecodedCameraFrameAvailable;
@@ -300,8 +300,8 @@ internal sealed class DualCameraLane : IAsyncDisposable
 			await dx12UploadCamera.DisposeAsync();
 			Interlocked.Exchange(ref _lastCameraStoppedTimestamp, Stopwatch.GetTimestamp());
 		}
-		TextureNativeFrameLease acceptedTextureFrame;
-		CameraFrame acceptedDecodedFrame;
+		TextureNativeFrameLease? acceptedTextureFrame;
+		CameraFrame? acceptedDecodedFrame;
 		lock (_acceptedFrameLock)
 		{
 			acceptedTextureFrame = _acceptedTextureFrame;
@@ -315,10 +315,10 @@ internal sealed class DualCameraLane : IAsyncDisposable
 		{
 			Interlocked.Exchange(ref _analysisBusy, 0);
 		}
-		CancellationTokenSource cancellation = Interlocked.Exchange(ref _workerCancellation, null);
-		AutoResetEvent signal = Interlocked.Exchange(ref _workerSignal, null);
-		Task worker = Interlocked.Exchange(ref _workerTask, null);
-		Task task = Interlocked.Exchange(ref _healthTask, null);
+		CancellationTokenSource? cancellation = Interlocked.Exchange(ref _workerCancellation, null);
+		AutoResetEvent? signal = Interlocked.Exchange(ref _workerSignal, null);
+		Task? worker = Interlocked.Exchange(ref _workerTask, null);
+		Task? task = Interlocked.Exchange(ref _healthTask, null);
 		cancellation?.Cancel();
 		try
 		{
@@ -411,7 +411,7 @@ internal sealed class DualCameraLane : IAsyncDisposable
 			return;
 		}
 		_lastAnalysisAcceptedAtUtc = utcNow;
-		TextureNativeFrameLease textureNativeFrameLease;
+		TextureNativeFrameLease? textureNativeFrameLease;
 		try
 		{
 			textureNativeFrameLease = frame.DuplicatePreviewData();
@@ -430,7 +430,7 @@ internal sealed class DualCameraLane : IAsyncDisposable
 		{
 			_acceptedTextureFrame = textureNativeFrameLease;
 		}
-		AutoResetEvent autoResetEvent = Volatile.Read(in _workerSignal);
+		AutoResetEvent? autoResetEvent = Volatile.Read(in _workerSignal);
 		if (autoResetEvent == null)
 		{
 			lock (_acceptedFrameLock)
@@ -502,7 +502,7 @@ internal sealed class DualCameraLane : IAsyncDisposable
 		{
 			_acceptedDecodedFrame = cameraFrame;
 		}
-		AutoResetEvent autoResetEvent = Volatile.Read(in _workerSignal);
+		AutoResetEvent? autoResetEvent = Volatile.Read(in _workerSignal);
 		if (autoResetEvent == null)
 		{
 			lock (_acceptedFrameLock)
@@ -564,8 +564,8 @@ internal sealed class DualCameraLane : IAsyncDisposable
 			{
 				break;
 			}
-			TextureNativeFrameLease acceptedTextureFrame;
-			CameraFrame cameraFrame;
+			TextureNativeFrameLease? acceptedTextureFrame;
+			CameraFrame? cameraFrame;
 			lock (_acceptedFrameLock)
 			{
 				acceptedTextureFrame = _acceptedTextureFrame;
@@ -604,13 +604,13 @@ internal sealed class DualCameraLane : IAsyncDisposable
 
 	private void AnalyzeFrame(TextureNativeFrameLease frame)
 	{
-		byte[] nv12PreviewBytes = frame.Nv12PreviewBytes;
+		byte[]? nv12PreviewBytes = frame.Nv12PreviewBytes;
 		if (nv12PreviewBytes != null && nv12PreviewBytes.Length > 0 && frame.Nv12PreviewStride > 0)
 		{
 			int outputWidth;
 			int outputHeight;
 			int bgraStride;
-			byte[] array = Nv12FrameConverter.ConvertToBgra(nv12PreviewBytes, frame.Nv12PreviewStride, frame.Width, frame.Height, 1920, out outputWidth, out outputHeight, out bgraStride);
+			byte[]? array = Nv12FrameConverter.ConvertToBgra(nv12PreviewBytes, frame.Nv12PreviewStride, frame.Width, frame.Height, 1920, out outputWidth, out outputHeight, out bgraStride);
 			if (array != null && array.Length != 0 && bgraStride > 0)
 			{
 				AnalyzeBgraFrame(array, outputWidth, outputHeight, bgraStride);
@@ -637,7 +637,7 @@ internal sealed class DualCameraLane : IAsyncDisposable
 			{
 				return;
 			}
-			byte[] nv12Bytes = frame.Nv12Bytes;
+			byte[]? nv12Bytes = frame.Nv12Bytes;
 			if (nv12Bytes == null || nv12Bytes.Length <= 0)
 			{
 				return;
@@ -659,12 +659,12 @@ internal sealed class DualCameraLane : IAsyncDisposable
 		{
 			this.CalibrationFrameAvailable?.Invoke(new DualCameraCalibrationFrame(DateTime.UtcNow, outputWidth, outputHeight, stride, bgra));
 		}
-		MediaPipeFaceLandmarkerSidecarTracker tracker = _tracker;
+		MediaPipeFaceLandmarkerSidecarTracker? tracker = _tracker;
 		if (tracker != null && Volatile.Read(in _acceptFrames) != 0)
 		{
 			FaceLandmarkFrame landmarkFrame = tracker.Detect(bitmapSource, DateTime.UtcNow).LandmarkFrame;
 			PreviewTrackingOverlay value = MediaPipePreviewOverlayFactory.Create(landmarkFrame);
-			DualCameraObservation dualCameraObservation = DualCameraObservation.Create(landmarkFrame, outputWidth, outputHeight, stride, bgra);
+			DualCameraObservation? dualCameraObservation = DualCameraObservation.Create(landmarkFrame, outputWidth, outputHeight, stride, bgra);
 			Volatile.Write(ref _latestBaseOverlay, value);
 			Interlocked.Exchange(ref _latestObservationTicks, dualCameraObservation?.CapturedAtUtc.Ticks ?? 0);
 			Volatile.Write(ref _latestRegistration, null);
@@ -672,7 +672,7 @@ internal sealed class DualCameraLane : IAsyncDisposable
 			Interlocked.Increment(ref _analysisFrames);
 			_trackingConfidence = landmarkFrame.TrackingConfidence;
 			Interlocked.Exchange(ref _hasFace, landmarkFrame.HasFace ? 1 : 0);
-			if ((object)dualCameraObservation != null)
+			if (dualCameraObservation is not null)
 			{
 				this.ObservationAvailable?.Invoke(dualCameraObservation);
 			}
@@ -682,19 +682,19 @@ internal sealed class DualCameraLane : IAsyncDisposable
 	private void PublishTrackingOverlay()
 	{
 		PreviewTrackingOverlay previewTrackingOverlay = Volatile.Read(in _latestBaseOverlay);
-		DualCameraRegistrationFrame dualCameraRegistrationFrame = Volatile.Read(in _latestRegistration);
+		DualCameraRegistrationFrame? dualCameraRegistrationFrame = Volatile.Read(in _latestRegistration);
 		List<PreviewOverlayDiagnosticMesh> list = new List<PreviewOverlayDiagnosticMesh>(3);
-		if (Volatile.Read(in _translationViewEnabled) != 0 && (object)dualCameraRegistrationFrame != null && dualCameraRegistrationFrame.TargetCapturedAtUtc.Ticks == Interlocked.Read(in _latestObservationTicks))
+		if (Volatile.Read(in _translationViewEnabled) != 0 && dualCameraRegistrationFrame is not null && dualCameraRegistrationFrame.TargetCapturedAtUtc.Ticks == Interlocked.Read(in _latestObservationTicks))
 		{
-			PreviewOverlayMesh faceMesh = previewTrackingOverlay.FaceMesh;
-			if ((object)faceMesh != null)
+			PreviewOverlayMesh? faceMesh = previewTrackingOverlay.FaceMesh;
+			if (faceMesh is not null)
 			{
 				list.Add(new PreviewOverlayDiagnosticMesh(dualCameraRegistrationFrame.TranslatedPartnerPoints, faceMesh.Edges, PreviewOverlayDiagnosticMeshRole.TranslatedPartner, DrawPoints: false));
 				list.Add(new PreviewOverlayDiagnosticMesh(dualCameraRegistrationFrame.FusedPoints, Array.Empty<PreviewOverlayEdge>(), PreviewOverlayDiagnosticMeshRole.DirectViewFusion));
 			}
 		}
-		DualCameraCalibrationOverlay dualCameraCalibrationOverlay = Volatile.Read(in _latestCalibrationOverlay);
-		if (Volatile.Read(in _calibrationCaptureEnabled) != 0 && (object)dualCameraCalibrationOverlay != null)
+		DualCameraCalibrationOverlay? dualCameraCalibrationOverlay = Volatile.Read(in _latestCalibrationOverlay);
+		if (Volatile.Read(in _calibrationCaptureEnabled) != 0 && dualCameraCalibrationOverlay is not null)
 		{
 			list.Add(new PreviewOverlayDiagnosticMesh(dualCameraCalibrationOverlay.Points, dualCameraCalibrationOverlay.Edges, PreviewOverlayDiagnosticMeshRole.CalibrationBoard));
 		}

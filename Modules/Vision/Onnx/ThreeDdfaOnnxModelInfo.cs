@@ -170,12 +170,12 @@ public sealed class ThreeDdfaOnnxModelInfo
 				ModelDirectory = text,
 				ManifestPath = text2,
 				PrimaryModelPath = primaryModelPath,
-				ModelFiles = new global::_003C_003Ez__ReadOnlySingleElementList<string>("3DDFA_V2/TDDFA_ONNX.py")
+				ModelFiles = ["3DDFA_V2/TDDFA_ONNX.py"]
 			};
 		}
 		try
 		{
-			Manifest manifest = JsonSerializer.Deserialize<Manifest>(File.ReadAllText(text2), ManifestJsonOptions);
+			Manifest? manifest = JsonSerializer.Deserialize<Manifest>(File.ReadAllText(text2), ManifestJsonOptions);
 			List<string> list = manifest?.ModelFiles?.Where((string file) => !string.IsNullOrWhiteSpace(file)).ToList() ?? new List<string>();
 			string text3 = (string.IsNullOrWhiteSpace(manifest?.PrimaryModelFile) ? (list.FirstOrDefault() ?? "3DDFA_V2/TDDFA_ONNX.py") : manifest.PrimaryModelFile);
 			if (list.Count == 0)
@@ -208,7 +208,7 @@ public sealed class ThreeDdfaOnnxModelInfo
 				ManifestPath = text2,
 				PrimaryModelPath = primaryModelPath,
 				ManifestStatus = "manifest unreadable: " + ex.Message,
-				ModelFiles = new global::_003C_003Ez__ReadOnlySingleElementList<string>("3DDFA_V2/TDDFA_ONNX.py")
+				ModelFiles = ["3DDFA_V2/TDDFA_ONNX.py"]
 			};
 		}
 	}

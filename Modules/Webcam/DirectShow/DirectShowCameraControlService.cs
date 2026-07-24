@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics.CodeAnalysis;
 using System.Linq;
 using System.Runtime.InteropServices;
 using System.Runtime.InteropServices.ComTypes;
@@ -73,8 +74,8 @@ public sealed class DirectShowCameraControlService
 
 	private static readonly Guid VideoInputDeviceCategory = new Guid("860BB310-5D01-11d0-BD3B-00A0C911CE86");
 
-	private static readonly IReadOnlyList<(int Id, string Name)> CameraProperties = new global::_003C_003Ez__ReadOnlyArray<(int, string)>(new(int, string)[7]
-	{
+	private static readonly IReadOnlyList<(int Id, string Name)> CameraProperties =
+	[
 		(0, "Pan"),
 		(1, "Tilt"),
 		(2, "Roll"),
@@ -82,10 +83,10 @@ public sealed class DirectShowCameraControlService
 		(4, "Exposure"),
 		(5, "Iris"),
 		(6, "Focus")
-	});
+	];
 
-	private static readonly IReadOnlyList<(int Id, string Name)> VideoProcAmpProperties = new global::_003C_003Ez__ReadOnlyArray<(int, string)>(new(int, string)[10]
-	{
+	private static readonly IReadOnlyList<(int Id, string Name)> VideoProcAmpProperties =
+	[
 		(0, "Brightness"),
 		(1, "Contrast"),
 		(2, "Hue"),
@@ -96,7 +97,7 @@ public sealed class DirectShowCameraControlService
 		(7, "White Balance"),
 		(8, "Backlight"),
 		(9, "Gain")
-	});
+	];
 
 	public IReadOnlyList<CameraControlItem> GetControls(CameraDevice camera)
 	{
@@ -107,7 +108,7 @@ public sealed class DirectShowCameraControlService
 			{
 				foreach (var cameraProperty in CameraProperties)
 				{
-					if (TryReadCameraControl(cameraControl, cameraProperty.Id, cameraProperty.Name, out CameraControlItem item))
+					if (TryReadCameraControl(cameraControl, cameraProperty.Id, cameraProperty.Name, out CameraControlItem? item))
 					{
 						list.Add(item);
 					}
@@ -117,7 +118,7 @@ public sealed class DirectShowCameraControlService
 			{
 				foreach (var videoProcAmpProperty in VideoProcAmpProperties)
 				{
-					if (TryReadVideoProcAmpControl(videoProcAmp, videoProcAmpProperty.Id, videoProcAmpProperty.Name, out CameraControlItem item2))
+					if (TryReadVideoProcAmpControl(videoProcAmp, videoProcAmpProperty.Id, videoProcAmpProperty.Name, out CameraControlItem? item2))
 					{
 						list.Add(item2);
 					}
@@ -140,7 +141,7 @@ public sealed class DirectShowCameraControlService
 		});
 	}
 
-	private static bool TryReadCameraControl(IAMCameraControl cameraControl, int propertyId, string name, out CameraControlItem item)
+	private static bool TryReadCameraControl(IAMCameraControl cameraControl, int propertyId, string name, [NotNullWhen(true)] out CameraControlItem? item)
 	{
 		item = null;
 		if (cameraControl.GetRange(propertyId, out var min, out var max, out var steppingDelta, out var defaultValue, out var capsFlags) != 0)
@@ -156,7 +157,7 @@ public sealed class DirectShowCameraControlService
 		return true;
 	}
 
-	private static bool TryReadVideoProcAmpControl(IAMVideoProcAmp videoProcAmp, int propertyId, string name, out CameraControlItem item)
+	private static bool TryReadVideoProcAmpControl(IAMVideoProcAmp videoProcAmp, int propertyId, string name, [NotNullWhen(true)] out CameraControlItem? item)
 	{
 		item = null;
 		if (videoProcAmp.GetRange(propertyId, out var min, out var max, out var steppingDelta, out var defaultValue, out var capsFlags) != 0)
@@ -174,12 +175,14 @@ public sealed class DirectShowCameraControlService
 
 	private static T? WithCameraFilter<T>(CameraDevice camera, Func<object, T> action)
 	{
-		object obj = null;
-		IEnumMoniker enumMoniker = null;
-		object ppvResult = null;
+		object? obj = null;
+		IEnumMoniker? enumMoniker = null;
+		object? ppvResult = null;
 		try
 		{
-			obj = Activator.CreateInstance(Type.GetTypeFromCLSID(SystemDeviceEnumClsid, throwOnError: true));
+			Type deviceEnumeratorType = Type.GetTypeFromCLSID(SystemDeviceEnumClsid, throwOnError: true)
+				?? throw new InvalidOperationException("DirectShow system device enumerator type is unavailable.");
+			obj = Activator.CreateInstance(deviceEnumeratorType);
 			if (!(obj is ICreateDevEnum createDevEnum))
 			{
 				return default(T);
@@ -195,14 +198,14 @@ public sealed class DirectShowCameraControlService
 				IMoniker moniker = array[0];
 				try
 				{
-					string name = ReadProperty(moniker, "FriendlyName");
-					string path = ReadProperty(moniker, "DevicePath") ?? GetDisplayName(moniker);
+					string? name = ReadProperty(moniker, "FriendlyName");
+					string? path = ReadProperty(moniker, "DevicePath") ?? GetDisplayName(moniker);
 					if (!CameraMatches(camera, name, path))
 					{
 						continue;
 					}
 					Guid riidResult = typeof(IBaseFilter).GUID;
-					moniker.BindToObject(null, null, ref riidResult, out ppvResult);
+					moniker.BindToObject(null!, null!, ref riidResult, out ppvResult);
 					return (ppvResult == null) ? default(T) : action(ppvResult);
 				}
 				finally
@@ -240,16 +243,16 @@ public sealed class DirectShowCameraControlService
 
 	private static string? ReadProperty(IMoniker moniker, string propertyName)
 	{
-		object ppvObj = null;
+			object? ppvObj = null;
 		try
 		{
 			Guid riid = typeof(IPropertyBag).GUID;
-			moniker.BindToStorage(null, null, ref riid, out ppvObj);
+			moniker.BindToStorage(null!, null!, ref riid, out ppvObj);
 			if (!(ppvObj is IPropertyBag propertyBag))
 			{
 				return null;
 			}
-			propertyBag.Read(propertyName, out object value, IntPtr.Zero);
+			propertyBag.Read(propertyName, out object? value, IntPtr.Zero);
 			return value as string;
 		}
 		catch
@@ -269,7 +272,7 @@ public sealed class DirectShowCameraControlService
 	{
 		try
 		{
-			moniker.GetDisplayName(null, null, out string ppszDisplayName);
+			moniker.GetDisplayName(null!, null!, out string ppszDisplayName);
 			return ppszDisplayName;
 		}
 		catch

@@ -223,7 +223,7 @@ public sealed class TextureNativeCameraStream : IDisposable
 			{
 				return true;
 			}
-			if ((object)options != null && options.ProcessedOutputEnabled)
+			if (options is not null && options.ProcessedOutputEnabled)
 			{
 				_processedRecorder = new MediaFoundationVideoRecorder(path, _width, _height, _fps, null);
 				_processedRecordingDenoiseEnabled = options.DenoiseEnabled;
@@ -242,9 +242,9 @@ public sealed class TextureNativeCameraStream : IDisposable
 				_processedRecordingColorSettings = VideoFrameColorSettings.Off;
 				ResetProcessedDenoiseHistory();
 				_recordingPipeline = "Media Foundation texture-native raw camera samples";
-				_recordingMatchesPreviewDenoise = (object)options == null || !options.DenoiseEnabled;
+				_recordingMatchesPreviewDenoise = options is null || !options.DenoiseEnabled;
 				_recordingColorPolishApplied = false;
-				_recordingMatchesPreviewColor = (object)options == null || !options.ColorSettings.HasVisibleAdjustments;
+				_recordingMatchesPreviewColor = options is null || !options.ColorSettings.HasVisibleAdjustments;
 			}
 			_recordingPath = path;
 			_nextSampleTime = 0L;
@@ -296,9 +296,9 @@ public sealed class TextureNativeCameraStream : IDisposable
 
 	private TextureNativeRecordingResult? StopRecordingCore()
 	{
-		MediaFoundationTextureVideoRecorder recorder;
-		MediaFoundationVideoRecorder processedRecorder;
-		string recordingPath;
+		MediaFoundationTextureVideoRecorder? recorder;
+		MediaFoundationVideoRecorder? processedRecorder;
+		string? recordingPath;
 		string status;
 		string recordingPipeline;
 		bool processedRecordingDenoiseEnabled;
@@ -377,7 +377,7 @@ public sealed class TextureNativeCameraStream : IDisposable
 		}
 		_cancellation.Cancel();
 		TryFlushSourceReader();
-		Thread captureThread;
+		Thread? captureThread;
 		lock (_stateLock)
 		{
 			captureThread = _captureThread;
@@ -471,7 +471,7 @@ public sealed class TextureNativeCameraStream : IDisposable
 				int actualStreamIndex;
 				int streamFlags;
 				long timestamp;
-				object sample;
+				object? sample;
 				int num = reader.ReadSample(-4, 0, out actualStreamIndex, out streamFlags, out timestamp, out sample);
 				if (MediaFoundationInterop.Failed(num))
 				{
@@ -756,8 +756,8 @@ public sealed class TextureNativeCameraStream : IDisposable
 
 	private void WriteRecordingSample(IMFSample sample)
 	{
-		MediaFoundationTextureVideoRecorder recorder;
-		MediaFoundationVideoRecorder processedRecorder;
+		MediaFoundationTextureVideoRecorder? recorder;
+		MediaFoundationVideoRecorder? processedRecorder;
 		bool isPaused;
 		bool processedRecordingDenoiseEnabled;
 		double processedRecordingDenoiseStrength;
@@ -818,7 +818,7 @@ public sealed class TextureNativeCameraStream : IDisposable
 
 	private void NotifyFrameAvailable(TextureNativeFrameInfo frame)
 	{
-		EventHandler<TextureNativeFrameInfo> eventHandler = this.FrameAvailable;
+		EventHandler<TextureNativeFrameInfo>? eventHandler = this.FrameAvailable;
 		if (eventHandler == null)
 		{
 			return;
@@ -839,7 +839,7 @@ public sealed class TextureNativeCameraStream : IDisposable
 
 	private void NotifyTextureFrameAvailable(TextureNativeFrameLease frame)
 	{
-		EventHandler<TextureNativeFrameLease> eventHandler = this.TextureFrameAvailable;
+		EventHandler<TextureNativeFrameLease>? eventHandler = this.TextureFrameAvailable;
 		if (eventHandler == null)
 		{
 			return;
@@ -869,7 +869,7 @@ public sealed class TextureNativeCameraStream : IDisposable
 
 	private void NotifyStatusChanged(string status)
 	{
-		EventHandler<string> eventHandler = this.StatusChanged;
+		EventHandler<string>? eventHandler = this.StatusChanged;
 		if (eventHandler == null)
 		{
 			return;
@@ -898,7 +898,7 @@ public sealed class TextureNativeCameraStream : IDisposable
 	private bool TryCreateBgraFrame(IMFSample sample, out byte[] bgraBytes)
 	{
 		bgraBytes = Array.Empty<byte>();
-		IMFMediaBuffer buffer = null;
+		IMFMediaBuffer? buffer = null;
 		try
 		{
 			if (MediaFoundationInterop.Failed(sample.GetBufferByIndex(0, out buffer)) || buffer == null)
@@ -915,7 +915,7 @@ public sealed class TextureNativeCameraStream : IDisposable
 			}
 			try
 			{
-				byte[] array = Nv12FrameConverter.ConvertToBgra(buffer2, currentLength, _width, _height, out maxLength);
+				byte[]? array = Nv12FrameConverter.ConvertToBgra(buffer2, currentLength, _width, _height, out maxLength);
 				if (array == null)
 				{
 					return false;
@@ -936,8 +936,8 @@ public sealed class TextureNativeCameraStream : IDisposable
 
 	private TextureNativeFrameLease? TryCreateFrameLease(IMFSample sample, long frameNumber, long capturedAtTimestamp, DateTime capturedAtUtc)
 	{
-		IMFMediaBuffer buffer = null;
-		PooledFrameBuffer pooledFrameBuffer = null;
+		IMFMediaBuffer? buffer = null;
+		PooledFrameBuffer? pooledFrameBuffer = null;
 		try
 		{
 			if (MediaFoundationInterop.Failed(sample.GetBufferByIndex(0, out buffer)) || buffer == null)
@@ -945,7 +945,7 @@ public sealed class TextureNativeCameraStream : IDisposable
 				return null;
 			}
 			int nv12Stride = 0;
-			IMFDXGIBuffer iMFDXGIBuffer = QueryDxgiBuffer(buffer);
+			IMFDXGIBuffer? iMFDXGIBuffer = QueryDxgiBuffer(buffer);
 			if (iMFDXGIBuffer == null)
 			{
 				pooledFrameBuffer = TryCreateNv12Preview(
@@ -961,7 +961,7 @@ public sealed class TextureNativeCameraStream : IDisposable
 			}
 			try
 			{
-				ITextureNativeDeviceManager deviceManager = _deviceManager;
+				ITextureNativeDeviceManager? deviceManager = _deviceManager;
 				if (deviceManager == null)
 				{
 					return null;

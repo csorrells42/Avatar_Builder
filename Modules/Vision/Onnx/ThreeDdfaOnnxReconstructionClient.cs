@@ -77,9 +77,10 @@ public sealed class ThreeDdfaOnnxReconstructionClient : IDisposable
 				string value = JsonSerializer.Serialize(threeDdfaOnnxSidecarRequest, JsonOptions);
 				stopwatch2.Stop();
 				Stopwatch stopwatch3 = Stopwatch.StartNew();
-				_process.StandardInput.WriteLine(value);
-				_process.StandardInput.Flush();
-				Task<string> task = _process.StandardOutput.ReadLineAsync();
+				Process process = _process ?? throw new InvalidOperationException("3DDFA/ONNX sidecar process is unavailable.");
+				process.StandardInput.WriteLine(value);
+				process.StandardInput.Flush();
+				Task<string?> task = process.StandardOutput.ReadLineAsync();
 				bool denseModelRequest = mode == ThreeDdfaOnnxRequestMode.Full || mode == ThreeDdfaOnnxRequestMode.CanonicalModel;
 				TimeSpan timeout = ((!denseModelRequest) ? (_firstResponseAfterStart ? TimeSpan.FromMilliseconds(ReadStartupTimeoutMilliseconds()) : _timeout) : (_firstResponseAfterStart ? TimeSpan.FromSeconds(60L) : TimeSpan.FromSeconds(30L)));
 				if (!task.Wait(timeout))
@@ -88,7 +89,7 @@ public sealed class ThreeDdfaOnnxReconstructionClient : IDisposable
 					return Error(Status);
 				}
 				_firstResponseAfterStart = false;
-				string result = task.Result;
+				string? result = task.Result;
 				stopwatch3.Stop();
 				if (string.IsNullOrWhiteSpace(result))
 				{
@@ -96,7 +97,7 @@ public sealed class ThreeDdfaOnnxReconstructionClient : IDisposable
 					return Error(Status);
 				}
 				Stopwatch stopwatch4 = Stopwatch.StartNew();
-				ThreeDdfaOnnxSidecarResponse threeDdfaOnnxSidecarResponse = JsonSerializer.Deserialize<ThreeDdfaOnnxSidecarResponse>(result, JsonOptions);
+				ThreeDdfaOnnxSidecarResponse? threeDdfaOnnxSidecarResponse = JsonSerializer.Deserialize<ThreeDdfaOnnxSidecarResponse>(result, JsonOptions);
 				stopwatch4.Stop();
 				if (threeDdfaOnnxSidecarResponse == null)
 				{
@@ -162,13 +163,13 @@ public sealed class ThreeDdfaOnnxReconstructionClient : IDisposable
 			Status = "3DDFA/ONNX sidecar client is stopped.";
 			return false;
 		}
-		Process process = _process;
+		Process? process = _process;
 		if (process != null && !process.HasExited)
 		{
 			return true;
 		}
 		StopProcess();
-		Process process2 = null;
+		Process? process2 = null;
 		try
 		{
 			process2 = new Process
@@ -237,7 +238,7 @@ public sealed class ThreeDdfaOnnxReconstructionClient : IDisposable
 
 	private void StopProcess()
 	{
-		Process process = Interlocked.Exchange(ref _process, null);
+		Process? process = Interlocked.Exchange(ref _process, null);
 		if (process == null)
 		{
 			return;
@@ -264,7 +265,7 @@ public sealed class ThreeDdfaOnnxReconstructionClient : IDisposable
 		{
 			while (!process.HasExited)
 			{
-				string text = process.StandardError.ReadLine();
+				string? text = process.StandardError.ReadLine();
 				if (text != null)
 				{
 					if (!string.IsNullOrWhiteSpace(text))

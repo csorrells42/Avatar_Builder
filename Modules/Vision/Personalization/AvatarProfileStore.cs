@@ -24,7 +24,7 @@ public sealed class AvatarProfileStore
 	public AvatarProfileRegistry Load(string outputFolder)
 	{
 		string registryPath = GetRegistryPath(outputFolder);
-		AvatarProfileRegistry avatarProfileRegistry = null;
+		AvatarProfileRegistry? avatarProfileRegistry = null;
 		try
 		{
 			if (File.Exists(registryPath))
@@ -59,7 +59,7 @@ public sealed class AvatarProfileStore
 		ArgumentNullException.ThrowIfNull(registry, "registry");
 		displayName = CleanDisplayName(displayName);
 		NormalizeRegistry(registry);
-		AvatarProfile avatarProfile = registry.Profiles.FirstOrDefault((AvatarProfile profile) => string.Equals(profile.DisplayName, displayName, StringComparison.OrdinalIgnoreCase));
+		AvatarProfile? avatarProfile = registry.Profiles.FirstOrDefault((AvatarProfile profile) => string.Equals(profile.DisplayName, displayName, StringComparison.OrdinalIgnoreCase));
 		DateTime utcNow = DateTime.UtcNow;
 		if (avatarProfile != null)
 		{
@@ -91,7 +91,7 @@ public sealed class AvatarProfileStore
 	{
 		ArgumentNullException.ThrowIfNull(registry, "registry");
 		NormalizeRegistry(registry);
-		AvatarProfile avatarProfile = registry.Profiles.FirstOrDefault((AvatarProfile item) => string.Equals(item.Id, profileId, StringComparison.OrdinalIgnoreCase));
+		AvatarProfile? avatarProfile = registry.Profiles.FirstOrDefault((AvatarProfile item) => string.Equals(item.Id, profileId, StringComparison.OrdinalIgnoreCase));
 		if (avatarProfile == null)
 		{
 			avatarProfile = registry.Profiles.FirstOrDefault() ?? AddOrUpdateProfile(outputFolder, registry, "Primary subject");

@@ -129,10 +129,11 @@ public sealed class OpenCvFacemarkLandmarkTracker : IStatefulFaceLandmarkTracker
 			};
 		}
 		Point2f[][] landmarks;
+		Facemark facemark = _facemark ?? throw new InvalidOperationException("OpenCV facemark initialization reported success without a model instance.");
 		using (InputArray image = InputArray.Create(mat2))
 		{
 			using InputArray faces = InputArray.Create(new OpenCvSharp.Rect[1] { rect });
-			if (!_facemark.Fit(image, faces, out landmarks) || landmarks.Length == 0 || landmarks[0].Length < 68)
+			if (!facemark.Fit(image, faces, out landmarks) || landmarks.Length == 0 || landmarks[0].Length < 68)
 			{
 				string text = $"LBF face lock but landmark fit failed ({landmarks.Length} face result{((landmarks.Length == 1) ? "" : "s")})";
 				return TryCreateHeldResult(capturedAtUtc, text) ?? new FaceLandmarkTrackingResult
@@ -319,14 +320,14 @@ public sealed class OpenCvFacemarkLandmarkTracker : IStatefulFaceLandmarkTracker
 				return result;
 			}
 		}
-		FaceCandidate faceCandidate = FaceCandidateSelector.SelectBest(from face in _yuNetDetector.DetectAll(gray)
+		FaceCandidate? faceCandidate = FaceCandidateSelector.SelectBest(from face in _yuNetDetector.DetectAll(gray)
 			select new FaceCandidate(face.FaceBox, $"YuNet DNN lock {face.Score:P0}", face, face.Score), previousFace, gray.Width, gray.Height);
-		if ((object)faceCandidate != null && FaceCandidateSelector.IsAcceptableTrackingCandidate(faceCandidate, previousFace, gray.Width, gray.Height, _framesSinceLandmarkLock))
+		if (faceCandidate is not null && FaceCandidateSelector.IsAcceptableTrackingCandidate(faceCandidate, previousFace, gray.Width, gray.Height, _framesSinceLandmarkLock))
 		{
 			return faceCandidate.Face;
 		}
-		FaceCandidate faceCandidate2 = FaceCandidateSelector.SelectBest((_faceCascade?.DetectMultiScale(gray, 1.08, 4, HaarDetectionTypes.ScaleImage, new OpenCvSharp.Size(Math.Max(40, gray.Width / 12), Math.Max(40, gray.Height / 12))) ?? Array.Empty<OpenCvSharp.Rect>()).Select((OpenCvSharp.Rect face) => new FaceCandidate(face, "global Haar lock", null, 0.58)), previousFace, gray.Width, gray.Height);
-		if ((object)faceCandidate2 == null || !FaceCandidateSelector.IsAcceptableTrackingCandidate(faceCandidate2, previousFace, gray.Width, gray.Height, _framesSinceLandmarkLock))
+		FaceCandidate? faceCandidate2 = FaceCandidateSelector.SelectBest((_faceCascade?.DetectMultiScale(gray, 1.08, 4, HaarDetectionTypes.ScaleImage, new OpenCvSharp.Size(Math.Max(40, gray.Width / 12), Math.Max(40, gray.Height / 12))) ?? Array.Empty<OpenCvSharp.Rect>()).Select((OpenCvSharp.Rect face) => new FaceCandidate(face, "global Haar lock", null, 0.58)), previousFace, gray.Width, gray.Height);
+		if (faceCandidate2 is null || !FaceCandidateSelector.IsAcceptableTrackingCandidate(faceCandidate2, previousFace, gray.Width, gray.Height, _framesSinceLandmarkLock))
 		{
 			return default(OpenCvSharp.Rect);
 		}
@@ -335,7 +336,7 @@ public sealed class OpenCvFacemarkLandmarkTracker : IStatefulFaceLandmarkTracker
 
 	private OpenCvSharp.Rect? GetPreviousFace(int width, int height)
 	{
-		FaceFeatureDetection lastFeatureDetection = _lastFeatureDetection;
+		FaceFeatureDetection? lastFeatureDetection = _lastFeatureDetection;
 		if (lastFeatureDetection == null || !lastFeatureDetection.HasFace || lastFeatureDetection.FaceBox.Width <= 0.0 || lastFeatureDetection.FaceBox.Height <= 0.0)
 		{
 			return null;

@@ -36,7 +36,7 @@ internal sealed class PooledFrameBuffer : IDisposable
 	{
 		if (Interlocked.Decrement(ref _referenceCount) == 0)
 		{
-			byte[] array = Interlocked.Exchange(ref _bytes, null);
+			byte[]? array = Interlocked.Exchange(ref _bytes, null);
 			if (array != null)
 			{
 				ArrayPool<byte>.Shared.Return(array);

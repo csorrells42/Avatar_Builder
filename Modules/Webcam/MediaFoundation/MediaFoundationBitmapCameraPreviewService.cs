@@ -62,7 +62,7 @@ public sealed class MediaFoundationBitmapCameraPreviewService : ICameraPreviewSe
 
 	public void Stop()
 	{
-		Task captureTask = _captureTask;
+		Task? captureTask = _captureTask;
 		_cancellation?.Cancel();
 		TryFlushSourceReader();
 		try
@@ -89,7 +89,7 @@ public sealed class MediaFoundationBitmapCameraPreviewService : ICameraPreviewSe
 		try
 		{
 			_cancellation = new CancellationTokenSource();
-			TaskCompletionSource<string?> startup = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+			TaskCompletionSource<string?> startup = new TaskCompletionSource<string?>(TaskCreationOptions.RunContinuationsAsynchronously);
 			TaskCompletionSource<bool> firstFrame = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
 			_captureTask = Task.Run(delegate
 			{
@@ -101,7 +101,7 @@ public sealed class MediaFoundationBitmapCameraPreviewService : ICameraPreviewSe
 				NotifyStatusChanged("Could not start Media Foundation preview: timed out opening " + camera.Name + ".");
 				return false;
 			}
-			string text = await startup.Task;
+			string? text = await startup.Task;
 			if (!string.IsNullOrWhiteSpace(text))
 			{
 				Stop();
@@ -136,9 +136,9 @@ public sealed class MediaFoundationBitmapCameraPreviewService : ICameraPreviewSe
 
 	private void CaptureLoop(CameraDevice camera, CameraVideoMode? mode, CancellationToken cancellationToken, TaskCompletionSource<string?> startup, TaskCompletionSource<bool> firstFrame)
 	{
-		IMFSourceReader iMFSourceReader = null;
-		object mediaSource = null;
-		MediaFoundationCameraDeviceFactory.MediaFoundationScope mediaFoundationScope = null;
+		IMFSourceReader? iMFSourceReader = null;
+		object? mediaSource = null;
+		MediaFoundationCameraDeviceFactory.MediaFoundationScope? mediaFoundationScope = null;
 		try
 		{
 			mediaFoundationScope = MediaFoundationCameraDeviceFactory.Startup();
@@ -155,7 +155,7 @@ public sealed class MediaFoundationBitmapCameraPreviewService : ICameraPreviewSe
 				int actualStreamIndex;
 				int streamFlags;
 				long timestamp;
-				object sample;
+				object? sample;
 				int num = iMFSourceReader.ReadSample(-4, 0, out actualStreamIndex, out streamFlags, out timestamp, out sample);
 				if (MediaFoundationInterop.Failed(num))
 				{
@@ -277,7 +277,7 @@ public sealed class MediaFoundationBitmapCameraPreviewService : ICameraPreviewSe
 
 	private void NotifyCameraFrameAvailable(CameraFrame frame)
 	{
-		EventHandler<CameraFrame> eventHandler = this.CameraFrameAvailable;
+		EventHandler<CameraFrame>? eventHandler = this.CameraFrameAvailable;
 		if (eventHandler == null)
 		{
 			return;
@@ -298,7 +298,7 @@ public sealed class MediaFoundationBitmapCameraPreviewService : ICameraPreviewSe
 
 	private void NotifyFrameAvailable(BitmapSource bitmap)
 	{
-		EventHandler<BitmapSource> eventHandler = this.FrameAvailable;
+		EventHandler<BitmapSource>? eventHandler = this.FrameAvailable;
 		if (eventHandler == null)
 		{
 			return;
@@ -319,7 +319,7 @@ public sealed class MediaFoundationBitmapCameraPreviewService : ICameraPreviewSe
 
 	private void NotifyStatusChanged(string status)
 	{
-		EventHandler<string> eventHandler = this.StatusChanged;
+		EventHandler<string>? eventHandler = this.StatusChanged;
 		if (eventHandler == null)
 		{
 			return;
@@ -381,7 +381,7 @@ public sealed class MediaFoundationBitmapCameraPreviewService : ICameraPreviewSe
 	private static bool TryReadFrame(IMFSample sample, int width, int height, Guid subtype, int stride, out CameraFrame frame)
 	{
 		frame = new CameraFrame(Array.Empty<byte>(), 0, 0, 0);
-		IMFMediaBuffer buffer = null;
+		IMFMediaBuffer? buffer = null;
 		try
 		{
 			if (MediaFoundationInterop.Failed(sample.GetBufferByIndex(0, out buffer)))
@@ -484,7 +484,7 @@ public sealed class MediaFoundationBitmapCameraPreviewService : ICameraPreviewSe
 
 	private static CameraFrame CreateBgraFrameFromNv12(CameraFrame frame, int maximumWidth)
 	{
-		byte[] nv12Bytes = frame.Nv12Bytes;
+		byte[]? nv12Bytes = frame.Nv12Bytes;
 		if (nv12Bytes == null)
 		{
 			return frame;

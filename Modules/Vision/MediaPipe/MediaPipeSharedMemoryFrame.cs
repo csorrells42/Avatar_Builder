@@ -36,11 +36,12 @@ internal sealed class MediaPipeSharedMemoryFrame : IDisposable
 			int num2 = num * bitmapSource.PixelHeight;
 			EnsureCapacity(num2);
 			byte* pointer = null;
-			SafeMemoryMappedViewHandle safeMemoryMappedViewHandle = _view.SafeMemoryMappedViewHandle;
+			MemoryMappedViewAccessor view = _view ?? throw new InvalidOperationException("Shared-memory view was not initialized.");
+			SafeMemoryMappedViewHandle safeMemoryMappedViewHandle = view.SafeMemoryMappedViewHandle;
 			safeMemoryMappedViewHandle.AcquirePointer(ref pointer);
 			try
 			{
-				bitmapSource.CopyPixels(buffer: new IntPtr(pointer + _view.PointerOffset), sourceRect: new Int32Rect(0, 0, bitmapSource.PixelWidth, bitmapSource.PixelHeight), bufferSize: num2, stride: num);
+				bitmapSource.CopyPixels(buffer: new IntPtr(pointer + view.PointerOffset), sourceRect: new Int32Rect(0, 0, bitmapSource.PixelWidth, bitmapSource.PixelHeight), bufferSize: num2, stride: num);
 				Thread.MemoryBarrier();
 			}
 			finally

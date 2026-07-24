@@ -20,12 +20,12 @@ public sealed class MediaFoundationCameraModeService
 			cancellationToken.ThrowIfCancellationRequested();
 			if (!OperatingSystem.IsWindows())
 			{
-				return new global::_003C_003Ez__ReadOnlySingleElementList<CameraVideoMode>(CameraVideoMode.Auto);
+				return [CameraVideoMode.Auto];
 			}
 			using (MediaFoundationCameraDeviceFactory.Startup())
 			{
-				object mediaSource = null;
-				IMFSourceReader iMFSourceReader = null;
+		object? mediaSource = null;
+		IMFSourceReader? iMFSourceReader = null;
 				try
 				{
 					iMFSourceReader = MediaFoundationCameraDeviceFactory.CreateModeProbeReader(camera, out mediaSource);
@@ -58,7 +58,7 @@ public sealed class MediaFoundationCameraModeService
 				}
 				catch
 				{
-					return SortModes(AddFallbackModes(camera.Name, new global::_003C_003Ez__ReadOnlySingleElementList<CameraVideoMode>(CameraVideoMode.Auto)));
+					return SortModes(AddFallbackModes(camera.Name, [CameraVideoMode.Auto]));
 				}
 				finally
 				{
@@ -78,7 +78,7 @@ public sealed class MediaFoundationCameraModeService
 		}
 		mediaType.GetGUID(in MediaFoundationGuids.MF_MT_SUBTYPE, out var value2);
 		framesPerSecond = NormalizeFrameRate(framesPerSecond);
-		string text = ((value2 == Guid.Empty) ? null : NormalizeFormat(MediaFoundationInterop.FormatSubtype(value2)));
+		string? text = ((value2 == Guid.Empty) ? null : NormalizeFormat(MediaFoundationInterop.FormatSubtype(value2)));
 		string label = ((text == null) ? $"{width}x{height} @ {framesPerSecond:0.###} fps" : $"{width}x{height} @ {framesPerSecond:0.###} fps ({text.ToUpperInvariant()})");
 		mode = new CameraVideoMode(label, width, height, framesPerSecond, text);
 		return true;
@@ -110,14 +110,14 @@ public sealed class MediaFoundationCameraModeService
 
 	private static string? NormalizeFormat(string? format)
 	{
-		string text = format?.ToLowerInvariant();
-		if (text != null && (text == null || text.Length != 0))
+		string? text = format?.ToLowerInvariant();
+		if (!string.IsNullOrEmpty(text))
 		{
 			if (text == "mjpg")
 			{
 				return "mjpeg";
 			}
-			return format.ToLowerInvariant();
+			return text;
 		}
 		return null;
 	}

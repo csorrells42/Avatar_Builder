@@ -893,7 +893,7 @@ public sealed class MediaPipeNormalizedFaceReconstructor
 		int yawBinDegrees = Quantize(frame.BRotationAroundYDegrees, 5.0, -75, 75);
 		int pitchBinDegrees = Quantize(frame.ARotationAroundXDegrees, 10.0, -30, 30);
 		SilhouetteProfileKey key = new SilhouetteProfileKey(yawBinDegrees, pitchBinDegrees, frame.CameraId);
-		if (!_silhouettes.TryGetValue(key, out SilhouetteProfileAccumulator value))
+			if (!_silhouettes.TryGetValue(key, out SilhouetteProfileAccumulator? value))
 		{
 			value = new SilhouetteProfileAccumulator(key);
 			_silhouettes.Add(key, value);
@@ -945,7 +945,7 @@ public sealed class MediaPipeNormalizedFaceReconstructor
 				{
 					continue;
 				}
-				MediaPipeSilhouetteBand mediaPipeSilhouetteBand = null;
+			MediaPipeSilhouetteBand? mediaPipeSilhouetteBand = null;
 				for (int k = 0; k < mediaPipeSilhouetteAngleProfile.Bands.Count; k++)
 				{
 					if (mediaPipeSilhouetteAngleProfile.Bands[k].BandIndex == i)

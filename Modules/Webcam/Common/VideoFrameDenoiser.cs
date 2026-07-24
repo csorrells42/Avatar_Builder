@@ -18,7 +18,7 @@ public sealed class VideoFrameDenoiser
 
 	public static void ApplyTemporalDenoise(byte[] current, double strength, ref byte[]? previousFrame)
 	{
-		byte[] array = previousFrame;
+		byte[]? array = previousFrame;
 		if (array == null || array.Length != current.Length)
 		{
 			previousFrame = (byte[])current.Clone();

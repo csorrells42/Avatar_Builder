@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using System.Threading;
 using AvatarBuilder.Modules.Webcam.DirectX12;
@@ -39,6 +40,9 @@ internal sealed class MediaPipeGpuTensorPreprocessor : IDisposable
 	private const int TensorChannels = 3;
 
 	private const int RootConstantCount = 16;
+
+	private static readonly TimeSpan GpuWaitTimeout =
+		TimeSpan.FromMilliseconds(500);
 
 	private const string ShaderSource = """
 		Texture2D<float> CameraLuma : register(t0);
@@ -127,15 +131,17 @@ internal sealed class MediaPipeGpuTensorPreprocessor : IDisposable
 
 	private readonly ID3D12CommandQueue _commandQueue;
 
-	private readonly ID3D12CommandAllocator _commandAllocator;
+	private readonly CommandContext _detectorCommands;
 
-	private readonly ID3D12GraphicsCommandList _commandList;
+	private readonly CommandContext _landmarkCommands;
 
 	private readonly ID3D12Fence _fence;
 
 	private ID3D12Fence? _d3d11ProducerFence;
 
 	private nint _d3d11ProducerFenceHandle;
+
+	private ulong _lastD3D11ProducerFenceValue;
 
 	private readonly AutoResetEvent _fenceEvent = new(initialState: false);
 
@@ -152,6 +158,10 @@ internal sealed class MediaPipeGpuTensorPreprocessor : IDisposable
 	private readonly GpuTensor _detectorTensor;
 
 	private readonly GpuTensor _landmarkTensor;
+
+	private readonly Dictionary<nint, ID3D12Resource> _sharedFrameResources = [];
+
+	private readonly Queue<RetiredResourceBatch> _retiredSharedFrameResources = [];
 
 	private ulong _fenceValue;
 
@@ -170,19 +180,14 @@ internal sealed class MediaPipeGpuTensorPreprocessor : IDisposable
 		_device = CreateCompatibleDevice(firstFrame);
 		_commandQueue = _device.CreateCommandQueue<ID3D12CommandQueue>(
 			new CommandQueueDescription(CommandListType.Compute));
-		_commandAllocator = _device.CreateCommandAllocator<ID3D12CommandAllocator>(
-			CommandListType.Compute);
-		_commandList = _device.CreateCommandList<ID3D12GraphicsCommandList>(
-			0u,
-			CommandListType.Compute,
-			_commandAllocator);
-		_commandList.Close();
+		_detectorCommands = new CommandContext(_device, sourceDescriptorStart: 0);
+		_landmarkCommands = new CommandContext(_device, sourceDescriptorStart: 3);
 		_fence = _device.CreateFence<ID3D12Fence>(0uL);
 
 		_descriptorHeap = _device.CreateDescriptorHeap<ID3D12DescriptorHeap>(
 			new DescriptorHeapDescription(
 				DescriptorHeapType.ConstantBufferViewShaderResourceViewUnorderedAccessView,
-				4u,
+				6u,
 				DescriptorHeapFlags.ShaderVisible));
 		_descriptorSize = (int)_device.GetDescriptorHandleIncrementSize(
 			DescriptorHeapType.ConstantBufferViewShaderResourceViewUnorderedAccessView);
@@ -249,7 +254,7 @@ internal sealed class MediaPipeGpuTensorPreprocessor : IDisposable
 			0,
 			OrtMemType.Default);
 		_detectorTensor = CreateTensor(DetectorSize, 2);
-		_landmarkTensor = CreateTensor(LandmarkSize, 3);
+		_landmarkTensor = CreateTensor(LandmarkSize, 5);
 	}
 
 	public bool CanProcess(TextureNativeFrameLease frame)
@@ -288,6 +293,7 @@ internal sealed class MediaPipeGpuTensorPreprocessor : IDisposable
 		int top = (DetectorSize - resizedHeight) / 2;
 		Dispatch(
 			frame,
+			_detectorCommands,
 			_detectorTensor,
 			DetectorSize,
 			[
@@ -324,6 +330,7 @@ internal sealed class MediaPipeGpuTensorPreprocessor : IDisposable
 		float sine = MathF.Sin(roi.Angle);
 		Dispatch(
 			frame,
+			_landmarkCommands,
 			_landmarkTensor,
 			LandmarkSize,
 			[
@@ -346,6 +353,16 @@ internal sealed class MediaPipeGpuTensorPreprocessor : IDisposable
 			]);
 	}
 
+	public void SignalDetectorInferenceSubmitted()
+	{
+		SignalInferenceSubmitted(_detectorCommands);
+	}
+
+	public void SignalLandmarkInferenceSubmitted()
+	{
+		SignalInferenceSubmitted(_landmarkCommands);
+	}
+
 	public void Dispose()
 	{
 		if (_disposed)
@@ -357,9 +374,16 @@ internal sealed class MediaPipeGpuTensorPreprocessor : IDisposable
 		{
 			WaitForGpu();
 		}
+		catch (TimeoutException)
+		{
+			// Releasing resources that a wedged GPU may still own is less safe
+			// than abandoning this failed tracker instance to process teardown.
+			return;
+		}
 		catch
 		{
 		}
+		ReleaseSharedFrameResources();
 		_landmarkTensor.Dispose();
 		_detectorTensor.Dispose();
 		_dmlMemoryInfo.Dispose();
@@ -371,8 +395,8 @@ internal sealed class MediaPipeGpuTensorPreprocessor : IDisposable
 		_d3d11ProducerFenceHandle = IntPtr.Zero;
 		_fence.Dispose();
 		_fenceEvent.Dispose();
-		_commandList.Dispose();
-		_commandAllocator.Dispose();
+		_landmarkCommands.Dispose();
+		_detectorCommands.Dispose();
 		_commandQueue.Dispose();
 		_device.Dispose();
 	}
@@ -420,6 +444,7 @@ internal sealed class MediaPipeGpuTensorPreprocessor : IDisposable
 
 	private void Dispatch(
 		TextureNativeFrameLease frame,
+		CommandContext commands,
 		GpuTensor output,
 		int outputSize,
 		ReadOnlySpan<float> constants)
@@ -435,47 +460,64 @@ internal sealed class MediaPipeGpuTensorPreprocessor : IDisposable
 				nameof(constants));
 		}
 
-		using ID3D12Resource cameraResource = OpenFrameResource(frame);
+		WaitForContext(commands);
 		WaitForD3D11Producer(frame);
-		CreateNv12SourceViews(cameraResource);
-		_commandAllocator.Reset();
-		_commandList.Reset(_commandAllocator, _pipelineState);
+		ID3D12Resource cameraResource = OpenFrameResource(
+			frame,
+			out bool disposeCameraResource);
+		try
+		{
+			CreateNv12SourceViews(
+				cameraResource,
+				commands.SourceDescriptorStart);
+			commands.CommandAllocator.Reset();
+			commands.CommandList.Reset(commands.CommandAllocator, _pipelineState);
 		ResourceBarrier outputToWrite = ResourceBarrier.BarrierTransition(
 			output.Resource,
 			ResourceStates.Common,
 			ResourceStates.UnorderedAccess);
-		_commandList.ResourceBarrier(new Span<ResourceBarrier>(ref outputToWrite));
-		_commandList.SetComputeRootSignature(_rootSignature);
-		_commandList.SetDescriptorHeaps(
-			new ReadOnlySpan<ID3D12DescriptorHeap>(_descriptorHeap));
-		_commandList.SetComputeRootDescriptorTable(
+			commands.CommandList.ResourceBarrier(
+				new Span<ResourceBarrier>(ref outputToWrite));
+			commands.CommandList.SetComputeRootSignature(_rootSignature);
+			commands.CommandList.SetDescriptorHeaps(
+			new ReadOnlySpan<ID3D12DescriptorHeap>(in _descriptorHeap));
+			commands.CommandList.SetComputeRootDescriptorTable(
 			0u,
-			GetGpuDescriptorHandle(0));
-		_commandList.SetComputeRootDescriptorTable(
+				GetGpuDescriptorHandle(commands.SourceDescriptorStart));
+			commands.CommandList.SetComputeRootDescriptorTable(
 			1u,
 			GetGpuDescriptorHandle(output.DescriptorIndex));
-		for (int index = 0; index < constants.Length; index++)
-		{
-			_commandList.SetComputeRoot32BitConstant(
+			for (int index = 0; index < constants.Length; index++)
+			{
+				commands.CommandList.SetComputeRoot32BitConstant(
 				2u,
 				BitConverter.SingleToUInt32Bits(constants[index]),
 				(uint)index);
-		}
-		_commandList.Dispatch(
+			}
+			commands.CommandList.Dispatch(
 			(uint)((outputSize + 7) / 8),
 			(uint)((outputSize + 7) / 8),
 			1u);
-		ResourceBarrier unorderedAccess =
-			ResourceBarrier.BarrierUnorderedAccessView(output.Resource);
-		_commandList.ResourceBarrier(new Span<ResourceBarrier>(ref unorderedAccess));
-		ResourceBarrier outputToCommon = ResourceBarrier.BarrierTransition(
+			ResourceBarrier unorderedAccess =
+				ResourceBarrier.BarrierUnorderedAccessView(output.Resource);
+			commands.CommandList.ResourceBarrier(
+				new Span<ResourceBarrier>(ref unorderedAccess));
+			ResourceBarrier outputToCommon = ResourceBarrier.BarrierTransition(
 			output.Resource,
 			ResourceStates.UnorderedAccess,
 			ResourceStates.Common);
-		_commandList.ResourceBarrier(new Span<ResourceBarrier>(ref outputToCommon));
-		_commandList.Close();
-		_commandQueue.ExecuteCommandList(_commandList);
-		WaitForGpu();
+			commands.CommandList.ResourceBarrier(
+				new Span<ResourceBarrier>(ref outputToCommon));
+			commands.CommandList.Close();
+			_commandQueue.ExecuteCommandList(commands.CommandList);
+		}
+		finally
+		{
+			if (disposeCameraResource)
+			{
+				cameraResource.Dispose();
+			}
+		}
 	}
 
 	private void WaitForD3D11Producer(TextureNativeFrameLease frame)
@@ -486,18 +528,25 @@ internal sealed class MediaPipeGpuTensorPreprocessor : IDisposable
 		{
 			return;
 		}
-		if (_d3d11ProducerFence == null
-			|| _d3d11ProducerFenceHandle != producerFenceHandle)
+		bool generationChanged = _d3d11ProducerFence is null
+			|| _d3d11ProducerFenceHandle != producerFenceHandle
+			|| producerFenceValue < _lastD3D11ProducerFenceValue;
+		if (generationChanged)
 		{
+			RetireSharedFrameResources();
 			_d3d11ProducerFence?.Dispose();
 			_d3d11ProducerFence =
 				_device.OpenSharedHandle<ID3D12Fence>(producerFenceHandle);
 			_d3d11ProducerFenceHandle = producerFenceHandle;
 		}
+		_lastD3D11ProducerFenceValue = producerFenceValue;
 		_commandQueue.Wait(_d3d11ProducerFence, producerFenceValue);
+		ReleaseCompletedSharedFrameResources();
 	}
 
-	private void CreateNv12SourceViews(ID3D12Resource cameraResource)
+	private void CreateNv12SourceViews(
+		ID3D12Resource cameraResource,
+		int sourceDescriptorStart)
 	{
 		_device.CreateShaderResourceView(
 			cameraResource,
@@ -513,7 +562,7 @@ internal sealed class MediaPipeGpuTensorPreprocessor : IDisposable
 					PlaneSlice = 0u
 				}
 			},
-			GetCpuDescriptorHandle(0));
+			GetCpuDescriptorHandle(sourceDescriptorStart));
 		_device.CreateShaderResourceView(
 			cameraResource,
 			new ShaderResourceViewDescription
@@ -528,10 +577,12 @@ internal sealed class MediaPipeGpuTensorPreprocessor : IDisposable
 					PlaneSlice = 1u
 				}
 			},
-			GetCpuDescriptorHandle(1));
+			GetCpuDescriptorHandle(sourceDescriptorStart + 1));
 	}
 
-	private ID3D12Resource OpenFrameResource(TextureNativeFrameLease frame)
+	private ID3D12Resource OpenFrameResource(
+		TextureNativeFrameLease frame,
+		out bool disposeResource)
 	{
 		if (!frame.MediaSubtype.Contains("NV12", StringComparison.OrdinalIgnoreCase))
 		{
@@ -540,13 +591,25 @@ internal sealed class MediaPipeGpuTensorPreprocessor : IDisposable
 		}
 		if (IsNativeD3D12Resource(frame))
 		{
+			disposeResource = true;
 			return WrapResource(frame.Resource);
 		}
 		if (frame.D3D12SharedTextureHandle != IntPtr.Zero)
 		{
-			return _device.OpenSharedHandle<ID3D12Resource>(
-				frame.D3D12SharedTextureHandle);
+			disposeResource = false;
+			if (!_sharedFrameResources.TryGetValue(
+				frame.D3D12SharedTextureHandle,
+				out ID3D12Resource? resource))
+			{
+				resource = _device.OpenSharedHandle<ID3D12Resource>(
+					frame.D3D12SharedTextureHandle);
+				_sharedFrameResources.Add(
+					frame.D3D12SharedTextureHandle,
+					resource);
+			}
+			return resource;
 		}
+		disposeResource = false;
 		throw new InvalidOperationException(
 			"The camera frame does not carry a GPU texture.");
 	}
@@ -597,14 +660,142 @@ internal sealed class MediaPipeGpuTensorPreprocessor : IDisposable
 
 	private void WaitForGpu()
 	{
+		ulong fenceValue = SignalQueue();
+		WaitForFence(fenceValue, "shut down");
+	}
+
+	private void SignalInferenceSubmitted(CommandContext commands)
+	{
+		ObjectDisposedException.ThrowIf(_disposed, this);
+		commands.ReadyFenceValue = SignalQueue();
+	}
+
+	private ulong SignalQueue()
+	{
 		_fenceValue++;
 		_commandQueue.Signal(_fence, _fenceValue);
-		if (_fence.CompletedValue >= _fenceValue)
+		return _fenceValue;
+	}
+
+	private void WaitForContext(CommandContext commands)
+	{
+		ulong fenceValue = commands.ReadyFenceValue;
+		if (fenceValue == 0uL)
 		{
 			return;
 		}
-		_fence.SetEventOnCompletion(_fenceValue, _fenceEvent);
-		_fenceEvent.WaitOne();
+		WaitForFence(fenceValue, "reuse a MediaPipe GPU tensor");
+		commands.ReadyFenceValue = 0uL;
+	}
+
+	private void WaitForFence(ulong fenceValue, string operation)
+	{
+		if (_fence.CompletedValue >= fenceValue)
+		{
+			return;
+		}
+		_fence.SetEventOnCompletion(fenceValue, _fenceEvent);
+		if (!_fenceEvent.WaitOne(GpuWaitTimeout))
+		{
+			throw new TimeoutException(
+				"MediaPipe GPU did not become ready to " +
+				$"{operation} within {GpuWaitTimeout.TotalMilliseconds:0} ms.");
+		}
+	}
+
+	private void RetireSharedFrameResources()
+	{
+		if (_sharedFrameResources.Count == 0)
+		{
+			return;
+		}
+		ulong readyFenceValue = Math.Max(
+			_detectorCommands.ReadyFenceValue,
+			_landmarkCommands.ReadyFenceValue);
+		_retiredSharedFrameResources.Enqueue(
+			new RetiredResourceBatch(
+				readyFenceValue,
+				[.. _sharedFrameResources.Values]));
+		_sharedFrameResources.Clear();
+	}
+
+	private void ReleaseCompletedSharedFrameResources()
+	{
+		while (_retiredSharedFrameResources.TryPeek(out RetiredResourceBatch? batch)
+			&& (batch.FenceValue == 0uL
+				|| _fence.CompletedValue >= batch.FenceValue))
+		{
+			_retiredSharedFrameResources.Dequeue();
+			batch.Dispose();
+		}
+	}
+
+	private void ReleaseSharedFrameResources()
+	{
+		foreach (ID3D12Resource resource in _sharedFrameResources.Values)
+		{
+			resource.Dispose();
+		}
+		_sharedFrameResources.Clear();
+		while (_retiredSharedFrameResources.TryDequeue(
+			out RetiredResourceBatch? batch))
+		{
+			batch.Dispose();
+		}
+	}
+
+	private sealed class CommandContext : IDisposable
+	{
+		public ID3D12CommandAllocator CommandAllocator { get; }
+
+		public ID3D12GraphicsCommandList CommandList { get; }
+
+		public int SourceDescriptorStart { get; }
+
+		public ulong ReadyFenceValue { get; set; }
+
+		public CommandContext(ID3D12Device device, int sourceDescriptorStart)
+		{
+			SourceDescriptorStart = sourceDescriptorStart;
+			CommandAllocator =
+				device.CreateCommandAllocator<ID3D12CommandAllocator>(
+					CommandListType.Compute);
+			CommandList =
+				device.CreateCommandList<ID3D12GraphicsCommandList>(
+					0u,
+					CommandListType.Compute,
+					CommandAllocator);
+			CommandList.Close();
+		}
+
+		public void Dispose()
+		{
+			CommandList.Dispose();
+			CommandAllocator.Dispose();
+		}
+	}
+
+	private sealed class RetiredResourceBatch : IDisposable
+	{
+		public ulong FenceValue { get; }
+
+		private readonly ID3D12Resource[] _resources;
+
+		public RetiredResourceBatch(
+			ulong fenceValue,
+			ID3D12Resource[] resources)
+		{
+			FenceValue = fenceValue;
+			_resources = resources;
+		}
+
+		public void Dispose()
+		{
+			foreach (ID3D12Resource resource in _resources)
+			{
+				resource.Dispose();
+			}
+		}
 	}
 
 	private sealed class GpuTensor : IDisposable

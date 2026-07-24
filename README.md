@@ -8,9 +8,10 @@ This application is not a medical device, an identity-authentication system, or 
 
 1. Use **File > Login** to select the person whose measurements may be stored.
 2. Select a camera and mode, then turn the camera on.
-3. Optionally enable **View > Show Face Mesh Overlay** or **Show Live Wireframe Only**.
-4. Click **Start Avatar Capture** to allow accepted MediaPipe geometry to update that profile.
-5. Use **View Measured 3D Face** to inspect the accumulated visible-evidence model.
+3. Keep one consenting person visible until **People memory** reports that the face is remembered.
+4. Optionally enable **View > Show Face Mesh Overlay** or **Show Live Wireframe Only**.
+5. Click **Start Avatar Capture** to link that remembered person to exactly one avatar profile and allow accepted MediaPipe geometry to update it.
+6. Use **View Measured 3D Face** to inspect the accumulated visible-evidence model.
 
 Stopping avatar capture leaves camera preview and live MediaPipe tracking available. Logging out stops profile capture.
 
@@ -20,6 +21,7 @@ Camera capture and preview never wait for face analysis, model building, or disk
 
 - The camera renderer presents frames independently.
 - Each MediaPipe analysis lane has one worker and one accepted frame slot.
+- Passive multi-person recognition has its own lower-priority, one-in-flight observer.
 - Main and stereo geometry builders have one worker and no waiting slot.
 - While a slot is occupied, new inputs are ignored before copying or conversion. Accepted work always finishes.
 - Model publication and persistence run away from the WPF UI thread.
@@ -36,9 +38,9 @@ This keeps latency and memory bounded when camera input is faster than the avail
 - DX12 Preview Viewport
 - Show Face Mesh Overlay
 - Show Live Wireframe Only
-- MediaPipe Processor: CPU (Stable) or GPU (DirectML)
+- MediaPipe Processor: GPU Texture (DirectML, Default) or CPU (Fallback)
 
-MediaPipe is the primary face-landmark and measured-geometry backend. CPU uses the established MediaPipe Tasks graph by default. GPU uses converted copies of the official MediaPipe detector and 478-point landmark models through ONNX Runtime DirectML. The GPU path is enabled only after its detector, landmarker, and DirectML provider pass a startup probe; a failed probe leaves CPU active. 3DDFA-V2 remains available as a backup face-box tracker and as the explicit dense scaffold that measured MediaPipe evidence reshapes.
+MediaPipe is the primary face-landmark and measured-geometry backend. GPU is the default and runs converted copies of the official MediaPipe detector and 478-point landmark models through ONNX Runtime DirectML. The GPU path is enabled only after its detector, landmarker, and DirectML provider pass a startup probe; a failed probe leaves the official MediaPipe Tasks CPU graph available as the fallback. 3DDFA-V2 remains available as a backup face-box tracker and as the explicit dense scaffold that measured MediaPipe evidence reshapes.
 
 The CPU and GPU paths share the same one-in-flight, zero-waiting contract. A frame is accepted only while the processor is idle, every accepted frame finishes, and arrivals during that work are dropped before pixel conversion or shared-memory copying. On the development workstation, the DirectML path measured about 8.4 ms per saved 4K frame through the complete C# client and shared-memory transport after a one-time process warmup. That is roughly 119 processed frames per second of available inference capacity; live camera rate and preview presentation remain independent limits.
 
@@ -56,6 +58,12 @@ Each person has a separate directory under:
 
 `AvatarSystem\People\<profile-id>`
 
+Passive people memory is stored separately under:
+
+`AvatarSystem\IdentityMemory\person_identity_memory.json`
+
+People memory observes up to eight faces without blocking the camera. A brief sighting remains temporary and expires; a sustained, coherent encounter may retain normalized SFace embeddings, timestamps, encounter counts, and an optional avatar-profile link. It never stores the observation images. Avatar likeness, expressions, motion, and geometry remain gated behind the explicit **Start Avatar Capture** action, and one remembered person can be linked to only one avatar profile.
+
 MediaPipe measured geometry and stereo geometry remain separate data products. Passive continuous webcam video is not stored.
 
 ## Module map
@@ -63,11 +71,12 @@ MediaPipe measured geometry and stereo geometry remain separate data products. P
 - `Modules\Webcam`: camera discovery, controls, capture, preview, DX11/DX12 interop, and dual-camera operation.
 - `Modules\Vision\Common`: backend-neutral face and landmark contracts.
 - `Modules\Vision\Analysis`: contour measurements, temporal repair, and lock quality.
+- `Modules\Vision\Identity`: short-lived multi-person association, durable face memory, SFace embeddings, and explicit one-person/one-avatar consent linkage.
 - `Modules\Vision\MediaPipe`: local Face Landmarker sidecar, overlay mapping, and measured reconstruction.
 - `Modules\Vision\OpenCv`: supplemental localization and aperture fallbacks.
 - `Modules\Vision\Pipeline`: tracker composition.
 - `Modules\Vision\Personalization`: profiles, login session, and capture-quality assessment.
-- `Modules\Vision\Diagnostics`: optional MediaPipe timing and convergence evidence.
+- `Modules\Vision\Diagnostics`: per-frame timing and backend-status contracts.
 - `Modules\Infrastructure`: small runtime helpers.
 
 See `Modules\README.md` and the README in each module before changing ownership boundaries.
@@ -86,7 +95,7 @@ Every successful build refreshes `desktop-runtime`. The desktop shortcut and `ma
 
 MediaPipe runs through the repository-local Python environment and bundled model assets. Runtime dependencies are copied beside the executable.
 
-Live timing and convergence reports are written under the selected output folder, not the repository.
+Live timing and backend status remain transient; they are not stored as report files.
 
 ## Digital-representation rule
 

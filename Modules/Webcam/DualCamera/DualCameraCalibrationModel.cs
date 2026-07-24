@@ -67,7 +67,7 @@ internal sealed record DualCameraCalibrationModel
 			buffer[2] = CameraAName;
 			buffer[3] = CameraBName;
 			buffer[4] = $"{ImageWidth}x{ImageHeight}";
-			return string.Join('|', (ReadOnlySpan<string?>)buffer);
+			return string.Join('|', (ReadOnlySpan<string>)buffer);
 		}
 	}
 
@@ -112,7 +112,7 @@ internal sealed record DualCameraCalibrationModel
 	public static void Save(string outputRoot, DualCameraCalibrationModel calibration)
 	{
 		string path = GetPath(outputRoot);
-		Directory.CreateDirectory(Path.GetDirectoryName(path));
+		Directory.CreateDirectory(GetFolder(outputRoot));
 		string text = path + ".tmp";
 		File.WriteAllText(text, JsonSerializer.Serialize(calibration, JsonOptions));
 		File.Move(text, path, overwrite: true);
@@ -127,8 +127,8 @@ internal sealed record DualCameraCalibrationModel
 			{
 				return null;
 			}
-			DualCameraCalibrationModel dualCameraCalibrationModel = JsonSerializer.Deserialize<DualCameraCalibrationModel>(File.ReadAllText(path), JsonOptions);
-			return ((object)dualCameraCalibrationModel != null && dualCameraCalibrationModel.IsUsable) ? dualCameraCalibrationModel : null;
+			DualCameraCalibrationModel? dualCameraCalibrationModel = JsonSerializer.Deserialize<DualCameraCalibrationModel>(File.ReadAllText(path), JsonOptions);
+			return (dualCameraCalibrationModel is not null && dualCameraCalibrationModel.IsUsable) ? dualCameraCalibrationModel : null;
 		}
 		catch
 		{

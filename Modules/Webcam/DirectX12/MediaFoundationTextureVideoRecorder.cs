@@ -95,8 +95,8 @@ internal sealed class MediaFoundationTextureVideoRecorder : IDisposable
 		{
 			MediaFoundationInterop.ReleaseComObject(attributes);
 		}
-		IMFMediaType mediaType = null;
-		IMFMediaType mediaType2 = null;
+		IMFMediaType? mediaType = null;
+		IMFMediaType? mediaType2 = null;
 		try
 		{
 			MediaFoundationInterop.ThrowIfFailed(MediaFoundationInterop.MFCreateMediaType(out mediaType));

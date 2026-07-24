@@ -879,7 +879,7 @@ public sealed class MediaPipeStereoFaceReconstructor
 			return;
 		}
 		RawPointBinKey key = new RawPointBinKey(QuantizeRawCoordinate(point.X), QuantizeRawCoordinate(point.Y), QuantizeRawCoordinate(point.Z));
-		if (!_rawPointBins.TryGetValue(key, out RawPointBinAccumulator value))
+			if (!_rawPointBins.TryGetValue(key, out RawPointBinAccumulator? value))
 		{
 			if (_rawPointBins.Count >= 100000)
 			{

@@ -95,7 +95,7 @@ internal sealed class Direct2DTrackingOverlayRenderer : IDisposable
 
 	private readonly ID3D11Resource?[] _wrappedBackBuffers;
 
-	private readonly ID3D11Resource[][] _wrappedBackBufferViews;
+	private readonly ID3D11Resource?[] _wrappedBackBufferViews;
 
 	private readonly ID2D1Bitmap1?[] _direct2DTargets;
 
@@ -129,11 +129,10 @@ internal sealed class Direct2DTrackingOverlayRenderer : IDisposable
 		_direct2DContext.UnitMode = UnitMode.Pixels;
 		int num = Math.Max(1, frameCount);
 		_wrappedBackBuffers = new ID3D11Resource[num];
-		_wrappedBackBufferViews = new ID3D11Resource[num][];
+		_wrappedBackBufferViews = new ID3D11Resource?[num];
 		_direct2DTargets = new ID2D1Bitmap1[num];
 		for (int i = 0; i < num; i++)
 		{
-			_wrappedBackBufferViews[i] = new ID3D11Resource[1];
 		}
 	}
 
@@ -167,7 +166,7 @@ internal sealed class Direct2DTrackingOverlayRenderer : IDisposable
 				ID3D12Resource d3d12Resource = backBuffers[i] ?? throw new InvalidOperationException($"DX12 back buffer {i} is unavailable.");
 				ID3D11Resource iD3D11Resource = _direct3D11On12Device.CreateWrappedResource<ID3D11Resource>(d3d12Resource, flags, ResourceStates.RenderTarget, ResourceStates.Common);
 				_wrappedBackBuffers[i] = iD3D11Resource;
-				_wrappedBackBufferViews[i][0] = iD3D11Resource;
+				_wrappedBackBufferViews[i] = iD3D11Resource;
 				using IDXGISurface surface = iD3D11Resource.QueryInterface<IDXGISurface>();
 				_direct2DTargets[i] = _direct2DContext.CreateBitmapFromDxgiSurface(surface, value);
 			}
@@ -191,7 +190,7 @@ internal sealed class Direct2DTrackingOverlayRenderer : IDisposable
 				_direct2DTargets[i] = null;
 				_wrappedBackBuffers[i]?.Dispose();
 				_wrappedBackBuffers[i] = null;
-				_wrappedBackBufferViews[i][0] = null;
+				_wrappedBackBufferViews[i] = null;
 			}
 			_direct3D11Context.Flush();
 		}
@@ -199,14 +198,14 @@ internal sealed class Direct2DTrackingOverlayRenderer : IDisposable
 
 	public bool PrepareDraw(int frameIndex, PreviewTrackingOverlay overlay, int width, int height)
 	{
-		if (_disposed || _disabled || !overlay.HasContent || width <= 1 || height <= 1 || (uint)frameIndex >= (uint)_wrappedBackBuffers.Length || (object)_wrappedBackBuffers[frameIndex] == null || (object)_direct2DTargets[frameIndex] == null)
+		if (_disposed || _disabled || !overlay.HasContent || width <= 1 || height <= 1 || (uint)frameIndex >= (uint)_wrappedBackBuffers.Length || _wrappedBackBuffers[frameIndex] is null || _direct2DTargets[frameIndex] is null)
 		{
 			return false;
 		}
 		try
 		{
 			EnsureOverlayCommandList(overlay, width, height);
-			return (object)_overlayCommandList != null;
+			return _overlayCommandList is not null;
 		}
 		catch
 		{
@@ -218,13 +217,22 @@ internal sealed class Direct2DTrackingOverlayRenderer : IDisposable
 
 	public void Draw(int frameIndex, int width, int height, PreviewTrackingOverlay overlay)
 	{
-		ID2D1CommandList overlayCommandList = _overlayCommandList;
-		if (_disposed || (object)overlayCommandList == null || (object)_recordedOverlay != overlay || _recordedWidth != width || _recordedHeight != height || (uint)frameIndex >= (uint)_wrappedBackBuffers.Length || (object)_wrappedBackBuffers[frameIndex] == null || (object)_direct2DTargets[frameIndex] == null)
+		ID2D1CommandList? overlayCommandList = _overlayCommandList;
+		if (_disposed || overlayCommandList is null || !ReferenceEquals(_recordedOverlay, overlay) || _recordedWidth != width || _recordedHeight != height || (uint)frameIndex >= (uint)_wrappedBackBuffers.Length || _wrappedBackBuffers[frameIndex] is null || _wrappedBackBufferViews[frameIndex] is null || _direct2DTargets[frameIndex] is null)
 		{
 			return;
 		}
-		ID3D11Resource[] resources = _wrappedBackBufferViews[frameIndex];
-		ID2D1Bitmap1 target = _direct2DTargets[frameIndex];
+		ID3D11Resource? wrappedBackBufferView = _wrappedBackBufferViews[frameIndex];
+		if (wrappedBackBufferView is null)
+		{
+			return;
+		}
+		ID3D11Resource[] resources = [wrappedBackBufferView];
+		ID2D1Bitmap1? target = _direct2DTargets[frameIndex];
+		if (target is null)
+		{
+			return;
+		}
 		bool flag = false;
 		bool flag2 = false;
 		try
@@ -268,11 +276,11 @@ internal sealed class Direct2DTrackingOverlayRenderer : IDisposable
 
 	private void EnsureOverlayCommandList(PreviewTrackingOverlay overlay, int width, int height)
 	{
-		if ((object)_overlayCommandList != null && (object)_recordedOverlay == overlay && _recordedWidth == width && _recordedHeight == height)
+		if (_overlayCommandList is not null && ReferenceEquals(_recordedOverlay, overlay) && _recordedWidth == width && _recordedHeight == height)
 		{
 			return;
 		}
-		ID2D1CommandList iD2D1CommandList = null;
+		ID2D1CommandList? iD2D1CommandList = null;
 		bool flag = false;
 		try
 		{
@@ -327,7 +335,7 @@ internal sealed class Direct2DTrackingOverlayRenderer : IDisposable
 
 	private void DrawMesh(PreviewOverlayMesh? mesh, int width, int height)
 	{
-		if ((object)mesh == null || mesh.Points.Count < 2)
+		if (mesh is null || mesh.Points.Count < 2)
 		{
 			return;
 		}
@@ -355,26 +363,23 @@ internal sealed class Direct2DTrackingOverlayRenderer : IDisposable
 		}
 	}
 
-	private unsafe void DrawDiagnosticMesh(PreviewOverlayDiagnosticMesh mesh, int width, int height)
+	private void DrawDiagnosticMesh(PreviewOverlayDiagnosticMesh mesh, int width, int height)
 	{
 		if (mesh.Points.Count < 2)
 		{
 			return;
 		}
-		object obj = mesh.Role switch
+		(OverlayColor lineColor, OverlayColor pointColor, float lineWidth) = mesh.Role switch
 		{
 			PreviewOverlayDiagnosticMeshRole.TranslatedPartner => (TranslatedMeshColor, TranslatedPointColor, 0.52f), 
 			PreviewOverlayDiagnosticMeshRole.CalibrationBoard => (CalibrationMeshColor, CalibrationPointColor, 1.1f), 
 			_ => (FusedMeshColor, FusedPointColor, 0.68f), 
 		};
-		OverlayColor item = ((ValueTuple<OverlayColor, OverlayColor, float>*)(&obj))->Item1;
-		OverlayColor item2 = ((ValueTuple<OverlayColor, OverlayColor, float>*)(&obj))->Item2;
-		float item3 = ((ValueTuple<OverlayColor, OverlayColor, float>*)(&obj))->Item3;
-		ID2D1SolidColorBrush brush = BrushFor(item);
-		ID2D1SolidColorBrush brush2 = BrushFor(item2);
+		ID2D1SolidColorBrush brush = BrushFor(lineColor);
+		ID2D1SolidColorBrush brush2 = BrushFor(pointColor);
 		foreach (PreviewOverlayEdge edge in mesh.Edges)
 		{
-			DrawIndexedLine(mesh.Points, edge.FromIndex, edge.ToIndex, brush, item3, width, height);
+			DrawIndexedLine(mesh.Points, edge.FromIndex, edge.ToIndex, brush, lineWidth, width, height);
 		}
 		if (!mesh.DrawPoints)
 		{
@@ -434,7 +439,7 @@ internal sealed class Direct2DTrackingOverlayRenderer : IDisposable
 
 	private void DrawPolyline(PreviewOverlayPolyline? polyline, OverlayColor normalColor, float thickness, int width, int height)
 	{
-		if ((object)polyline != null && polyline.Points.Count >= 2)
+		if (polyline is not null && polyline.Points.Count >= 2)
 		{
 			ID2D1SolidColorBrush brush = BrushFor(polyline.Inferred ? InferredContourColor : normalColor);
 			for (int i = 1; i < polyline.Points.Count; i++)
@@ -459,7 +464,7 @@ internal sealed class Direct2DTrackingOverlayRenderer : IDisposable
 
 	private ID2D1SolidColorBrush BrushFor(OverlayColor color)
 	{
-		if (_brushes.TryGetValue(color, out ID2D1SolidColorBrush value))
+		if (_brushes.TryGetValue(color, out ID2D1SolidColorBrush? value))
 		{
 			return value;
 		}

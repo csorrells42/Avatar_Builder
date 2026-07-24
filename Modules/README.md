@@ -10,7 +10,7 @@ Prefer immutable DTOs and zero-waiting asynchronous workers. Every expensive rea
 
 ## App shell
 
-`MainWindow.xaml` defines the visible single-camera workflow. `MainWindow.xaml.cs` coordinates serialized camera lifetime, avatar-user login, MediaPipe tracking, measured-geometry capture, and UI status. `AvatarDataFolderDialog.xaml` owns the File-menu storage dialog. Vision algorithms do not belong in the app shell.
+`MainWindow.xaml` defines the visible single-camera workflow. Its code-behind is split by responsibility: `MainWindow.xaml.cs` owns shell lifecycle and profile login, `MainWindow.Camera.cs` owns capture and frame-lane composition, `MainWindow.Avatar.cs` owns avatar capture and storage workflow, and `MainWindow.Overlay.cs` owns overlay presentation. `AvatarDataFolderDialog.xaml` owns the File-menu storage dialog. Vision algorithms do not belong in the app shell.
 
 ## Webcam
 
@@ -36,7 +36,8 @@ Owns MediaPipe face localization, landmarks, feature measurements, capture quali
 - `Common`: neutral landmark contracts and frame/result models.
 - `Analysis`: contour measurements, temporal repair, camera-space geometry, and lock stability.
 - `OpenCv`: optional localization and aperture fallbacks behind neutral contracts.
-- `MediaPipe`: Face Landmarker model discovery, shared-memory Python sidecar, mapping, and measured reconstruction.
+- `Identity`: YuNet/SFace observation, multi-person association, persistent face memory, and one-to-one avatar consent linkage. It stores embeddings and metadata, never observation images.
+- `MediaPipe`: Face Landmarker model discovery, GPU-texture DirectML processing, CPU fallback, mapping, and measured reconstruction.
 - `Pipeline`: tracker composition and result routing.
 - `Personalization`: profile registry, explicit user login session, and capture-quality scoring.
 - `Reconstruction`: shared topology contracts plus the explicit MediaPipe-constrained 3DDFA dense-warp proof path.
@@ -53,6 +54,7 @@ Contains small host-level helpers such as atomic text writes and bundled FFmpeg 
 ```text
 UI -> Webcam
 UI -> Vision
+Vision.Identity -> Vision.OpenCv
 Vision.Pipeline -> Vision.MediaPipe / Vision.OpenCv / Vision.Common
 Vision.Analysis -> Vision.Common
 Vision.MediaPipe.Reconstruction -> Vision.MediaPipe / Vision.Reconstruction

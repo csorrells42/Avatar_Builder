@@ -21,15 +21,17 @@
 
   <ItemGroup>
     <Compile Remove="tools\**\*.cs" />
-    <Content Include="dependencies\**\*">
+    <Content
+      Include="dependencies\**\*"
+      Exclude="dependencies\**\__pycache__\**\*;dependencies\**\*.pyc;dependencies\**\.git\**\*" >
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
     </Content>
-    <Content Include="Modules\Vision\MediaPipe\Sidecar\**\*">
+    <Content Include="Modules\Vision\MediaPipe\Sidecar\*.py;Modules\Vision\MediaPipe\Sidecar\requirements.txt">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
     </Content>
-    <Content Include="Modules\Vision\Onnx\Sidecar\**\*">
+    <Content Include="Modules\Vision\Onnx\Sidecar\*.py">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
     </Content>
@@ -52,11 +54,20 @@
       <CurrentDesktopRuntimeFile
         Include="$(TargetDir)**\*"
         Exclude="$(TargetDir)AvatarBuilderOutputFolder.txt;$(TargetDir)AvatarBuilder-startup.log;$(TargetDir)AvatarBuilderSessions\**\*;$(TargetDir)output\**\*" />
+      <CurrentDesktopRuntimeDestination
+        Include="@(CurrentDesktopRuntimeFile->'$(DesktopRuntimeDirectory)\%(RecursiveDir)%(Filename)%(Extension)')" />
+      <ExistingDesktopRuntimeFile
+        Include="$(DesktopRuntimeDirectory)\**\*"
+        Exclude="$(DesktopRuntimeManifest);$(DesktopRuntimeDirectory)\AvatarBuilderOutputFolder.txt;$(DesktopRuntimeDirectory)\AvatarBuilder-startup.log;$(DesktopRuntimeDirectory)\AvatarBuilderSessions\**\*;$(DesktopRuntimeDirectory)\output\**\*" />
+      <StaleDesktopRuntimeFile
+        Include="@(ExistingDesktopRuntimeFile)"
+        Exclude="@(CurrentDesktopRuntimeDestination)" />
     </ItemGroup>
     <MakeDir Directories="$(DesktopRuntimeDirectory)" />
+    <Delete Files="@(StaleDesktopRuntimeFile)" />
     <Copy
       SourceFiles="@(CurrentDesktopRuntimeFile)"
-      DestinationFiles="@(CurrentDesktopRuntimeFile->'$(DesktopRuntimeDirectory)\%(RecursiveDir)%(Filename)%(Extension)')"
+      DestinationFiles="@(CurrentDesktopRuntimeDestination)"
       SkipUnchangedFiles="true" />
     <WriteLinesToFile
       File="$(DesktopRuntimeManifest)"

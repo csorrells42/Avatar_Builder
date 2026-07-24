@@ -50,8 +50,8 @@ public static class MediaPipeStereoFaceReconstructorSelfTest
 			SubjectDisplayName = "Raw Evidence Test",
 			RawTriangulatedObservationCount = 11L,
 			RawUnstoredObservationCount = 2L,
-			RawPointBins = new global::_003C_003Ez__ReadOnlyArray<MediaPipeStereoRawPointBinState>(new MediaPipeStereoRawPointBinState[2]
-			{
+			RawPointBins =
+			[
 				new MediaPipeStereoRawPointBinState
 				{
 					BinX = 1,
@@ -74,7 +74,7 @@ public static class MediaPipeStereoFaceReconstructorSelfTest
 					ObservationCount = 6L,
 					AcceptedObservationCount = 5L
 				}
-			})
+			]
 		};
 		MediaPipeStereoFaceReconstructor mediaPipeStereoFaceReconstructor3 = new MediaPipeStereoFaceReconstructor();
 		mediaPipeStereoFaceReconstructor3.Restore(state, "raw-evidence-test", "Raw Evidence Test");
@@ -95,10 +95,10 @@ public static class MediaPipeStereoFaceReconstructorSelfTest
 			MeasuredDepthInches = 1.2
 		});
 		string text2 = MediaPipeStereoProbabilityFaceViewerPage.Build(mediaPipeStereoProbabilityFaceModel);
-		MediaPipeStereoProbabilityFaceVertex mediaPipeStereoProbabilityFaceVertex = mediaPipeStereoProbabilityFaceModel.Vertices.OrderBy((MediaPipeStereoProbabilityFaceVertex vertex) => Math.Abs(vertex.XInches) + Math.Abs(vertex.YInches)).FirstOrDefault();
-		MediaPipeStereoProbabilityFaceVertex mediaPipeStereoProbabilityFaceVertex2 = mediaPipeStereoProbabilityFaceModel.Vertices.OrderByDescending((MediaPipeStereoProbabilityFaceVertex vertex) => Math.Abs(vertex.XInches)).FirstOrDefault();
-		MediaPipeStereoProbabilityFaceVertex mediaPipeStereoProbabilityFaceVertex3 = mediaPipeStereoProbabilityFaceModel.SmoothedVertices.OrderBy((MediaPipeStereoProbabilityFaceVertex vertex) => Math.Abs(vertex.XInches) + Math.Abs(vertex.YInches)).FirstOrDefault();
-		MediaPipeStereoProbabilityFaceVertex mediaPipeStereoProbabilityFaceVertex4 = mediaPipeStereoProbabilityFaceModel.SmoothedVertices.OrderByDescending((MediaPipeStereoProbabilityFaceVertex vertex) => Math.Abs(vertex.XInches)).FirstOrDefault();
+		MediaPipeStereoProbabilityFaceVertex? mediaPipeStereoProbabilityFaceVertex = mediaPipeStereoProbabilityFaceModel.Vertices.OrderBy((MediaPipeStereoProbabilityFaceVertex vertex) => Math.Abs(vertex.XInches) + Math.Abs(vertex.YInches)).FirstOrDefault();
+		MediaPipeStereoProbabilityFaceVertex? mediaPipeStereoProbabilityFaceVertex2 = mediaPipeStereoProbabilityFaceModel.Vertices.OrderByDescending((MediaPipeStereoProbabilityFaceVertex vertex) => Math.Abs(vertex.XInches)).FirstOrDefault();
+		MediaPipeStereoProbabilityFaceVertex? mediaPipeStereoProbabilityFaceVertex3 = mediaPipeStereoProbabilityFaceModel.SmoothedVertices.OrderBy((MediaPipeStereoProbabilityFaceVertex vertex) => Math.Abs(vertex.XInches) + Math.Abs(vertex.YInches)).FirstOrDefault();
+		MediaPipeStereoProbabilityFaceVertex? mediaPipeStereoProbabilityFaceVertex4 = mediaPipeStereoProbabilityFaceModel.SmoothedVertices.OrderByDescending((MediaPipeStereoProbabilityFaceVertex vertex) => Math.Abs(vertex.XInches)).FirstOrDefault();
 		if (!mediaPipeStereoProbabilityFaceModel.HasSurface || !mediaPipeStereoProbabilityFaceModel.HasSmoothedSurface || mediaPipeStereoProbabilityFaceModel.Vertices.Count < 800 || mediaPipeStereoProbabilityFaceModel.Triangles.Count < 1000 || mediaPipeStereoProbabilityFaceModel.SmoothedVertices.Count < mediaPipeStereoProbabilityFaceModel.Vertices.Count || mediaPipeStereoProbabilityFaceModel.SmoothedTriangles.Count < mediaPipeStereoProbabilityFaceModel.Triangles.Count || mediaPipeStereoProbabilityFaceVertex == null || mediaPipeStereoProbabilityFaceVertex2 == null || mediaPipeStereoProbabilityFaceVertex3 == null || mediaPipeStereoProbabilityFaceVertex4 == null || mediaPipeStereoProbabilityFaceVertex.ZInches <= mediaPipeStereoProbabilityFaceVertex2.ZInches + 0.35 || mediaPipeStereoProbabilityFaceVertex3.ZInches <= mediaPipeStereoProbabilityFaceVertex4.ZInches + 0.3 || !text2.Contains("Probability Face", StringComparison.Ordinal) || !text2.Contains("Smooth Face", StringComparison.Ordinal) || !text2.Contains("gl.TRIANGLES", StringComparison.Ordinal))
 		{
 			return new MediaPipeStereoFaceReconstructorSelfTestResult(Succeeded: false, $"Probability surface extraction failed: {mediaPipeStereoProbabilityFaceModel.Vertices.Count} vertices, {mediaPipeStereoProbabilityFaceModel.Triangles.Count} triangles.");

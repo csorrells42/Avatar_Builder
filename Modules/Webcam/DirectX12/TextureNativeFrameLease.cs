@@ -89,7 +89,7 @@ public sealed class TextureNativeFrameLease : IDisposable
 	public TextureNativeFrameLease? Duplicate()
 	{
 		nint resource = _resource;
-		PooledFrameBuffer nv12PreviewBuffer = _nv12PreviewBuffer;
+		PooledFrameBuffer? nv12PreviewBuffer = _nv12PreviewBuffer;
 		if (resource == IntPtr.Zero && nv12PreviewBuffer == null)
 		{
 			return null;
@@ -100,7 +100,7 @@ public sealed class TextureNativeFrameLease : IDisposable
 		}
 		nint duplicatedHandle = IntPtr.Zero;
 		Direct3D11SharedTextureFrameLease? sharedTextureFrame = null;
-		PooledFrameBuffer pooledFrameBuffer = null;
+		PooledFrameBuffer? pooledFrameBuffer = null;
 		try
 		{
 			Direct3D11SharedTextureFrameLease? currentSharedTextureFrame =
@@ -138,7 +138,7 @@ public sealed class TextureNativeFrameLease : IDisposable
 
 	public TextureNativeFrameLease? DuplicatePreviewData()
 	{
-		PooledFrameBuffer nv12PreviewBuffer = _nv12PreviewBuffer;
+		PooledFrameBuffer? nv12PreviewBuffer = _nv12PreviewBuffer;
 		if (nv12PreviewBuffer == null)
 		{
 			return null;

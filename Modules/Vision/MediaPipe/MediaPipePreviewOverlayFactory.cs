@@ -48,25 +48,52 @@ public static class MediaPipePreviewOverlayFactory
 
 	private static readonly bool[] FeaturePointMask = CreateFeaturePointMask();
 
+	public static IReadOnlyList<int> EyeAIndices => EyeA;
+
+	public static IReadOnlyList<int> EyeBIndices => EyeB;
+
+	public static IReadOnlyList<PreviewOverlayEdge> MeshEdges => Edges;
+
+	public static IReadOnlyList<bool> MeshFeaturePointMask =>
+		FeaturePointMask;
+
 	public static PreviewTrackingOverlay Create(FaceLandmarkFrame frame)
 	{
-		if (!frame.HasFace || frame.DenseMeshPoints.Count < 468)
+		if (!frame.HasFace)
 		{
 			return PreviewTrackingOverlay.Empty;
 		}
-		PreviewOverlayPoint[] array = new PreviewOverlayPoint[frame.DenseMeshPoints.Count];
+		PreviewOverlayMesh? mesh = CreateMesh(frame.DenseMeshPoints);
+		return mesh is null
+			? PreviewTrackingOverlay.Empty
+			: new PreviewTrackingOverlay
+			{
+				FaceMesh = mesh
+			};
+	}
+
+	public static PreviewOverlayMesh? CreateMesh(
+		IReadOnlyList<FaceMeshLandmarkPoint> denseMeshPoints)
+	{
+		if (denseMeshPoints.Count < 468)
+		{
+			return null;
+		}
+		PreviewOverlayPoint[] array =
+			new PreviewOverlayPoint[denseMeshPoints.Count];
 		Array.Fill(array, new PreviewOverlayPoint(double.NaN, double.NaN));
-		foreach (FaceMeshLandmarkPoint denseMeshPoint in frame.DenseMeshPoints)
+		foreach (FaceMeshLandmarkPoint denseMeshPoint in denseMeshPoints)
 		{
 			if ((uint)denseMeshPoint.Index < (uint)array.Length && double.IsFinite(denseMeshPoint.X) && double.IsFinite(denseMeshPoint.Y))
 			{
 				array[denseMeshPoint.Index] = new PreviewOverlayPoint(denseMeshPoint.X, denseMeshPoint.Y).Clamp();
 			}
 		}
-		return new PreviewTrackingOverlay
-		{
-			FaceMesh = new PreviewOverlayMesh(array, Edges, CreateFeaturePaths(frame.DenseMeshPoints), FeaturePointMask)
-		};
+		return new PreviewOverlayMesh(
+			array,
+			Edges,
+			CreateFeaturePaths(denseMeshPoints),
+			FeaturePointMask);
 	}
 
 	private static PreviewOverlayEdge[] CreateEdges()
@@ -95,7 +122,8 @@ public static class MediaPipePreviewOverlayFactory
 		};
 	}
 
-	private static PreviewOverlayIndexedPath[] CreateFeaturePaths(IReadOnlyList<FaceMeshLandmarkPoint> denseMeshPoints)
+	public static PreviewOverlayIndexedPath[] CreateFeaturePaths(
+		IReadOnlyList<FaceMeshLandmarkPoint> denseMeshPoints)
 	{
 		IReadOnlyList<int> readOnlyList = MediaPipeBrowOutlineGeometry.BuildClosedOutlineIndices(denseMeshPoints, MediaPipeBrowOutlineGeometry.BrowAIndices);
 		IReadOnlyList<int> readOnlyList2 = MediaPipeBrowOutlineGeometry.BuildClosedOutlineIndices(denseMeshPoints, MediaPipeBrowOutlineGeometry.BrowBIndices);

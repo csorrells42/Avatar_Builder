@@ -54,7 +54,7 @@ public partial class AvatarDataFolderDialog : Window, IComponentConnector
 	{
 		try
 		{
-			string pathRoot = Path.GetPathRoot(Path.GetFullPath(folder));
+			string? pathRoot = Path.GetPathRoot(Path.GetFullPath(folder));
 			if (string.IsNullOrWhiteSpace(pathRoot))
 			{
 				return "Storage capacity unavailable: unknown drive.";
@@ -66,7 +66,7 @@ public partial class AvatarDataFolderDialog : Window, IComponentConnector
 			}
 			double value = (double)driveInfo.AvailableFreeSpace / 1024.0 / 1024.0 / 1024.0;
 			double value2 = (double)driveInfo.TotalSize / 1024.0 / 1024.0 / 1024.0;
-			string pathRoot2 = Path.GetPathRoot(Environment.GetFolderPath(Environment.SpecialFolder.Windows));
+			string? pathRoot2 = Path.GetPathRoot(Environment.GetFolderPath(Environment.SpecialFolder.Windows));
 			string value3 = (pathRoot.Equals(pathRoot2, StringComparison.OrdinalIgnoreCase) ? "Windows drive" : "off-system drive");
 			return $"Storage: {driveInfo.Name} {value:0.0} GB free of {value2:0.0} GB ({value3}).";
 		}

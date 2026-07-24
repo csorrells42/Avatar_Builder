@@ -354,7 +354,7 @@ public sealed class Dx12Camera : IDisposable
 
 	private void HidePreviewHost()
 	{
-		Direct3D12PreviewHost previewHost = _previewHost;
+		Direct3D12PreviewHost? previewHost = _previewHost;
 		if (previewHost != null)
 		{
 			_previewHost = null;
@@ -433,7 +433,7 @@ public sealed class Dx12Camera : IDisposable
 
 	private void PreviewHostDiagnosticsChanged(object? sender, Direct3D12PreviewDiagnostics diagnostics)
 	{
-		EventHandler<Direct3D12PreviewDiagnostics> eventHandler = this.DiagnosticsChanged;
+		EventHandler<Direct3D12PreviewDiagnostics>? eventHandler = this.DiagnosticsChanged;
 		if (eventHandler == null)
 		{
 			return;
@@ -454,7 +454,7 @@ public sealed class Dx12Camera : IDisposable
 
 	private void NotifyFrameAvailable(TextureNativeFrameInfo frame)
 	{
-		EventHandler<TextureNativeFrameInfo> eventHandler = this.FrameAvailable;
+		EventHandler<TextureNativeFrameInfo>? eventHandler = this.FrameAvailable;
 		if (eventHandler == null)
 		{
 			return;
@@ -475,7 +475,7 @@ public sealed class Dx12Camera : IDisposable
 
 	private void NotifyTextureFrameAvailable(TextureNativeFrameLease frame)
 	{
-		EventHandler<TextureNativeFrameLease> eventHandler = this.TextureFrameAvailable;
+		EventHandler<TextureNativeFrameLease>? eventHandler = this.TextureFrameAvailable;
 		if (eventHandler == null)
 		{
 			return;
@@ -496,7 +496,7 @@ public sealed class Dx12Camera : IDisposable
 
 	private void NotifyStatusChanged(string status)
 	{
-		EventHandler<string> eventHandler = this.StatusChanged;
+		EventHandler<string>? eventHandler = this.StatusChanged;
 		if (eventHandler == null)
 		{
 			return;
@@ -543,7 +543,7 @@ public sealed class Dx12Camera : IDisposable
 			}
 			_disposed = true;
 		}
-		TextureNativeCameraStream stream = _stream;
+		TextureNativeCameraStream? stream = _stream;
 		_stream = null;
 		if (stream != null)
 		{

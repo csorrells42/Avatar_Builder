@@ -181,7 +181,7 @@ internal sealed class Direct3D11SharedTextureBridge : IDisposable
 				0uL,
 				Vortice.Direct3D11.FenceFlags.Shared);
 			_producerFenceSharedHandle =
-				_producerFence.CreateSharedHandle(null, null);
+				_producerFence.CreateSharedHandle(null!, null!);
 			if (_producerFenceSharedHandle == IntPtr.Zero)
 			{
 				throw new InvalidOperationException(
@@ -357,8 +357,8 @@ internal sealed class Direct3D11SharedTextureBridge : IDisposable
 			stage = "create D3D12 shared texture handle";
 			sharedHandle = d3d12Device.CreateSharedHandle(
 				d3d12Texture,
-				null,
-				null);
+				null!,
+				null!);
 			if (sharedHandle == IntPtr.Zero)
 			{
 				throw new InvalidOperationException(

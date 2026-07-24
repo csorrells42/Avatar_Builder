@@ -15,7 +15,7 @@ public static class CameraDeviceCatalog
 			if (hashSet.Add(CreateExactKey(mediaFoundationDevice)))
 			{
 				list.Add(mediaFoundationDevice);
-				string text = TryCreatePhysicalDeviceKey(mediaFoundationDevice);
+			string? text = TryCreatePhysicalDeviceKey(mediaFoundationDevice);
 				if (!string.IsNullOrWhiteSpace(text))
 				{
 					dictionary.TryAdd(text, list.Count - 1);
@@ -28,7 +28,7 @@ public static class CameraDeviceCatalog
 			{
 				continue;
 			}
-			string text2 = TryCreatePhysicalDeviceKey(directShowDevice);
+			string? text2 = TryCreatePhysicalDeviceKey(directShowDevice);
 			if (!string.IsNullOrWhiteSpace(text2) && dictionary.TryGetValue(text2, out var value))
 			{
 				CameraDevice cameraDevice = list[value];

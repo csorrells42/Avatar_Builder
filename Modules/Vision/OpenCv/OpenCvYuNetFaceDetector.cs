@@ -64,7 +64,8 @@ public sealed class OpenCvYuNetFaceDetector : IDisposable
 		using Mat mat = new Mat();
 		Cv2.CvtColor(gray, mat, ColorConversionCodes.GRAY2BGR);
 		using Mat faces = new Mat();
-		_detector.Detect(mat, faces);
+		FaceDetectorYN detector = _detector ?? throw new InvalidOperationException("YuNet initialization reported success without a detector instance.");
+		detector.Detect(mat, faces);
 		return ParseFaces(faces, gray.Width, gray.Height);
 	}
 

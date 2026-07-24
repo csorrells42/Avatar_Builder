@@ -74,7 +74,7 @@ public sealed class CameraFrame : IDisposable
 	{
 		get
 		{
-			byte[] nv12Bytes = Nv12Bytes;
+		byte[]? nv12Bytes = Nv12Bytes;
 			if (nv12Bytes != null && nv12Bytes.Length > 0)
 			{
 				return Nv12Stride > 0;

@@ -143,7 +143,7 @@ public static class ThreeDdfaOnnxFaceTrackingMapper
 		{
 			if ((uint)index < (uint)points.Count)
 			{
-				ThreeDdfaOnnxSidecarVertex threeDdfaOnnxSidecarVertex = points[index];
+			ThreeDdfaOnnxSidecarVertex? threeDdfaOnnxSidecarVertex = points[index];
 				if (threeDdfaOnnxSidecarVertex != null)
 				{
 					list.Add(new Point(Math.Clamp(threeDdfaOnnxSidecarVertex.X / (double)frameWidth, 0.0, 1.0), Math.Clamp(threeDdfaOnnxSidecarVertex.Y / (double)frameHeight, 0.0, 1.0)));

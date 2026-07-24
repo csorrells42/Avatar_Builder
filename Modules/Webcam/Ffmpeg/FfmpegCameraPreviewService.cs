@@ -38,6 +38,8 @@ public sealed class FfmpegCameraPreviewService : ICameraPreviewService, IDisposa
 
 	private Task? _frameDeliveryTask;
 
+	private Task? _errorReaderTask;
+
 	private int _frameDeliveryBusy;
 
 	private int _framesToQuarantine;
@@ -162,7 +164,7 @@ public sealed class FfmpegCameraPreviewService : ICameraPreviewService, IDisposa
 		}));
 		_frameDeliveryTask = DeliverFramesAsync(acceptedFrameHandoff.Reader, _cancellation.Token);
 		_frameReaderTask = ReadFramesAsync(_process, outputLayout, acceptedFrameHandoff, _cancellation.Token);
-		ReadErrorsAsync(_process, _cancellation.Token);
+		_errorReaderTask = ReadErrorsAsync(_process, _cancellation.Token);
 		Task exitTask = WatchExitAsync(_process, _cancellation.Token);
 		this.StatusChanged?.Invoke(this, "Starting preview: " + name);
 		try
@@ -303,12 +305,12 @@ public sealed class FfmpegCameraPreviewService : ICameraPreviewService, IDisposa
 
 	public void Stop()
 	{
-		CancellationTokenSource cancellationTokenSource = Interlocked.Exchange(ref _cancellation, null);
+		CancellationTokenSource? cancellationTokenSource = Interlocked.Exchange(ref _cancellation, null);
 		cancellationTokenSource?.Cancel();
 		Interlocked.Exchange(ref _acceptedFrameHandoff, null)?.Writer.TryComplete();
 		_firstFrameSignal = null;
 		Interlocked.Exchange(ref _framesToQuarantine, 0);
-		Process process = Interlocked.Exchange(ref _process, null);
+		Process? process = Interlocked.Exchange(ref _process, null);
 		try
 		{
 			if (process != null && !process.HasExited)
@@ -324,11 +326,12 @@ public sealed class FfmpegCameraPreviewService : ICameraPreviewService, IDisposa
 		{
 			process?.Dispose();
 		}
-		Task task = Interlocked.Exchange(ref _frameReaderTask, null);
-		Task task2 = Interlocked.Exchange(ref _frameDeliveryTask, null);
+		Task? task = Interlocked.Exchange(ref _frameReaderTask, null);
+		Task? task2 = Interlocked.Exchange(ref _frameDeliveryTask, null);
+		Task? task3 = Interlocked.Exchange(ref _errorReaderTask, null);
 		try
 		{
-			Task[] array = new Task[2] { task, task2 }.Where((Task task3) => task3 != null).Cast<Task>().ToArray();
+			Task[] array = new Task?[] { task, task2, task3 }.OfType<Task>().ToArray();
 			if (array.Length != 0)
 			{
 				Task.WaitAll(array, TimeSpan.FromMilliseconds(750L));
@@ -354,7 +357,7 @@ public sealed class FfmpegCameraPreviewService : ICameraPreviewService, IDisposa
 		{
 			while (!cancellationToken.IsCancellationRequested)
 			{
-				string text = await process.StandardError.ReadLineAsync(cancellationToken);
+				string? text = await process.StandardError.ReadLineAsync(cancellationToken);
 				if (text == null)
 				{
 					break;
@@ -370,7 +373,7 @@ public sealed class FfmpegCameraPreviewService : ICameraPreviewService, IDisposa
 					continue;
 				}
 				AddRecentError(text);
-				string text2 = SimplifyStatusLine(text);
+				string? text2 = SimplifyStatusLine(text);
 				if (text2 != null)
 				{
 					LogCameraLine(text2);
@@ -427,15 +430,11 @@ public sealed class FfmpegCameraPreviewService : ICameraPreviewService, IDisposa
 			while (!cancellationToken.IsCancellationRequested)
 			{
 				CameraFrame frame = CameraFrame.RentNv12(outputLayout.Width, outputLayout.Height, outputLayout.Width, "nv12-ffmpeg");
+				CameraFrame? ownedFrame = frame;
 				try
 				{
-					byte[] nv12Bytes = frame.Nv12Bytes;
-					bool flag = nv12Bytes == null;
-					if (!flag)
-					{
-						flag = !(await ReadExactFrameAsync(stream, nv12Bytes, frameByteCount, cancellationToken));
-					}
-					if (flag)
+					byte[]? nv12Bytes = frame.Nv12Bytes;
+					if (nv12Bytes is null || !(await ReadExactFrameAsync(stream, nv12Bytes, frameByteCount, cancellationToken)))
 					{
 						break;
 					}
@@ -444,13 +443,13 @@ public sealed class FfmpegCameraPreviewService : ICameraPreviewService, IDisposa
 						_firstFrameSignal?.TrySetResult(result: true);
 						if (TryAcceptFrameForDelivery(acceptedFrameHandoff, frame))
 						{
-							frame = null;
+							ownedFrame = null;
 						}
 					}
 				}
 				finally
 				{
-					frame?.Dispose();
+					ownedFrame?.Dispose();
 				}
 			}
 		}
@@ -473,7 +472,7 @@ public sealed class FfmpegCameraPreviewService : ICameraPreviewService, IDisposa
 		{
 			while (await reader.WaitToReadAsync(cancellationToken))
 			{
-				if (!reader.TryRead(out CameraFrame item))
+				if (!reader.TryRead(out CameraFrame? item))
 				{
 					continue;
 				}
@@ -484,7 +483,7 @@ public sealed class FfmpegCameraPreviewService : ICameraPreviewService, IDisposa
 						this.CameraFrameAvailable?.Invoke(this, item);
 						if (BitmapFramesEnabled && this.FrameAvailable != null)
 						{
-							BitmapSource bitmapSource = CreateBitmap(item);
+							BitmapSource? bitmapSource = CreateBitmap(item);
 							if (bitmapSource != null)
 							{
 								this.FrameAvailable(this, bitmapSource);
@@ -507,10 +506,9 @@ public sealed class FfmpegCameraPreviewService : ICameraPreviewService, IDisposa
 		}
 		finally
 		{
-			CameraFrame item2;
-			while (reader.TryRead(out item2))
+			while (reader.TryRead(out CameraFrame? pendingFrame))
 			{
-				item2.Dispose();
+				pendingFrame?.Dispose();
 			}
 			Interlocked.Exchange(ref _frameDeliveryBusy, 0);
 		}
@@ -593,7 +591,7 @@ public sealed class FfmpegCameraPreviewService : ICameraPreviewService, IDisposa
 	{
 		if (frame.HasNv12)
 		{
-			byte[] nv12Bytes = frame.Nv12Bytes;
+		byte[]? nv12Bytes = frame.Nv12Bytes;
 			if (nv12Bytes != null)
 			{
 				try
@@ -601,7 +599,7 @@ public sealed class FfmpegCameraPreviewService : ICameraPreviewService, IDisposa
 					int outputWidth;
 					int outputHeight;
 					int bgraStride;
-					byte[] array = Nv12FrameConverter.ConvertToBgra(nv12Bytes, frame.Nv12Stride, frame.Width, frame.Height, frame.Width, out outputWidth, out outputHeight, out bgraStride);
+		byte[]? array = Nv12FrameConverter.ConvertToBgra(nv12Bytes, frame.Nv12Stride, frame.Width, frame.Height, frame.Width, out outputWidth, out outputHeight, out bgraStride);
 					if (array == null || array.Length == 0)
 					{
 						return null;

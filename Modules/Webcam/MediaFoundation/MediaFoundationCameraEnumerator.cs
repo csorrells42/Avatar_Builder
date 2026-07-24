@@ -21,8 +21,8 @@ public static class MediaFoundationCameraEnumerator
 			{
 				try
 				{
-					string allocatedString = MediaFoundationInterop.GetAllocatedString(item2, MediaFoundationGuids.MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME);
-					string allocatedString2 = MediaFoundationInterop.GetAllocatedString(item2, MediaFoundationGuids.MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_SYMBOLIC_LINK);
+				string? allocatedString = MediaFoundationInterop.GetAllocatedString(item2, MediaFoundationGuids.MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME);
+				string? allocatedString2 = MediaFoundationInterop.GetAllocatedString(item2, MediaFoundationGuids.MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_SYMBOLIC_LINK);
 					if (!string.IsNullOrWhiteSpace(allocatedString))
 					{
 						string item = (string.IsNullOrWhiteSpace(allocatedString2) ? allocatedString : allocatedString2);

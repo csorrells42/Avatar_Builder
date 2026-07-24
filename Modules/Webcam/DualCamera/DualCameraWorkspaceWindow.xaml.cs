@@ -118,7 +118,7 @@ public partial class DualCameraWorkspaceWindow : Window, IComponentConnector
 		_stereoFacePipeline.ModelUpdated += StereoFaceModelUpdated;
 		_stereoFacePipeline.ProcessingFailed += StereoFaceProcessingFailed;
 		_savedCalibration = DualCameraCalibrationModel.Load(outputRoot);
-		if ((object)_savedCalibration != null)
+		if (_savedCalibration is not null)
 		{
 			CalibrationStatusText.Text = $"Saved calibration available: {_savedCalibration.CalibratedAtUtc.ToLocalTime():g} | baseline {_savedCalibration.BaselineInches:0.00} in | stereo RMS {_savedCalibration.StereoReprojectionErrorPixels:0.00} px";
 		}
@@ -282,9 +282,9 @@ public partial class DualCameraWorkspaceWindow : Window, IComponentConnector
 			if (!_shutdownStarted)
 			{
 				CalibrationStatusText.Text = progress.Status;
-				WorkspaceStatusText.Text = ((!progress.Completed) ? $"Calibrating cameras: {progress.AcceptedPairCount}/{progress.RequiredPairCount} paired views." : (((object)progress.Calibration != null) ? "Physical camera calibration complete." : "Physical camera calibration rejected."));
-				DualCameraCalibrationModel calibration = progress.Calibration;
-				if ((object)calibration != null)
+				WorkspaceStatusText.Text = ((!progress.Completed) ? $"Calibrating cameras: {progress.AcceptedPairCount}/{progress.RequiredPairCount} paired views." : ((progress.Calibration is not null) ? "Physical camera calibration complete." : "Physical camera calibration rejected."));
+				DualCameraCalibrationModel? calibration = progress.Calibration;
+				if (calibration is not null)
 				{
 					_savedCalibration = calibration;
 					ApplyMatchingSavedCalibration();
@@ -308,7 +308,8 @@ public partial class DualCameraWorkspaceWindow : Window, IComponentConnector
 			return;
 		}
 		double? physicalBaselineInches = diagnostics.PhysicalBaselineInches;
-		if (physicalBaselineInches.HasValue && physicalBaselineInches.GetValueOrDefault() > 0.0 && cameraA.TriangulatedRigPoints.Count >= 468)
+		double baselineInches = physicalBaselineInches.GetValueOrDefault();
+		if (baselineInches > 0.0 && cameraA.TriangulatedRigPoints.Count >= 468)
 		{
 			_stereoFacePipeline.TryStart(delegate
 			{
@@ -323,7 +324,7 @@ public partial class DualCameraWorkspaceWindow : Window, IComponentConnector
 					CalibrationId = (_savedCalibration?.ReconstructionId ?? ""),
 					CapturedAtUtc = cameraA.TargetCapturedAtUtc,
 					PairSkew = diagnostics.PairSkew,
-					BaselineInches = diagnostics.PhysicalBaselineInches.Value,
+					BaselineInches = baselineInches,
 					FrameReprojectionResidualPercent = diagnostics.RootMeanSquareResidualPercent,
 					CameraATrackingConfidence = diagnostics.CameraATrackingConfidence,
 					CameraBTrackingConfidence = diagnostics.CameraBTrackingConfidence,
@@ -336,33 +337,34 @@ public partial class DualCameraWorkspaceWindow : Window, IComponentConnector
 
 	private static MediaPipeStereoImagePair? CreateStereoImagePair(DualCameraDenseStereoSource? source)
 	{
-		byte[] array = source?.CameraA.BgraPixels;
-		if (array != null && array.Length > 0)
+		DualCameraDenseStereoSource? denseSource = source;
+		byte[]? array = denseSource?.CameraA.BgraPixels;
+		if (denseSource is not null && array is { Length: > 0 })
 		{
-			byte[] bgraPixels = source.CameraB.BgraPixels;
-			if (bgraPixels != null && bgraPixels.Length > 0 && source.CameraA.BgraStride > 0 && source.CameraB.BgraStride > 0)
+			byte[]? bgraPixels = denseSource.CameraB.BgraPixels;
+			if (bgraPixels is { Length: > 0 } && denseSource.CameraA.BgraStride > 0 && denseSource.CameraB.BgraStride > 0)
 			{
 				return new MediaPipeStereoImagePair
 				{
-					CameraAWidth = source.CameraA.FrameWidth,
-					CameraAHeight = source.CameraA.FrameHeight,
-					CameraAStride = source.CameraA.BgraStride,
+					CameraAWidth = denseSource.CameraA.FrameWidth,
+					CameraAHeight = denseSource.CameraA.FrameHeight,
+					CameraAStride = denseSource.CameraA.BgraStride,
 					CameraABgraPixels = array,
-					CameraBWidth = source.CameraB.FrameWidth,
-					CameraBHeight = source.CameraB.FrameHeight,
-					CameraBStride = source.CameraB.BgraStride,
+					CameraBWidth = denseSource.CameraB.FrameWidth,
+					CameraBHeight = denseSource.CameraB.FrameHeight,
+					CameraBStride = denseSource.CameraB.BgraStride,
 					CameraBBgraPixels = bgraPixels,
-					CameraALandmarks = CreateStereoImageLandmarks(source.CameraA.Landmarks),
-					CameraBLandmarks = CreateStereoImageLandmarks(source.CameraB.Landmarks),
-					CalibrationWidth = source.Calibration.ImageWidth,
-					CalibrationHeight = source.Calibration.ImageHeight,
-					CameraAMatrix = source.Calibration.CameraAMatrix,
-					CameraADistortion = source.Calibration.CameraADistortion,
-					CameraBMatrix = source.Calibration.CameraBMatrix,
-					CameraBDistortion = source.Calibration.CameraBDistortion,
-					CameraAToBRotation = source.Calibration.CameraAToBRotation,
-					CameraAToBTranslationInches = source.Calibration.CameraAToBTranslationInches,
-					FundamentalMatrix = source.Calibration.FundamentalMatrix
+					CameraALandmarks = CreateStereoImageLandmarks(denseSource.CameraA.Landmarks),
+					CameraBLandmarks = CreateStereoImageLandmarks(denseSource.CameraB.Landmarks),
+					CalibrationWidth = denseSource.Calibration.ImageWidth,
+					CalibrationHeight = denseSource.Calibration.ImageHeight,
+					CameraAMatrix = denseSource.Calibration.CameraAMatrix,
+					CameraADistortion = denseSource.Calibration.CameraADistortion,
+					CameraBMatrix = denseSource.Calibration.CameraBMatrix,
+					CameraBDistortion = denseSource.Calibration.CameraBDistortion,
+					CameraAToBRotation = denseSource.Calibration.CameraAToBRotation,
+					CameraAToBTranslationInches = denseSource.Calibration.CameraAToBTranslationInches,
+					FundamentalMatrix = denseSource.Calibration.FundamentalMatrix
 				};
 			}
 		}
@@ -557,7 +559,8 @@ public partial class DualCameraWorkspaceWindow : Window, IComponentConnector
 		CancellationTokenSource? obj = (laneA ? Interlocked.Exchange(ref _modeCancellationA, new CancellationTokenSource()) : Interlocked.Exchange(ref _modeCancellationB, new CancellationTokenSource()));
 		obj?.Cancel();
 		obj?.Dispose();
-		CancellationTokenSource cancellation = (laneA ? _modeCancellationA : _modeCancellationB);
+		CancellationTokenSource cancellation = (laneA ? _modeCancellationA : _modeCancellationB)
+			?? throw new InvalidOperationException("Mode discovery cancellation source was not initialized.");
 		try
 		{
 			SetLaneStatus(laneA, (laneA ? "Camera A" : "Camera B") + ": loading modes for " + camera.Name + ".");
@@ -589,7 +592,7 @@ public partial class DualCameraWorkspaceWindow : Window, IComponentConnector
 	{
 		if (!_shutdownStarted)
 		{
-			RecoverLaneAsync(laneA, reason);
+			_ = RecoverLaneAsync(laneA, reason);
 		}
 	}
 
@@ -774,7 +777,7 @@ public partial class DualCameraWorkspaceWindow : Window, IComponentConnector
 
 	private void ApplyMatchingSavedCalibration()
 	{
-		if ((object)_savedCalibration == null)
+		if (_savedCalibration is null)
 		{
 			_registrationCoordinator.SetPhysicalCalibration(null);
 			return;
@@ -796,7 +799,7 @@ public partial class DualCameraWorkspaceWindow : Window, IComponentConnector
 
 	private bool HasMatchingSavedCalibration()
 	{
-		if ((object)_savedCalibration != null && CameraAComboBox.SelectedItem is CameraDevice cameraDevice && CameraBComboBox.SelectedItem is CameraDevice cameraDevice2 && string.Equals(cameraDevice.Name, _savedCalibration.CameraAName, StringComparison.OrdinalIgnoreCase))
+		if (_savedCalibration is not null && CameraAComboBox.SelectedItem is CameraDevice cameraDevice && CameraBComboBox.SelectedItem is CameraDevice cameraDevice2 && string.Equals(cameraDevice.Name, _savedCalibration.CameraAName, StringComparison.OrdinalIgnoreCase))
 		{
 			return string.Equals(cameraDevice2.Name, _savedCalibration.CameraBName, StringComparison.OrdinalIgnoreCase);
 		}
@@ -840,7 +843,7 @@ public partial class DualCameraWorkspaceWindow : Window, IComponentConnector
 			_modeCancellationA?.Dispose();
 			_modeCancellationB?.Dispose();
 			_shutdownCompleted = true;
-			base.Dispatcher.BeginInvoke(DispatcherPriority.Background, new Action(base.Close));
+			_ = base.Dispatcher.BeginInvoke(DispatcherPriority.Background, new Action(base.Close));
 		}
 	}
 
@@ -882,7 +885,7 @@ public partial class DualCameraWorkspaceWindow : Window, IComponentConnector
 
 	private static bool IsTransientCameraStartFailure(Exception exception)
 	{
-		for (Exception ex = exception; ex != null; ex = ex.InnerException)
+		for (Exception? ex = exception; ex != null; ex = ex.InnerException)
 		{
 			if (ex is TimeoutException || ex.Message.Contains("did not initialize", StringComparison.OrdinalIgnoreCase) || ex.Message.Contains("No DX12 texture frames arrived", StringComparison.OrdinalIgnoreCase))
 			{
@@ -894,8 +897,8 @@ public partial class DualCameraWorkspaceWindow : Window, IComponentConnector
 
 	private static bool SamePhysicalCamera(CameraDevice left, CameraDevice right)
 	{
-		string text = CameraDeviceCatalog.TryCreatePhysicalDeviceKey(left);
-		string text2 = CameraDeviceCatalog.TryCreatePhysicalDeviceKey(right);
+		string? text = CameraDeviceCatalog.TryCreatePhysicalDeviceKey(left);
+		string? text2 = CameraDeviceCatalog.TryCreatePhysicalDeviceKey(right);
 		if (!string.IsNullOrWhiteSpace(text) && !string.IsNullOrWhiteSpace(text2))
 		{
 			return string.Equals(text, text2, StringComparison.OrdinalIgnoreCase);

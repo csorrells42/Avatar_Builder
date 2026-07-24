@@ -1,4 +1,5 @@
 using AvatarBuilder.Modules.Vision.MediaPipe;
+using AvatarBuilder.Modules.Vision.Identity;
 using AvatarBuilder.Modules.Vision.MediaPipe.Reconstruction;
 using AvatarBuilder.Modules.Vision.MediaPipe.Reconstruction.Stereo;
 using AvatarBuilder.Modules.Vision.Reconstruction.Warping;
@@ -17,19 +18,81 @@ using OpenCvSharp;
 var brow = MediaPipeBrowGeometrySelfTest.Run();
 var measuredFace = MediaPipeNormalizedFaceReconstructorSelfTest.Run();
 var stereoFace = MediaPipeStereoFaceReconstructorSelfTest.Run();
+var denseStereo = MediaPipeDenseStereoMatcherSelfTest.Run();
 var denseWarp = EvidenceWeightedDenseFaceWarperSelfTest.Run();
 var liveCameraPipeline = LiveCameraPipelineSelfTest.Run();
 var faceGeometry = MediaPipeFaceGeometryEstimatorSelfTest.Run();
+using var peopleMemory = new PersonIdentityMemory();
+var peopleMemoryPolicy = PersonIdentityMemorySelfTest.Run();
 
 var results = new List<(string Name, bool Succeeded, string Detail)>
 {
     ("MediaPipe brow geometry", brow.Succeeded, brow.Detail),
     ("MediaPipe measured face", measuredFace.Succeeded, measuredFace.Detail),
     ("Calibrated stereo face", stereoFace.Succeeded, stereoFace.Detail),
+    ("Dense stereo image matching", denseStereo.Succeeded, denseStereo.Detail),
     ("MediaPipe-guided dense warp", denseWarp.Succeeded, denseWarp.Detail),
     ("Live camera no-backlog pipeline", liveCameraPipeline.Succeeded, liveCameraPipeline.Detail)
-    ,("MediaPipe GPU face geometry", faceGeometry.Succeeded, faceGeometry.Detail)
+    ,("MediaPipe GPU face geometry", faceGeometry.Succeeded, faceGeometry.Detail),
+    (
+        "Multi-person identity model",
+        peopleMemory.IsAvailable,
+        peopleMemory.Status),
+    (
+        "People-memory retention and consent policy",
+        peopleMemoryPolicy.Succeeded,
+        peopleMemoryPolicy.Detail)
 };
+
+var identityImageIndex = Array.FindIndex(
+    args,
+    value => string.Equals(
+        value,
+        "--identity-image",
+        StringComparison.OrdinalIgnoreCase));
+if (identityImageIndex >= 0)
+{
+    if (identityImageIndex + 1 >= args.Length)
+    {
+        results.Add((
+            "People-memory real-image observation",
+            false,
+            "--identity-image requires an image path."));
+    }
+    else
+    {
+        try
+        {
+            using var source = Cv2.ImRead(
+                Path.GetFullPath(args[identityImageIndex + 1]),
+                ImreadModes.Color);
+            using var bgra = new Mat();
+            Cv2.CvtColor(source, bgra, ColorConversionCodes.BGR2BGRA);
+            var pixels = new byte[checked(bgra.Width * bgra.Height * 4)];
+            Marshal.Copy(bgra.Data, pixels, 0, pixels.Length);
+            peopleMemory.ObserveBgra(
+                pixels,
+                bgra.Width,
+                bgra.Height,
+                bgra.Width * 4,
+                DateTime.UtcNow);
+            var snapshot = peopleMemory.LatestSnapshot;
+            results.Add((
+                "People-memory real-image observation",
+                snapshot.People.Count > 0,
+                snapshot.People.Count > 0
+                    ? $"{snapshot.Status}; backend {snapshot.Backend}."
+                    : "YuNet/SFace did not produce a face observation."));
+        }
+        catch (Exception ex)
+        {
+            results.Add((
+                "People-memory real-image observation",
+                false,
+                ex.ToString()));
+        }
+    }
+}
 
 var directMlImageIndex = Array.FindIndex(
     args,

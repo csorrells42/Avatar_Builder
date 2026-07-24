@@ -1,6 +1,7 @@
 using System;
 using System.Diagnostics;
 using System.Threading;
+using AvatarBuilder.Modules.Webcam.Common;
 
 namespace AvatarBuilder.Modules.Webcam.DirectX12;
 
@@ -103,6 +104,37 @@ public static class LiveCameraPipelineSelfTest
 		bool recoveredAfterFailure =
 			postFailureFrameCompleted.Wait(TimeSpan.FromSeconds(2));
 
+		using ManualResetEventSlim cpuProcessingStarted =
+			new ManualResetEventSlim(initialState: false);
+		using ManualResetEventSlim allowCpuProcessingToFinish =
+			new ManualResetEventSlim(initialState: false);
+		using ManualResetEventSlim cpuProcessingFinished =
+			new ManualResetEventSlim(initialState: false);
+		int processedCpuFrames = 0;
+		using LatestCameraFrameWorker cpuWorker =
+			new LatestCameraFrameWorker(
+				"Avatar Builder CPU pipeline self-test",
+				frame =>
+				{
+					Interlocked.Increment(ref processedCpuFrames);
+					cpuProcessingStarted.Set();
+					allowCpuProcessingToFinish.Wait(
+						TimeSpan.FromSeconds(2));
+					cpuProcessingFinished.Set();
+				});
+		using CameraFrame cpuSource = CameraFrame.RentBgra(
+			width: 4,
+			height: 4,
+			stride: 16);
+		bool cpuFrameAccepted = cpuWorker.TryAccept(cpuSource);
+		bool cpuWorkerStarted =
+			cpuProcessingStarted.Wait(TimeSpan.FromSeconds(2));
+		bool cpuBusyArrivalDroppedBeforeWork =
+			!cpuWorker.TryAccept(cpuSource);
+		allowCpuProcessingToFinish.Set();
+		bool cpuWorkerFinished =
+			cpuProcessingFinished.Wait(TimeSpan.FromSeconds(2));
+
 		bool succeeded = firstAccepted
 			&& workerStarted
 			&& busyArrivalDroppedBeforeWork
@@ -114,11 +146,16 @@ public static class LiveCameraPipelineSelfTest
 			&& failureWasIsolated
 			&& recoveryFrameAccepted
 			&& recoveredAfterFailure
-			&& Volatile.Read(ref isolatedFailures) == 1;
+			&& Volatile.Read(ref isolatedFailures) == 1
+			&& cpuFrameAccepted
+			&& cpuWorkerStarted
+			&& cpuBusyArrivalDroppedBeforeWork
+			&& cpuWorkerFinished
+			&& Volatile.Read(ref processedCpuFrames) == 1;
 		return new LiveCameraPipelineSelfTestResult(
 			succeeded,
 			succeeded
-				? "One frame completed on the dedicated lane; the busy arrival was rejected before conversion; an injected worker exception was isolated and the next frame completed; stale overlays expired."
-				: $"accepted={firstAccepted}, started={workerStarted}, busyDrop={busyArrivalDroppedBeforeWork}, finished={workerFinished}, processed={processedFrames}, freshOverlay={currentOverlayIsFresh}, expiredOverlay={oldOverlayExpired}, failureAccepted={failureFrameAccepted}, failureIsolated={failureWasIsolated}, recoveryAccepted={recoveryFrameAccepted}, recovered={recoveredAfterFailure}, failures={isolatedFailures}");
+				? "Texture and CPU workers each completed one frame; busy arrivals were rejected before conversion; an injected worker exception was isolated and the next frame completed; stale overlays expired."
+				: $"accepted={firstAccepted}, started={workerStarted}, busyDrop={busyArrivalDroppedBeforeWork}, finished={workerFinished}, processed={processedFrames}, freshOverlay={currentOverlayIsFresh}, expiredOverlay={oldOverlayExpired}, failureAccepted={failureFrameAccepted}, failureIsolated={failureWasIsolated}, recoveryAccepted={recoveryFrameAccepted}, recovered={recoveredAfterFailure}, failures={isolatedFailures}, cpuAccepted={cpuFrameAccepted}, cpuStarted={cpuWorkerStarted}, cpuBusyDrop={cpuBusyArrivalDroppedBeforeWork}, cpuFinished={cpuWorkerFinished}, cpuProcessed={processedCpuFrames}");
 	}
 }

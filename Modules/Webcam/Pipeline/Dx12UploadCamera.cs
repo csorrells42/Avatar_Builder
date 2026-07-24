@@ -90,7 +90,7 @@ public sealed class Dx12UploadCamera : IAsyncDisposable
 		_capture.CameraFrameAvailable -= CaptureFrameAvailable;
 		_capture.StatusChanged -= CaptureStatusChanged;
 		await Task.Run((Action)_capture.Stop);
-		Direct3D12PreviewHost host = Interlocked.Exchange(ref _previewHost, null);
+		Direct3D12PreviewHost? host = Interlocked.Exchange(ref _previewHost, null);
 		if (host == null)
 		{
 			return;
@@ -152,7 +152,7 @@ public sealed class Dx12UploadCamera : IAsyncDisposable
 
 	private void PreviewDiagnosticsChanged(object? sender, Direct3D12PreviewDiagnostics diagnostics)
 	{
-		EventHandler<Direct3D12PreviewDiagnostics> eventHandler = this.DiagnosticsChanged;
+		EventHandler<Direct3D12PreviewDiagnostics>? eventHandler = this.DiagnosticsChanged;
 		if (eventHandler == null)
 		{
 			return;
@@ -173,7 +173,7 @@ public sealed class Dx12UploadCamera : IAsyncDisposable
 
 	private void NotifyFrameAvailable(CameraFrame frame)
 	{
-		EventHandler<CameraFrame> eventHandler = this.FrameAvailable;
+		EventHandler<CameraFrame>? eventHandler = this.FrameAvailable;
 		if (eventHandler == null)
 		{
 			return;
@@ -194,7 +194,7 @@ public sealed class Dx12UploadCamera : IAsyncDisposable
 
 	private void NotifyStatusChanged(string status)
 	{
-		EventHandler<string> eventHandler = this.StatusChanged;
+		EventHandler<string>? eventHandler = this.StatusChanged;
 		if (eventHandler == null)
 		{
 			return;

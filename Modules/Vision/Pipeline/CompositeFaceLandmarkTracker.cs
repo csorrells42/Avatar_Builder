@@ -71,8 +71,8 @@ public sealed class CompositeFaceLandmarkTracker : IStatefulFaceLandmarkTracker,
 	public FaceLandmarkTrackingResult Detect(BitmapSource bitmap, DateTime capturedAtUtc)
 	{
 		List<string>? list = null;
-		FaceLandmarkTrackingResult faceLandmarkTrackingResult = null;
-		IFaceLandmarkCropRefiner faceLandmarkCropRefiner = null;
+		FaceLandmarkTrackingResult? faceLandmarkTrackingResult = null;
+		IFaceLandmarkCropRefiner? faceLandmarkCropRefiner = null;
 		foreach (IFaceLandmarkTracker tracker in _trackers)
 		{
 			if (faceLandmarkCropRefiner == null && tracker is IFaceLandmarkCropRefiner { IsAvailable: not false } faceLandmarkCropRefiner2)
@@ -123,7 +123,7 @@ public sealed class CompositeFaceLandmarkTracker : IStatefulFaceLandmarkTracker,
 			};
 		}
 		list ??= new List<string>();
-		FaceLandmarkTrackingResult faceLandmarkTrackingResult4 = TryRecoverWithPreviousFaceCrop(bitmap, capturedAtUtc, faceLandmarkCropRefiner, list);
+			FaceLandmarkTrackingResult? faceLandmarkTrackingResult4 = TryRecoverWithPreviousFaceCrop(bitmap, capturedAtUtc, faceLandmarkCropRefiner, list);
 		if (faceLandmarkTrackingResult4 != null)
 		{
 			_lastBackendStatus = string.Join(" | ", list);
@@ -181,7 +181,7 @@ public sealed class CompositeFaceLandmarkTracker : IStatefulFaceLandmarkTracker,
 
 	private static void AddOwnedTracker(ICollection<IFaceLandmarkTracker> trackers, Func<IFaceLandmarkTracker> createTracker)
 	{
-		IFaceLandmarkTracker faceLandmarkTracker = null;
+		IFaceLandmarkTracker? faceLandmarkTracker = null;
 		try
 		{
 			faceLandmarkTracker = createTracker();

@@ -24,10 +24,10 @@ public static class TextureNativeCameraRecorder
 	{
 		using (MediaFoundationCameraDeviceFactory.Startup())
 		{
-			ITextureNativeDeviceManager textureNativeDeviceManager = null;
-			object instance = null;
-			IMFSourceReader iMFSourceReader = null;
-			MediaFoundationTextureVideoRecorder mediaFoundationTextureVideoRecorder = null;
+			ITextureNativeDeviceManager? textureNativeDeviceManager = null;
+			object? instance = null;
+			IMFSourceReader? iMFSourceReader = null;
+			MediaFoundationTextureVideoRecorder? mediaFoundationTextureVideoRecorder = null;
 			try
 			{
 				(ITextureNativeDeviceManager DeviceManager, IMFSourceReader Reader, object MediaSource) tuple = OpenTextureSourceReader(cameraName, mode);
@@ -50,7 +50,7 @@ public static class TextureNativeCameraRecorder
 					int actualStreamIndex;
 					int streamFlags;
 					long timestamp;
-					object sample;
+					object? sample;
 					int num4 = iMFSourceReader.ReadSample(-4, 0, out actualStreamIndex, out streamFlags, out timestamp, out sample);
 					if (MediaFoundationInterop.Failed(num4))
 					{
@@ -102,10 +102,10 @@ public static class TextureNativeCameraRecorder
 
 	internal static (ITextureNativeDeviceManager DeviceManager, IMFSourceReader Reader, object MediaSource) OpenTextureSourceReader(CameraDevice camera, CameraVideoMode? mode)
 	{
-		Exception ex = null;
-		Exception ex2 = null;
-		ITextureNativeDeviceManager textureNativeDeviceManager = null;
-		object instance = null;
+		Exception? ex = null;
+		Exception? ex2 = null;
+		ITextureNativeDeviceManager? textureNativeDeviceManager = null;
+		object? instance = null;
 		try
 		{
 			textureNativeDeviceManager = Direct3D12DeviceManager.Create();
@@ -135,7 +135,7 @@ public static class TextureNativeCameraRecorder
 		}
 		instance = null;
 		textureNativeDeviceManager = null;
-		IMFSourceReader iMFSourceReader = null;
+		IMFSourceReader? iMFSourceReader = null;
 		try
 		{
 			textureNativeDeviceManager = Direct3D12DeviceManager.Create();
@@ -168,8 +168,8 @@ public static class TextureNativeCameraRecorder
 
 	private static void ValidateTextureReader(CameraDevice camera, CameraVideoMode? mode, ITextureNativeDeviceManager deviceManager, string pathName)
 	{
-		object instance = null;
-		IMFSourceReader iMFSourceReader = null;
+		object? instance = null;
+		IMFSourceReader? iMFSourceReader = null;
 		try
 		{
 			(iMFSourceReader, instance) = CreateTextureSourceReader(camera, mode, deviceManager);
@@ -185,13 +185,13 @@ public static class TextureNativeCameraRecorder
 	private static void EnsureTextureReaderProducesSample(IMFSourceReader reader, string pathName)
 	{
 		DateTimeOffset dateTimeOffset = DateTimeOffset.UtcNow + TimeSpan.FromSeconds(2L);
-		Exception ex = null;
+		Exception? ex = null;
 		while (DateTimeOffset.UtcNow < dateTimeOffset)
 		{
 			int actualStreamIndex;
 			int streamFlags;
 			long timestamp;
-			object sample;
+			object? sample;
 			int num = reader.ReadSample(-4, 0, out actualStreamIndex, out streamFlags, out timestamp, out sample);
 			try
 			{

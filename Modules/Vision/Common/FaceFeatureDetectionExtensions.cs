@@ -151,8 +151,8 @@ public static class FaceFeatureDetectionExtensions
 		double num2 = box.Top + box.Height / 2.0;
 		double num3 = box.Width * 0.5;
 		double num4 = box.Height * 0.34;
-		return new global::_003C_003Ez__ReadOnlyArray<Point>(new Point[8]
-		{
+		return
+		[
 			new Point(num - num3, num2),
 			new Point(num - num3 * 0.55, num2 - num4),
 			new Point(num, num2 - num4 * 1.05),
@@ -161,7 +161,7 @@ public static class FaceFeatureDetectionExtensions
 			new Point(num + num3 * 0.55, num2 + num4),
 			new Point(num, num2 + num4 * 1.05),
 			new Point(num - num3 * 0.55, num2 + num4)
-		});
+		];
 	}
 
 	private static IReadOnlyList<Point> CreateMouthContour(Rect box, bool outer)
@@ -170,8 +170,8 @@ public static class FaceFeatureDetectionExtensions
 		double num2 = box.Top + box.Height * (outer ? 0.52 : 0.56);
 		double num3 = box.Width * (outer ? 0.5 : 0.36);
 		double num4 = box.Height * (outer ? 0.24 : 0.13);
-		return new global::_003C_003Ez__ReadOnlyArray<Point>(new Point[8]
-		{
+		return
+		[
 			new Point(num - num3, num2),
 			new Point(num - num3 * 0.5, num2 - num4),
 			new Point(num, num2 - num4 * 1.1),
@@ -180,7 +180,7 @@ public static class FaceFeatureDetectionExtensions
 			new Point(num + num3 * 0.5, num2 + num4),
 			new Point(num, num2 + num4 * 1.1),
 			new Point(num - num3 * 0.5, num2 + num4)
-		});
+		];
 	}
 
 	private static IReadOnlyList<Point> CreateBrowContour(Rect eyeBox)
@@ -188,14 +188,14 @@ public static class FaceFeatureDetectionExtensions
 		double num = eyeBox.Left + eyeBox.Width / 2.0;
 		double num2 = Math.Clamp(eyeBox.Top - eyeBox.Height * 0.5, 0.0, 1.0);
 		double num3 = eyeBox.Width * 0.52;
-		return new global::_003C_003Ez__ReadOnlyArray<Point>(new Point[5]
-		{
+		return
+		[
 			new Point(Math.Clamp(num - num3, 0.0, 1.0), num2 + eyeBox.Height * 0.05),
 			new Point(Math.Clamp(num - num3 * 0.45, 0.0, 1.0), num2 - eyeBox.Height * 0.03),
 			new Point(num, num2 - eyeBox.Height * 0.06),
 			new Point(Math.Clamp(num + num3 * 0.45, 0.0, 1.0), num2 - eyeBox.Height * 0.03),
 			new Point(Math.Clamp(num + num3, 0.0, 1.0), num2 + eyeBox.Height * 0.05)
-		});
+		];
 	}
 
 	private static IReadOnlyList<Point> CreateOvalContour(Rect box, int count)
@@ -213,13 +213,13 @@ public static class FaceFeatureDetectionExtensions
 
 	private static IReadOnlyList<Point> CreateJawContour(Rect face)
 	{
-		return new global::_003C_003Ez__ReadOnlyArray<Point>(new Point[5]
-		{
+		return
+		[
 			new Point(face.Left + face.Width * 0.12, face.Top + face.Height * 0.62),
 			new Point(face.Left + face.Width * 0.22, face.Top + face.Height * 0.8),
 			new Point(face.Left + face.Width * 0.5, face.Bottom),
 			new Point(face.Left + face.Width * 0.78, face.Top + face.Height * 0.8),
 			new Point(face.Left + face.Width * 0.88, face.Top + face.Height * 0.62)
-		});
+		];
 	}
 }
