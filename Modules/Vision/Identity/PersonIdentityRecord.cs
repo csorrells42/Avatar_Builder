@@ -11,6 +11,10 @@ public sealed class PersonIdentityRecord
 
 	public string AvatarProfileId { get; set; } = "";
 
+	public bool IsRegisteredUser { get; set; }
+
+	public string PermissionLevel { get; set; } = "Default User";
+
 	public DateTime FirstSeenAtUtc { get; set; }
 
 	public DateTime LastSeenAtUtc { get; set; }

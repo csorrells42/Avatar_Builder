@@ -7,7 +7,6 @@ using System.Runtime.InteropServices;
 using System.Threading;
 using AvatarBuilder.Modules.Webcam.Common;
 using Vortice;
-using Vortice.D3DCompiler;
 using Vortice.DXGI;
 using Vortice.Direct3D;
 using Vortice.Direct3D12;
@@ -480,6 +479,11 @@ public sealed class Direct3D12PreviewHost : WebcamDirectX12ViewportHost
 						_renderer.LastSubmittedFenceValue;
 					return;
 				}
+				if (_renderer.LastRenderAttemptWasBusy)
+				{
+					RecordDroppedFrame();
+					return;
+				}
 				bool preferNv12Upload =
 					TextureNativePreviewPolicy.ShouldPreferNv12UploadFallback(
 						frame.MediaSubtype,
@@ -520,6 +524,11 @@ public sealed class Direct3D12PreviewHost : WebcamDirectX12ViewportHost
 						_renderer.LastSubmittedFenceValue;
 					return;
 				}
+				if (_renderer.LastRenderAttemptWasBusy)
+				{
+					RecordDroppedFrame();
+					return;
+				}
 				if (!string.IsNullOrWhiteSpace(
 					sharedBridgeFailureReason))
 				{
@@ -528,8 +537,6 @@ public sealed class Direct3D12PreviewHost : WebcamDirectX12ViewportHost
 			string? text = CombineTextureFailureReasons(failureReason, acceptedFrame.SharedBridgeFailureReason);
 				if (!TryRenderNv12TextureUpload(_renderer, frame, text, acceptedFrame.ColorSettings, acceptedFrame.DenoiseEnabled, acceptedFrame.DenoiseStrength, GetFreshTrackingOverlay()))
 				{
-					_renderer.RenderProofFrame(frame.FrameNumber);
-					ReportPreviewPath(FormatUploadFallbackPath("DX12 proof-frame fallback", text));
 					RecordDroppedFrame();
 				}
 			}
@@ -604,6 +611,11 @@ public sealed class Direct3D12PreviewHost : WebcamDirectX12ViewportHost
 										}
 										if (!_renderer.RenderNv12Frame(nv12Bytes, acceptedCameraFrame.Width, acceptedCameraFrame.Height, acceptedCameraFrame.Nv12Stride, acceptedCameraFrame.FrameNumber, acceptedCameraFrame.ColorSettings, acceptedCameraFrame.DenoiseEnabled, acceptedCameraFrame.DenoiseStrength, GetFreshTrackingOverlay(), acceptedCameraFrame.FrameFormat == "nv12-ffmpeg"))
 										{
+											if (_renderer.LastRenderAttemptWasBusy)
+											{
+												RecordDroppedFrame();
+												continue;
+											}
 											this.StatusChanged?.Invoke(this, $"DX12 NV12 preview renderer refused {acceptedCameraFrame.Width}x{acceptedCameraFrame.Height}, stride {acceptedCameraFrame.Nv12Stride}, bytes {nv12Bytes.Length}: {_renderer.LastNv12PreviewFailureReason}");
 											goto IL_0216;
 										}
@@ -617,7 +629,11 @@ public sealed class Direct3D12PreviewHost : WebcamDirectX12ViewportHost
 										this.StatusChanged?.Invoke(this, "DX12 preview skipped: frame had no renderable BGRA or NV12 payload.");
 										continue;
 									}
-									_renderer.RenderBgraFrame(acceptedCameraFrame.BgraBytes, acceptedCameraFrame.Width, acceptedCameraFrame.Height, acceptedCameraFrame.Stride, acceptedCameraFrame.FrameNumber, acceptedCameraFrame.ColorSettings, acceptedCameraFrame.DenoiseEnabled, acceptedCameraFrame.DenoiseStrength, GetFreshTrackingOverlay());
+									if (!_renderer.RenderBgraFrame(acceptedCameraFrame.BgraBytes, acceptedCameraFrame.Width, acceptedCameraFrame.Height, acceptedCameraFrame.Stride, acceptedCameraFrame.FrameNumber, acceptedCameraFrame.ColorSettings, acceptedCameraFrame.DenoiseEnabled, acceptedCameraFrame.DenoiseStrength, GetFreshTrackingOverlay()))
+									{
+										RecordDroppedFrame();
+										continue;
+									}
 									goto IL_0296;
 									end_IL_0085:;
 								}

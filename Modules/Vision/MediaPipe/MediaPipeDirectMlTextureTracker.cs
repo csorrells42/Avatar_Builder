@@ -1,4 +1,5 @@
 using System;
+using System.Buffers;
 using System.Collections;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -190,37 +191,65 @@ internal sealed class MediaPipeDirectMlTextureTracker : IDisposable
 
 		long projectionStarted = Stopwatch.GetTimestamp();
 		MediaPipeSidecarLandmark[] landmarks =
-			ProjectLandmarks(rawLandmarks, roi, frame.Width, frame.Height);
-		_trackedRoi = RoiFromLandmarks(landmarks, frame.Width, frame.Height);
-		stages.ProjectMilliseconds =
-			Stopwatch.GetElapsedTime(projectionStarted).TotalMilliseconds;
-
-		double totalMilliseconds =
-			Stopwatch.GetElapsedTime(totalStarted).TotalMilliseconds;
-		stages.DetectorScore = detectorScore;
-		stages.Presence = presence;
-		MediaPipeSidecarResponse response = new()
+			ArrayPool<MediaPipeSidecarLandmark>.Shared.Rent(
+				LandmarkCount);
+		try
 		{
-			Ok = true,
-			HasFace = true,
-			Status = "MediaPipe GPU texture DirectML dense landmark lock",
-			Landmarks = landmarks,
-			LandmarkCount = landmarks.Length,
-			TimingsMilliseconds = stages,
-			Diagnostics = CreateDiagnostics(
+			Span<MediaPipeSidecarLandmark> projected =
+				landmarks.AsSpan(0, LandmarkCount);
+			ProjectLandmarks(
+				rawLandmarks,
+				roi,
+				frame.Width,
+				frame.Height,
+				projected);
+			var projectedLandmarks =
+				new ArraySegment<MediaPipeSidecarLandmark>(
+					landmarks,
+					0,
+					LandmarkCount);
+			_trackedRoi = RoiFromLandmarks(
+				projectedLandmarks,
+				frame.Width,
+				frame.Height);
+			stages.ProjectMilliseconds =
+				Stopwatch.GetElapsedTime(
+					projectionStarted).TotalMilliseconds;
+
+			double totalMilliseconds =
+				Stopwatch.GetElapsedTime(
+					totalStarted).TotalMilliseconds;
+			stages.DetectorScore = detectorScore;
+			stages.Presence = presence;
+			MediaPipeSidecarResponse response = new()
+			{
+				Ok = true,
+				HasFace = true,
+				Status =
+					"MediaPipe GPU texture DirectML dense landmark lock",
+				Landmarks = projectedLandmarks,
+				LandmarkCount = LandmarkCount,
+				TimingsMilliseconds = stages,
+				Diagnostics = CreateDiagnostics(
+					capturedAtUtc,
+					frame,
+					hasFace: true,
+					totalMilliseconds,
+					stages,
+					"GPU texture direct")
+			};
+			return MediaPipeFaceLandmarkerMapper.ToTrackingResult(
+				response,
 				capturedAtUtc,
-				frame,
-				hasFace: true,
-				totalMilliseconds,
-				stages,
-				"GPU texture direct")
-		};
-		return MediaPipeFaceLandmarkerMapper.ToTrackingResult(
-			response,
-			capturedAtUtc,
-			Name,
-			frame.Width,
-			frame.Height);
+				Name,
+				frame.Width,
+				frame.Height);
+		}
+		finally
+		{
+			ArrayPool<MediaPipeSidecarLandmark>.Shared.Return(
+				landmarks);
+		}
 	}
 
 	public void Reset()
@@ -459,11 +488,12 @@ internal sealed class MediaPipeDirectMlTextureTracker : IDisposable
 			angle);
 	}
 
-	private static MediaPipeSidecarLandmark[] ProjectLandmarks(
+	private static void ProjectLandmarks(
 		ReadOnlySpan<float> rawLandmarks,
 		MediaPipeGpuRoi roi,
 		int frameWidth,
-		int frameHeight)
+		int frameHeight,
+		Span<MediaPipeSidecarLandmark> landmarks)
 	{
 		if (rawLandmarks.Length < LandmarkCount * 3)
 		{
@@ -477,9 +507,14 @@ internal sealed class MediaPipeDirectMlTextureTracker : IDisposable
 		float depthScale =
 			roi.Size /
 			(MediaPipeGpuTensorPreprocessor.LandmarkSize * frameWidth);
-		MediaPipeSidecarLandmark[] landmarks =
-			new MediaPipeSidecarLandmark[LandmarkCount];
-		for (int index = 0; index < landmarks.Length; index++)
+		if (landmarks.Length < LandmarkCount)
+		{
+			throw new ArgumentException(
+				$"Projection destination has {landmarks.Length} points; " +
+				$"{LandmarkCount} are required.",
+				nameof(landmarks));
+		}
+		for (int index = 0; index < LandmarkCount; index++)
 		{
 			int offset = index * 3;
 			float localX =
@@ -499,7 +534,6 @@ internal sealed class MediaPipeDirectMlTextureTracker : IDisposable
 				frameY / frameHeight,
 				rawLandmarks[offset + 2] * depthScale);
 		}
-		return landmarks;
 	}
 
 	private static MediaPipeGpuRoi RoiFromLandmarks(

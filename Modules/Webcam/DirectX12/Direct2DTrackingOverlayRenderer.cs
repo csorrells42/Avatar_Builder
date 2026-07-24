@@ -41,6 +41,12 @@ internal sealed class Direct2DTrackingOverlayRenderer : IDisposable
 
 	private static readonly OverlayColor FaceBoxColor = new OverlayColor(0.96f, 0.83f, 0.37f, 0.96f);
 
+	private static readonly OverlayColor RememberedPersonColor =
+		FromBytes(84, 232, 151, 242);
+
+	private static readonly OverlayColor LearningPersonColor =
+		FromBytes(85, 184, byte.MaxValue, 226);
+
 	private static readonly OverlayColor FaceContourColor = new OverlayColor(0.73f, 0.84f, 0.94f, 0.96f);
 
 	private static readonly OverlayColor EyeContourColor = new OverlayColor(0.48f, 0.85f, 1f, 0.96f);
@@ -294,6 +300,17 @@ internal sealed class Direct2DTrackingOverlayRenderer : IDisposable
 				DrawDiagnosticMesh(diagnosticMesh, width, height);
 			}
 			DrawRectangle(overlay.FaceBox, FaceBoxColor, 0.75f, width, height);
+			foreach (PreviewTrackedPerson person in overlay.TrackedPeople)
+			{
+				DrawRectangle(
+					person.Bounds,
+					person.IsRemembered
+						? RememberedPersonColor
+						: LearningPersonColor,
+					person.IsRemembered ? 1.6f : 1.1f,
+					width,
+					height);
+			}
 			DrawPolyline(overlay.FaceContour, FaceContourColor, 0.5f, width, height);
 			DrawPolyline(overlay.JawContour, FaceContourColor, 0.75f, width, height);
 			DrawPolyline(overlay.LeftEyeContour, EyeContourColor, 0.75f, width, height);

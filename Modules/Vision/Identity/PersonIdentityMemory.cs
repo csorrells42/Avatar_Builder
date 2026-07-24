@@ -56,6 +56,9 @@ public sealed class PersonIdentityMemory : IDisposable
 
 	private readonly List<TrackState> _activeTracks = [];
 
+	private readonly HashSet<string> _dirtyIdentityIds =
+		new(StringComparer.OrdinalIgnoreCase);
+
 	private string _outputFolder = "";
 
 	private DateTime _lastSavedAtUtc = DateTime.MinValue;
@@ -64,8 +67,6 @@ public sealed class PersonIdentityMemory : IDisposable
 		PersonIdentitySnapshot.Waiting;
 
 	private string _initializationStatus;
-
-	private bool _dirty;
 
 	private bool _disposed;
 
@@ -95,6 +96,63 @@ public sealed class PersonIdentityMemory : IDisposable
 			{
 				return _latestSnapshot;
 			}
+		}
+	}
+
+	public IReadOnlyList<PersonIdentityReviewItem> GetIdentityReviewItems()
+	{
+		lock (_stateLock)
+		{
+			return _rememberedPeople
+				.OrderByDescending(person => person.LastSeenAtUtc)
+				.Select(person => new PersonIdentityReviewItem(
+					person.Id,
+					person.DisplayName,
+					string.IsNullOrWhiteSpace(_outputFolder)
+						? ""
+						: _store.GetContextPhotoPath(
+							_outputFolder,
+							person.Id),
+					person.IsRegisteredUser,
+					NormalizePermission(person.PermissionLevel),
+					person.AvatarProfileId,
+					person.FirstSeenAtUtc,
+					person.LastSeenAtUtc,
+					person.ObservationCount,
+					person.EncounterCount))
+				.ToArray();
+		}
+	}
+
+	public bool UpdateIdentityReview(
+		string identityId,
+		string displayName,
+		bool registerAsUser,
+		string permissionLevel)
+	{
+		ArgumentException.ThrowIfNullOrWhiteSpace(identityId);
+		ArgumentException.ThrowIfNullOrWhiteSpace(displayName);
+		lock (_stateLock)
+		{
+			PersonIdentityRecord? person =
+				_rememberedPeople.FirstOrDefault(candidate =>
+					string.Equals(
+						candidate.Id,
+						identityId,
+						StringComparison.OrdinalIgnoreCase));
+			if (person is null)
+			{
+				return false;
+			}
+			person.DisplayName = displayName.Trim();
+			person.IsRegisteredUser = registerAsUser;
+			person.PermissionLevel =
+				registerAsUser
+					? NormalizePermission(permissionLevel)
+					: "Default User";
+			_dirtyIdentityIds.Add(person.Id);
+			SaveIfDirtyLocked(force: true, DateTime.UtcNow);
+			return true;
 		}
 	}
 
@@ -165,7 +223,7 @@ public sealed class PersonIdentityMemory : IDisposable
 			_rememberedPeople.Clear();
 			_rememberedPeople.AddRange(_store.Load(outputFolder));
 			_activeTracks.Clear();
-			_dirty = false;
+			_dirtyIdentityIds.Clear();
 			_lastSavedAtUtc = DateTime.UtcNow;
 			_latestSnapshot = new PersonIdentitySnapshot(
 				DateTime.MinValue,
@@ -195,7 +253,6 @@ public sealed class PersonIdentityMemory : IDisposable
 			return;
 		}
 
-		List<FaceSample> samples = [];
 		lock (_inferenceLock)
 		{
 			using Mat bgra = Mat.FromPixelData(
@@ -205,60 +262,101 @@ public sealed class PersonIdentityMemory : IDisposable
 				bgraPixels,
 				stride);
 			using Mat bgr = new();
-			using Mat resizedBgr = new();
-			using Mat gray = new();
 			Cv2.CvtColor(bgra, bgr, ColorConversionCodes.BGRA2BGR);
-			Mat observationBgr = bgr;
-			const int maximumObservationDimension = 960;
-			int sourceDimension = Math.Max(bgr.Width, bgr.Height);
-			if (sourceDimension > maximumObservationDimension)
-			{
-				double scale =
-					(double)maximumObservationDimension /
-					sourceDimension;
-				Cv2.Resize(
-					bgr,
-					resizedBgr,
-					new Size(
-						Math.Max(1, (int)Math.Round(bgr.Width * scale)),
-						Math.Max(1, (int)Math.Round(bgr.Height * scale))));
-				observationBgr = resizedBgr;
-			}
-			Cv2.CvtColor(
-				observationBgr,
-				gray,
-				ColorConversionCodes.BGR2GRAY);
-			IReadOnlyList<OpenCv.YuNetFaceDetection> faces =
-				_faceDetector.DetectAll(gray);
-			foreach (OpenCv.YuNetFaceDetection face in faces
-				.Where(face => face.Score >= 0.72d)
-				.Take(MaximumFacesPerObservation))
-			{
-				if (!extractor.TryExtract(
-					observationBgr,
-					face,
-					out float[] embedding))
-				{
-					continue;
-				}
-				samples.Add(new FaceSample(
-					embedding,
-					face.Score,
-					ToNormalizedBox(
-						face.FaceBox,
-						observationBgr.Width,
-						observationBgr.Height)));
-			}
+			ObserveBgrLocked(
+				bgr,
+				extractor,
+				capturedAtUtc == default
+					? DateTime.UtcNow
+					: capturedAtUtc);
 		}
+	}
 
+	public void ObserveBgr(
+		Mat bgrFrame,
+		DateTime capturedAtUtc)
+	{
+		ObjectDisposedException.ThrowIf(_disposed, this);
+		SFaceEmbeddingExtractor? extractor = _embeddingExtractor;
+		if (extractor is null
+			|| !_faceDetector.IsAvailable
+			|| bgrFrame.Empty()
+			|| bgrFrame.Channels() != 3)
+		{
+			return;
+		}
+		lock (_inferenceLock)
+		{
+			ObserveBgrLocked(
+				bgrFrame,
+				extractor,
+				capturedAtUtc == default
+					? DateTime.UtcNow
+					: capturedAtUtc);
+		}
+	}
+
+	private void ObserveBgrLocked(
+		Mat sourceBgr,
+		SFaceEmbeddingExtractor extractor,
+		DateTime capturedAtUtc)
+	{
+		using Mat resizedBgr = new();
+		Mat observationBgr = sourceBgr;
+		const int maximumObservationDimension = 960;
+		int sourceDimension = Math.Max(sourceBgr.Width, sourceBgr.Height);
+		if (sourceDimension > maximumObservationDimension)
+		{
+			double scale =
+				(double)maximumObservationDimension /
+				sourceDimension;
+			Cv2.Resize(
+				sourceBgr,
+				resizedBgr,
+				new Size(
+					Math.Max(1, (int)Math.Round(sourceBgr.Width * scale)),
+					Math.Max(1, (int)Math.Round(sourceBgr.Height * scale))));
+			observationBgr = resizedBgr;
+		}
+		List<FaceSample> samples = [];
+		IReadOnlyList<OpenCv.YuNetFaceDetection> faces =
+			_faceDetector.DetectAll(observationBgr);
+		foreach (OpenCv.YuNetFaceDetection face in faces
+			.Where(face => face.Score >= 0.72d)
+			.Take(MaximumFacesPerObservation))
+		{
+			if (!extractor.TryExtract(
+				observationBgr,
+				face,
+				out float[] embedding))
+			{
+				continue;
+			}
+			samples.Add(new FaceSample(
+				embedding,
+				face.Score,
+				ToNormalizedBox(
+					face.FaceBox,
+					observationBgr.Width,
+					observationBgr.Height),
+				CalculateContextPhotoQuality(face)));
+		}
+		var contextPhoto = new Lazy<byte[]>(() =>
+		{
+			Cv2.ImEncode(
+				".jpg",
+				sourceBgr,
+				out byte[] jpeg,
+				[(int)ImwriteFlags.JpegQuality, 92]);
+			return jpeg;
+		});
 		PersonIdentitySnapshot snapshot;
 		lock (_stateLock)
 		{
 			snapshot = UpdateMemoryLocked(
 				samples,
-				capturedAtUtc == default
-					? DateTime.UtcNow
-					: capturedAtUtc);
+				capturedAtUtc,
+				() => contextPhoto.Value);
 			_latestSnapshot = snapshot;
 		}
 		try
@@ -356,7 +454,12 @@ public sealed class PersonIdentityMemory : IDisposable
 			{
 				person.AvatarProfileId = avatarProfileId;
 				person.DisplayName = avatarDisplayName.Trim();
-				_dirty = true;
+				if (IsOwnerProfile(avatarProfileId))
+				{
+					person.IsRegisteredUser = true;
+					person.PermissionLevel = "Superuser";
+				}
+				_dirtyIdentityIds.Add(person.Id);
 				SaveIfDirtyLocked(force: true, DateTime.UtcNow);
 			}
 			return new AvatarIdentityAuthorization(
@@ -390,7 +493,8 @@ public sealed class PersonIdentityMemory : IDisposable
 
 	private PersonIdentitySnapshot UpdateMemoryLocked(
 		IReadOnlyList<FaceSample> samples,
-		DateTime capturedAtUtc)
+		DateTime capturedAtUtc,
+		Func<byte[]>? contextPhotoFactory = null)
 	{
 		PruneExpiredTracksLocked(capturedAtUtc);
 		var usedTracks = new HashSet<string>(
@@ -438,7 +542,10 @@ public sealed class PersonIdentityMemory : IDisposable
 				}
 			}
 
-			track.Update(sample, capturedAtUtc);
+			track.Update(
+				sample,
+				capturedAtUtc,
+				person is null ? contextPhotoFactory : null);
 			usedTracks.Add(track.TrackId);
 			if (person is null && IsReadyToRetain(track))
 			{
@@ -637,7 +744,16 @@ public sealed class PersonIdentityMemory : IDisposable
 			person.Prototypes.Add(track.Centroid.ToArray());
 		}
 		_rememberedPeople.Add(person);
-		_dirty = true;
+		if (!string.IsNullOrWhiteSpace(_outputFolder)
+			&& track.BestContextPhotoJpeg is { Length: > 0 } jpeg)
+		{
+			_store.SaveContextPhoto(
+				_outputFolder,
+				person.Id,
+				jpeg);
+			track.ReleaseContextPhoto();
+		}
+		_dirtyIdentityIds.Add(person.Id);
 		return person;
 	}
 
@@ -660,7 +776,7 @@ public sealed class PersonIdentityMemory : IDisposable
 		{
 			person.Prototypes.Add(sample.Embedding.ToArray());
 		}
-		_dirty = true;
+		_dirtyIdentityIds.Add(person.Id);
 	}
 
 	private bool TryGetSingleActiveRememberedPersonLocked(
@@ -691,16 +807,19 @@ public sealed class PersonIdentityMemory : IDisposable
 
 	private void SaveIfDirtyLocked(bool force, DateTime utcNow)
 	{
-		if (!_dirty
+		if (_dirtyIdentityIds.Count == 0
 			|| string.IsNullOrWhiteSpace(_outputFolder)
 			|| (!force
 				&& utcNow - _lastSavedAtUtc < PersistenceInterval))
 		{
 			return;
 		}
-		_store.Save(_outputFolder, _rememberedPeople);
+		List<PersonIdentityRecord> changedPeople = _rememberedPeople
+			.Where(person => _dirtyIdentityIds.Contains(person.Id))
+			.ToList();
+		_store.Upsert(_outputFolder, changedPeople);
 		_lastSavedAtUtc = utcNow;
-		_dirty = false;
+		_dirtyIdentityIds.Clear();
 	}
 
 	private void PruneExpiredTracksLocked(DateTime capturedAtUtc)
@@ -754,6 +873,57 @@ public sealed class PersonIdentityMemory : IDisposable
 			Math.Clamp((double)face.Top / height, 0d, 1d),
 			Math.Clamp((double)face.Right / width, 0d, 1d),
 			Math.Clamp((double)face.Bottom / height, 0d, 1d));
+	}
+
+	private static double CalculateContextPhotoQuality(
+		OpenCv.YuNetFaceDetection face)
+	{
+		double eyeDistance = Math.Max(
+			8d,
+			Math.Sqrt(
+				Math.Pow(face.LeftEye.X - face.RightEye.X, 2d)
+				+ Math.Pow(face.LeftEye.Y - face.RightEye.Y, 2d)));
+		double eyeRoll =
+			Math.Abs(face.LeftEye.Y - face.RightEye.Y) / eyeDistance;
+		double eyeCenterX =
+			(face.LeftEye.X + face.RightEye.X) * 0.5d;
+		double noseOffset =
+			Math.Abs(face.NoseTip.X - eyeCenterX) / eyeDistance;
+		double mouthTilt =
+			Math.Abs(
+				face.LeftMouthCorner.Y
+				- face.RightMouthCorner.Y) / eyeDistance;
+		double frontal =
+			1d
+			- Math.Clamp(
+				eyeRoll * 2.2d
+				+ noseOffset * 1.35d
+				+ mouthTilt * 0.8d,
+				0d,
+				1d);
+		return Math.Clamp(face.Score * frontal, 0d, 1d);
+	}
+
+	private static string NormalizePermission(string? permission)
+	{
+		return string.Equals(
+			permission?.Trim(),
+			"Superuser",
+			StringComparison.OrdinalIgnoreCase)
+			? "Superuser"
+			: "Default User";
+	}
+
+	private static bool IsOwnerProfile(string avatarProfileId)
+	{
+		return string.Equals(
+				avatarProfileId,
+				"chris",
+				StringComparison.OrdinalIgnoreCase)
+			|| string.Equals(
+				avatarProfileId,
+				"chris2",
+				StringComparison.OrdinalIgnoreCase);
 	}
 
 	private static double MaximumSimilarity(
@@ -826,6 +996,11 @@ public sealed class PersonIdentityMemory : IDisposable
 
 		public List<float[]> Prototypes { get; } = [];
 
+		public byte[]? BestContextPhotoJpeg { get; private set; }
+
+		private double _bestContextPhotoQuality =
+			double.NegativeInfinity;
+
 		public TrackState(FaceSample initial, DateTime capturedAtUtc)
 		{
 			FirstSeenAtUtc = capturedAtUtc;
@@ -834,7 +1009,10 @@ public sealed class PersonIdentityMemory : IDisposable
 			Centroid = initial.Embedding.ToArray();
 		}
 
-		public void Update(FaceSample sample, DateTime capturedAtUtc)
+		public void Update(
+			FaceSample sample,
+			DateTime capturedAtUtc,
+			Func<byte[]>? contextPhotoFactory)
 		{
 			int previousCount = ObservationCount;
 			ObservationCount++;
@@ -859,6 +1037,23 @@ public sealed class PersonIdentityMemory : IDisposable
 			{
 				Prototypes.Add(sample.Embedding.ToArray());
 			}
+			if (contextPhotoFactory is not null
+				&& sample.ContextPhotoQuality
+					> _bestContextPhotoQuality + 0.005d)
+			{
+				byte[] candidate = contextPhotoFactory();
+				if (candidate.Length > 0)
+				{
+					BestContextPhotoJpeg = candidate;
+					_bestContextPhotoQuality =
+						sample.ContextPhotoQuality;
+				}
+			}
+		}
+
+		public void ReleaseContextPhoto()
+		{
+			BestContextPhotoJpeg = null;
 		}
 
 		private static void NormalizeInPlace(float[] values)
@@ -884,7 +1079,8 @@ public sealed class PersonIdentityMemory : IDisposable
 	private sealed record FaceSample(
 		float[] Embedding,
 		double DetectionScore,
-		PersonFaceBox FaceBox);
+		PersonFaceBox FaceBox,
+		double ContextPhotoQuality = 0d);
 
 	private readonly record struct KnownMatch(
 		PersonIdentityRecord? Person,

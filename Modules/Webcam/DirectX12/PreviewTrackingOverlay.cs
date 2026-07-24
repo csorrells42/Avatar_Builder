@@ -30,6 +30,9 @@ public sealed record PreviewTrackingOverlay
 
 	public IReadOnlyList<PreviewOverlayDiagnosticMesh> DiagnosticMeshes { get; init; } = Array.Empty<PreviewOverlayDiagnosticMesh>();
 
+	public IReadOnlyList<PreviewTrackedPerson> TrackedPeople { get; init; } =
+		Array.Empty<PreviewTrackedPerson>();
+
 	public long SourceTimestamp { get; init; }
 
 	public TimeSpan MaximumAge { get; init; }
@@ -49,7 +52,8 @@ public sealed record PreviewTrackingOverlay
 		{
 			if (!FaceBox.HasValue && FaceContour is null && JawContour is null && LeftEyeContour is null && RightEyeContour is null && LeftBrowContour is null && RightBrowContour is null && OuterLipContour is null && InnerLipContour is null && FaceMesh is null)
 			{
-				return DiagnosticMeshes.Count > 0;
+				return DiagnosticMeshes.Count > 0
+					|| TrackedPeople.Count > 0;
 			}
 			return true;
 		}

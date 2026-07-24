@@ -165,6 +165,7 @@
     <Menu Grid.Row="0" Margin="0,0,0,8">
       <MenuItem Header="_File">
         <MenuItem Name="LoginLogoutMenuItem" Header="_Login..." Click="LoginLogoutClicked" />
+        <MenuItem Header="_Identity Review..." Click="OpenIdentityReviewClicked" />
         <MenuItem Header="_Choose Data Folder..." Click="OpenDataFolderClicked" />
         <MenuItem Header="_Face Box System">
           <MenuItem Name="MediaPipeFaceBoxSystemMenuItem" Header="_MediaPipe" IsCheckable="True" IsChecked="True" Tag="MediaPipe" Click="FaceBoxSystemMenuItemClicked" />

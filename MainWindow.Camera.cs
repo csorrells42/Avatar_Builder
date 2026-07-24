@@ -38,6 +38,7 @@ using AvatarBuilder.Modules.Webcam.Ffmpeg;
 using AvatarBuilder.Modules.Webcam.MediaFoundation;
 using AvatarBuilder.Modules.Webcam.Pipeline;
 using Microsoft.Win32;
+using OpenCvSharp;
 
 namespace AvatarBuilder;
 
@@ -596,7 +597,7 @@ public partial class MainWindow
 			: Stopwatch.GetTimestamp();
 		if (ShouldSubmitPersonIdentityObservation(capturedAtTimestamp))
 		{
-			_personIdentityWorker.TryAcceptPreviewData(frame);
+			_personIdentityWorker.TryAcceptTexture(frame);
 		}
 		if (!TryBeginDirectX12Analysis())
 		{
@@ -647,6 +648,36 @@ public partial class MainWindow
 		{
 			return;
 		}
+		if (frame.Resource != IntPtr.Zero
+			&& frame.DeviceMode.StartsWith(
+				"D3D12",
+				StringComparison.OrdinalIgnoreCase))
+		{
+			try
+			{
+				if (_personIdentityTextureReader is null
+					|| !_personIdentityTextureReader.CanRead(frame))
+				{
+					_personIdentityTextureReader?.Dispose();
+					_personIdentityTextureReader =
+						new D3D12Nv12IdentityFrameReader(frame);
+				}
+				using Mat bgr =
+					_personIdentityTextureReader.ReadBgr(frame);
+				_personIdentityMemory.ObserveBgr(
+					bgr,
+					frame.CapturedAtUtc);
+				return;
+			}
+			catch (Exception ex)
+			{
+				_personIdentityTextureReader?.Dispose();
+				_personIdentityTextureReader = null;
+				ReportRecoverableVisionError(
+					"People memory skipped one GPU frame and reset: " +
+					ex.Message);
+			}
+		}
 		byte[]? nv12 = frame.Nv12PreviewBytes;
 		if (nv12 is null)
 		{
@@ -690,46 +721,29 @@ public partial class MainWindow
 		int height,
 		DateTime capturedAtUtc)
 	{
-		const int maximumObservationWidth = 960;
-		if (!Nv12FrameConverter.TryGetOutputLayout(
-			nv12,
-			nv12Stride,
-			width,
-			height,
-			maximumObservationWidth,
-			out int outputWidth,
-			out int outputHeight,
-			out int bgraStride,
-			out int requiredLength))
+		int chromaHeight = (height + 1) / 2;
+		if (width <= 0
+			|| height <= 0
+			|| nv12Stride < width
+			|| nv12.Length
+				< nv12Stride * (height + chromaHeight))
 		{
 			return;
 		}
-		byte[] bgra = ArrayPool<byte>.Shared.Rent(requiredLength);
-		try
-		{
-			if (!Nv12FrameConverter.TryConvertToBgra(
-				nv12,
-				nv12Stride,
-				width,
-				height,
-				outputWidth,
-				outputHeight,
-				bgraStride,
-				bgra.AsSpan(0, requiredLength)))
-			{
-				return;
-			}
-			_personIdentityMemory.ObserveBgra(
-				bgra,
-				outputWidth,
-				outputHeight,
-				bgraStride,
-				capturedAtUtc);
-		}
-		finally
-		{
-			ArrayPool<byte>.Shared.Return(bgra);
-		}
+		using Mat nv12Frame = Mat.FromPixelData(
+			height + chromaHeight,
+			width,
+			MatType.CV_8UC1,
+			nv12,
+			nv12Stride);
+		using Mat bgr = new();
+		Cv2.CvtColor(
+			nv12Frame,
+			bgr,
+			ColorConversionCodes.YUV2BGR_NV12);
+		_personIdentityMemory.ObserveBgr(
+			bgr,
+			capturedAtUtc);
 	}
 
 	private void PersonIdentityMemorySnapshotChanged(
@@ -740,6 +754,23 @@ public partial class MainWindow
 		{
 			return;
 		}
+		PreviewTrackedPerson[] trackedPeople =
+			new PreviewTrackedPerson[snapshot.People.Count];
+		for (int index = 0; index < trackedPeople.Length; index++)
+		{
+			PersonIdentityObservation observation =
+				snapshot.People[index];
+			trackedPeople[index] = new PreviewTrackedPerson(
+				new PreviewOverlayRect(
+					observation.FaceBox.Left,
+					observation.FaceBox.Top,
+					observation.FaceBox.Right,
+					observation.FaceBox.Bottom).Clamp(),
+				observation.IsRemembered);
+		}
+		Volatile.Write(
+			ref _currentPreviewTrackedPeople,
+			trackedPeople);
 		base.Dispatcher.InvokeAsync(() =>
 		{
 			if (!_isClosing)
@@ -747,6 +778,8 @@ public partial class MainWindow
 				SetTextIfChanged(
 					PeopleMemoryStatusText,
 					snapshot.Status);
+				UpdateDirectX12TrackingOverlay(
+					CreateNativePreviewTrackingOverlay());
 			}
 		}, DispatcherPriority.Background);
 	}

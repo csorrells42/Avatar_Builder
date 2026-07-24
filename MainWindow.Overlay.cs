@@ -355,6 +355,20 @@ public partial class MainWindow
 
 	private void UpdateDirectX12TrackingOverlay(PreviewTrackingOverlay overlay)
 	{
+		PreviewTrackedPerson[] people =
+			Volatile.Read(ref _currentPreviewTrackedPeople);
+		if (people.Length > 0)
+		{
+			overlay = overlay with
+			{
+				TrackedPeople = people,
+				SourceTimestamp = Math.Max(
+					overlay.SourceTimestamp,
+					Volatile.Read(
+						ref _lastPersonIdentityObservationTimestamp)),
+				MaximumAge = MaximumLiveAwarenessFrameAge
+			};
+		}
 		_directX12NativeCamera?.UpdateTrackingOverlay(overlay);
 		GetDirectX12PreviewHost()?.UpdateTrackingOverlay(overlay);
 	}

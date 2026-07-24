@@ -174,6 +174,10 @@ public partial class MainWindow : Window, IComponentConnector
 
 	private readonly LatestTextureFrameWorker _personIdentityWorker;
 
+	private D3D12Nv12IdentityFrameReader? _personIdentityTextureReader;
+
+	private IdentityReviewWindow? _identityReviewWindow;
+
 	private readonly LatestCameraFrameWorker _personIdentityCameraFrameWorker;
 
 	private readonly object _faceLandmarkTrackerLock = new object();
@@ -278,6 +282,8 @@ public partial class MainWindow : Window, IComponentConnector
 	private long _lastPipelineDiagnosticsAnalysisFrames;
 
 	private long _lastPersonIdentityObservationTimestamp;
+
+	private PreviewTrackedPerson[] _currentPreviewTrackedPeople = [];
 
 	private double _measuredCameraIngestionFramesPerSecond;
 
@@ -390,6 +396,25 @@ public partial class MainWindow : Window, IComponentConnector
 			}
 			return false;
 		}
+	}
+
+	private void OpenIdentityReviewClicked(
+		object sender,
+		RoutedEventArgs e)
+	{
+		if (_identityReviewWindow is { IsVisible: true } existing)
+		{
+			existing.Activate();
+			return;
+		}
+		_identityReviewWindow =
+			new IdentityReviewWindow(_personIdentityMemory)
+		{
+			Owner = this
+		};
+		_identityReviewWindow.Closed += (_, _) =>
+			_identityReviewWindow = null;
+		_identityReviewWindow.Show();
 	}
 
 	private bool IsAvatarReconstructionReady => _mediaPipeGeometryPipeline.IsConfigured;
@@ -955,6 +980,11 @@ public partial class MainWindow : Window, IComponentConnector
 		}
 		WriteShutdownTrace("Disposing camera and vision services.");
 		TryShutdownStep(_personIdentityWorker.Dispose);
+		TryShutdownStep(() =>
+		{
+			_personIdentityTextureReader?.Dispose();
+			_personIdentityTextureReader = null;
+		});
 		TryShutdownStep(_personIdentityCameraFrameWorker.Dispose);
 		_personIdentityMemory.SnapshotChanged -=
 			PersonIdentityMemorySnapshotChanged;

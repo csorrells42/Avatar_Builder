@@ -43,30 +43,44 @@ public sealed class OpenCvYuNetFaceDetector : IDisposable
 		}
 	}
 
-	public YuNetFaceDetection? Detect(Mat gray)
+	public YuNetFaceDetection? Detect(Mat image)
 	{
-		return (from face in DetectAll(gray)
+		return (from face in DetectAll(image)
 			orderby face.Score descending
 			select face).FirstOrDefault();
 	}
 
-	public IReadOnlyList<YuNetFaceDetection> DetectAll(Mat gray)
+	public IReadOnlyList<YuNetFaceDetection> DetectAll(Mat image)
 	{
-		if (!_modelInfo.IsReady || gray.Empty())
+		if (!_modelInfo.IsReady || image.Empty())
 		{
 			return Array.Empty<YuNetFaceDetection>();
 		}
-		Size inputSize = new Size(gray.Width, gray.Height);
+		Size inputSize = new Size(image.Width, image.Height);
 		if (!EnsureDetector(inputSize))
 		{
 			return Array.Empty<YuNetFaceDetection>();
 		}
-		using Mat mat = new Mat();
-		Cv2.CvtColor(gray, mat, ColorConversionCodes.GRAY2BGR);
+		using Mat converted = new();
+		Mat bgr = image;
+		if (image.Channels() == 1)
+		{
+			Cv2.CvtColor(image, converted, ColorConversionCodes.GRAY2BGR);
+			bgr = converted;
+		}
+		else if (image.Channels() == 4)
+		{
+			Cv2.CvtColor(image, converted, ColorConversionCodes.BGRA2BGR);
+			bgr = converted;
+		}
+		else if (image.Channels() != 3)
+		{
+			return Array.Empty<YuNetFaceDetection>();
+		}
 		using Mat faces = new Mat();
 		FaceDetectorYN detector = _detector ?? throw new InvalidOperationException("YuNet initialization reported success without a detector instance.");
-		detector.Detect(mat, faces);
-		return ParseFaces(faces, gray.Width, gray.Height);
+		detector.Detect(bgr, faces);
+		return ParseFaces(faces, image.Width, image.Height);
 	}
 
 	public void Dispose()

@@ -2,7 +2,9 @@ using System;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using AvatarBuilder.Modules.Vision.Common;
+using AvatarBuilder.Modules.Vision.Identity;
 using AvatarBuilder.Modules.Webcam.DirectX12;
+using OpenCvSharp;
 using Vortice;
 using Vortice.Direct3D;
 using Vortice.Direct3D12;
@@ -111,6 +113,21 @@ public static class MediaPipeGpuTextureSelfTest
 				new(width, height, luma, chroma);
 			using TextureNativeFrameLease frame =
 				upload.CreateFrameLease();
+			long identityReadbackStarted = Stopwatch.GetTimestamp();
+			using var identityReader =
+				new D3D12Nv12IdentityFrameReader(frame);
+			using Mat identityBgr = identityReader.ReadBgr(frame);
+			double identityReadbackMilliseconds =
+				Stopwatch.GetElapsedTime(
+					identityReadbackStarted).TotalMilliseconds;
+			Scalar identityMean = Cv2.Mean(identityBgr);
+			bool identityReadbackValid =
+				identityBgr.Width == width
+				&& identityBgr.Height == height
+				&& identityBgr.Channels() == 3
+				&& identityMean.Val0
+					+ identityMean.Val1
+					+ identityMean.Val2 > 1d;
 			long started = Stopwatch.GetTimestamp();
 			using MediaPipeDirectMlTextureTracker tracker = new(
 				frame,
@@ -144,7 +161,8 @@ public static class MediaPipeGpuTextureSelfTest
 			bool succeeded =
 				result?.HasFace == true
 				&& densePoints == 478
-				&& poseValues == 16;
+				&& poseValues == 16
+				&& identityReadbackValid;
 			return new MediaPipeGpuTextureSelfTestResult(
 				succeeded,
 				$"{result?.BackendStatus ?? "no result"}; " +
@@ -153,6 +171,8 @@ public static class MediaPipeGpuTextureSelfTest
 				$"{startupMilliseconds:0.00} ms; steady texture inference " +
 				$"{averageMilliseconds:0.00} ms " +
 				$"({1000d / Math.Max(0.001d, averageMilliseconds):0.0} fps); " +
+				$"identity NV12 texture readback " +
+				$"{identityReadbackMilliseconds:0.00} ms; " +
 				"CPU-to-GPU test upload excluded.");
 		}
 		catch (Exception ex)

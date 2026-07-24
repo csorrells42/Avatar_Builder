@@ -35,6 +35,26 @@
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
     </Content>
+    <EmbeddedResource Include="Shaders\Compiled\PreviewBgra.vs.cso">
+      <WithCulture>false</WithCulture>
+      <LogicalName>AvatarBuilder.Shaders.Compiled.PreviewBgra.vs.cso</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="Shaders\Compiled\PreviewBgra.ps.cso">
+      <WithCulture>false</WithCulture>
+      <LogicalName>AvatarBuilder.Shaders.Compiled.PreviewBgra.ps.cso</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="Shaders\Compiled\PreviewNv12.vs.cso">
+      <WithCulture>false</WithCulture>
+      <LogicalName>AvatarBuilder.Shaders.Compiled.PreviewNv12.vs.cso</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="Shaders\Compiled\PreviewNv12.ps.cso">
+      <WithCulture>false</WithCulture>
+      <LogicalName>AvatarBuilder.Shaders.Compiled.PreviewNv12.ps.cso</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="Shaders\Compiled\MediaPipePreprocess.cs.cso">
+      <WithCulture>false</WithCulture>
+      <LogicalName>AvatarBuilder.Shaders.Compiled.MediaPipePreprocess.cs.cso</LogicalName>
+    </EmbeddedResource>
   </ItemGroup>
 
   <ItemGroup>
@@ -43,11 +63,27 @@
     <PackageReference Include="OpenCvSharp4" Version="4.13.0.20260602" />
     <PackageReference Include="OpenCvSharp4.runtime.win" Version="4.13.0.20260602" />
     <PackageReference Include="Microsoft.ML.OnnxRuntime.DirectML" Version="1.24.4" />
-    <PackageReference Include="Vortice.D3DCompiler" Version="3.8.3" />
     <PackageReference Include="Vortice.Direct2D1" Version="3.8.3" />
     <PackageReference Include="Vortice.Direct3D11" Version="3.8.3" />
     <PackageReference Include="Vortice.Direct3D12" Version="3.8.3" />
+    <ProjectReference
+      Include="tools\ShaderCompiler\ShaderCompiler.csproj"
+      ReferenceOutputAssembly="false"
+      PrivateAssets="all" />
   </ItemGroup>
+
+  <Target Name="CompileHlslShaders" BeforeTargets="CoreCompile">
+    <MSBuild
+      Projects="$(MSBuildProjectDirectory)\tools\ShaderCompiler\ShaderCompiler.csproj"
+      Targets="Build"
+      Properties="Configuration=$(Configuration)" />
+    <MakeDir Directories="$(MSBuildProjectDirectory)\Shaders\Compiled" />
+    <Exec Command="dotnet &quot;$(MSBuildProjectDirectory)\tools\ShaderCompiler\bin\$(Configuration)\net10.0\win-x64\ShaderCompiler.dll&quot; &quot;$(MSBuildProjectDirectory)\Shaders\PreviewBgra.hlsl&quot; VSMain vs_5_0 &quot;$(MSBuildProjectDirectory)\Shaders\Compiled\PreviewBgra.vs.cso&quot;" />
+    <Exec Command="dotnet &quot;$(MSBuildProjectDirectory)\tools\ShaderCompiler\bin\$(Configuration)\net10.0\win-x64\ShaderCompiler.dll&quot; &quot;$(MSBuildProjectDirectory)\Shaders\PreviewBgra.hlsl&quot; PSMain ps_5_0 &quot;$(MSBuildProjectDirectory)\Shaders\Compiled\PreviewBgra.ps.cso&quot;" />
+    <Exec Command="dotnet &quot;$(MSBuildProjectDirectory)\tools\ShaderCompiler\bin\$(Configuration)\net10.0\win-x64\ShaderCompiler.dll&quot; &quot;$(MSBuildProjectDirectory)\Shaders\PreviewNv12.hlsl&quot; VSMain vs_5_0 &quot;$(MSBuildProjectDirectory)\Shaders\Compiled\PreviewNv12.vs.cso&quot;" />
+    <Exec Command="dotnet &quot;$(MSBuildProjectDirectory)\tools\ShaderCompiler\bin\$(Configuration)\net10.0\win-x64\ShaderCompiler.dll&quot; &quot;$(MSBuildProjectDirectory)\Shaders\PreviewNv12.hlsl&quot; PSMain ps_5_0 &quot;$(MSBuildProjectDirectory)\Shaders\Compiled\PreviewNv12.ps.cso&quot;" />
+    <Exec Command="dotnet &quot;$(MSBuildProjectDirectory)\tools\ShaderCompiler\bin\$(Configuration)\net10.0\win-x64\ShaderCompiler.dll&quot; &quot;$(MSBuildProjectDirectory)\Shaders\MediaPipePreprocess.hlsl&quot; CSMain cs_5_0 &quot;$(MSBuildProjectDirectory)\Shaders\Compiled\MediaPipePreprocess.cs.cso&quot;" />
+  </Target>
 
   <Target Name="UpdateDesktopRuntime" AfterTargets="Build" Condition="'$(DesignTimeBuild)' != 'true'">
     <ItemGroup>

@@ -4,9 +4,9 @@ using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Threading;
+using AvatarBuilder.Modules.Infrastructure;
 using AvatarBuilder.Modules.Webcam.Common;
 using Vortice;
-using Vortice.D3DCompiler;
 using Vortice.DXGI;
 using Vortice.Direct3D;
 using Vortice.Direct3D12;
@@ -258,11 +258,14 @@ internal sealed class Direct3D12SwapChainRenderer : IDisposable
 
 	private string? _sharedD3D11BridgePreviewFailureReason;
 
+	private int _lastRenderAttemptWasBusy;
+
+	private int _pendingViewportWidth;
+
+	private int _pendingViewportHeight;
+
 	private readonly bool _usesSharedCaptureDevice;
 
-	private const string PreviewShaderSource = "Texture2D<float4> CameraFrame : register(t0);\r\nSamplerState CameraSampler : register(s0);\r\n\r\ncbuffer ColorSettings : register(b0)\r\n{\r\n    float ExposureOffset;\r\n    float Contrast;\r\n    float Saturation;\r\n    float Warmth;\r\n    float DenoiseAmount;\r\n    float DenoiseEdgeThreshold;\n    float TexelWidth;\n    float TexelHeight;\n};\n\r\nstruct VertexOutput\r\n{\r\n    float4 Position : SV_POSITION;\r\n    float2 TexCoord : TEXCOORD0;\r\n};\r\n\r\nVertexOutput VSMain(uint vertexId : SV_VertexID)\r\n{\r\n    float2 positions[3] =\r\n    {\r\n        float2(-1.0, -1.0),\r\n        float2(-1.0, 3.0),\r\n        float2(3.0, -1.0)\r\n    };\r\n    float2 texCoords[3] =\r\n    {\r\n        float2(0.0, 1.0),\r\n        float2(0.0, -1.0),\r\n        float2(2.0, 1.0)\r\n    };\r\n\r\n    VertexOutput output;\r\n    output.Position = float4(positions[vertexId], 0.0, 1.0);\r\n    output.TexCoord = texCoords[vertexId];\r\n    return output;\r\n}\r\n\r\nfloat3 ApplyColorPolish(float3 rgb)\r\n{\r\n    float3 rgb255 = rgb * 255.0;\r\n    rgb255.r = ((rgb255.r + ExposureOffset + Warmth - 128.0) * Contrast) + 128.0;\r\n    rgb255.g = ((rgb255.g + ExposureOffset - 128.0) * Contrast) + 128.0;\r\n    rgb255.b = ((rgb255.b + ExposureOffset - Warmth - 128.0) * Contrast) + 128.0;\r\n\r\n    float luma = dot(rgb255, float3(0.2126, 0.7152, 0.0722));\r\n    rgb255 = luma + (rgb255 - luma) * Saturation;\r\n    return saturate(rgb255 / 255.0);\r\n}\r\n\r\nfloat Luma(float3 rgb)\r\n{\r\n    return dot(rgb, float3(0.2126, 0.7152, 0.0722));\r\n}\r\n\r\nfloat EdgeAwareWeight(float sampleY, float centerY)\r\n{\r\n    return saturate(1.0 - abs(sampleY - centerY) / max(DenoiseEdgeThreshold, 0.0001));\r\n}\r\n\r\nfloat3 ApplyBgraDenoise(float3 centerRgb, float2 texCoord)\r\n{\r\n    if (DenoiseAmount <= 0.001)\r\n    {\r\n        return centerRgb;\r\n    }\r\n\r\n    float2 xOffset = float2(TexelWidth, 0.0);\r\n    float2 yOffset = float2(0.0, TexelHeight);\r\n    float3 leftRgb = CameraFrame.Sample(CameraSampler, texCoord - xOffset).rgb;\r\n    float3 rightRgb = CameraFrame.Sample(CameraSampler, texCoord + xOffset).rgb;\r\n    float3 upRgb = CameraFrame.Sample(CameraSampler, texCoord - yOffset).rgb;\r\n    float3 downRgb = CameraFrame.Sample(CameraSampler, texCoord + yOffset).rgb;\r\n\r\n    float centerY = Luma(centerRgb);\r\n    float centerWeight = 2.0;\r\n    float leftWeight = EdgeAwareWeight(Luma(leftRgb), centerY);\r\n    float rightWeight = EdgeAwareWeight(Luma(rightRgb), centerY);\r\n    float upWeight = EdgeAwareWeight(Luma(upRgb), centerY);\r\n    float downWeight = EdgeAwareWeight(Luma(downRgb), centerY);\r\n    float totalWeight = centerWeight + leftWeight + rightWeight + upWeight + downWeight;\r\n    float3 smoothedRgb = (\r\n        centerRgb * centerWeight\r\n        + leftRgb * leftWeight\r\n        + rightRgb * rightWeight\r\n        + upRgb * upWeight\r\n        + downRgb * downWeight) / max(totalWeight, 0.0001);\r\n    return lerp(centerRgb, smoothedRgb, DenoiseAmount);\r\n}\r\n\r\nfloat4 PSMain(VertexOutput input) : SV_TARGET\r\n{\r\n    float4 color = CameraFrame.Sample(CameraSampler, input.TexCoord);\r\n    float3 denoised = ApplyBgraDenoise(color.rgb, input.TexCoord);\r\n    return float4(ApplyColorPolish(denoised), 1.0);\r\n}";
-
-	private const string Nv12PreviewShaderSource = "Texture2D<float> CameraLuma : register(t0);\r\nTexture2D<float2> CameraChroma : register(t1);\r\nSamplerState CameraSampler : register(s0);\r\n\r\ncbuffer Nv12PreviewSettings : register(b0)\r\n{\r\n    float ExposureOffset;\r\n    float Contrast;\r\n    float Saturation;\r\n    float Warmth;\r\n    float DenoiseAmount;\r\n    float DenoiseEdgeThreshold;\n    float TexelWidth;\n    float TexelHeight;\n    float SwapChromaChannels;\n};\n\r\nstruct VertexOutput\r\n{\r\n    float4 Position : SV_POSITION;\r\n    float2 TexCoord : TEXCOORD0;\r\n};\r\n\r\nVertexOutput VSMain(uint vertexId : SV_VertexID)\r\n{\r\n    float2 positions[3] =\r\n    {\r\n        float2(-1.0, -1.0),\r\n        float2(-1.0, 3.0),\r\n        float2(3.0, -1.0)\r\n    };\r\n    float2 texCoords[3] =\r\n    {\r\n        float2(0.0, 1.0),\r\n        float2(0.0, -1.0),\r\n        float2(2.0, 1.0)\r\n    };\r\n\r\n    VertexOutput output;\r\n    output.Position = float4(positions[vertexId], 0.0, 1.0);\r\n    output.TexCoord = texCoords[vertexId];\r\n    return output;\r\n}\r\n\r\nfloat NormalizeLuma(float rawY)\r\n{\r\n    return saturate((rawY - (16.0 / 255.0)) * (255.0 / 219.0));\r\n}\r\n\r\nfloat EdgeAwareWeight(float sampleY, float centerY)\r\n{\r\n    return saturate(1.0 - abs(sampleY - centerY) / max(DenoiseEdgeThreshold, 0.0001));\r\n}\r\n\r\nfloat SampleNormalizedLuma(float2 texCoord)\r\n{\r\n    return NormalizeLuma(CameraLuma.Sample(CameraSampler, texCoord));\r\n}\r\n\r\nfloat ApplyLumaDenoise(float centerY, float2 texCoord)\r\n{\r\n    if (DenoiseAmount <= 0.001)\r\n    {\r\n        return centerY;\r\n    }\r\n\r\n    float2 xOffset = float2(TexelWidth, 0.0);\r\n    float2 yOffset = float2(0.0, TexelHeight);\r\n    float leftY = SampleNormalizedLuma(texCoord - xOffset);\r\n    float rightY = SampleNormalizedLuma(texCoord + xOffset);\r\n    float upY = SampleNormalizedLuma(texCoord - yOffset);\r\n    float downY = SampleNormalizedLuma(texCoord + yOffset);\r\n\r\n    float centerWeight = 2.0;\r\n    float leftWeight = EdgeAwareWeight(leftY, centerY);\r\n    float rightWeight = EdgeAwareWeight(rightY, centerY);\r\n    float upWeight = EdgeAwareWeight(upY, centerY);\r\n    float downWeight = EdgeAwareWeight(downY, centerY);\r\n    float totalWeight = centerWeight + leftWeight + rightWeight + upWeight + downWeight;\r\n    float smoothedY = (\r\n        centerY * centerWeight\r\n        + leftY * leftWeight\r\n        + rightY * rightWeight\r\n        + upY * upWeight\r\n        + downY * downWeight) / max(totalWeight, 0.0001);\r\n    return lerp(centerY, smoothedY, DenoiseAmount);\r\n}\r\n\r\nfloat3 ApplyColorPolish(float3 rgb)\r\n{\r\n    float3 rgb255 = rgb * 255.0;\r\n    rgb255.r = ((rgb255.r + ExposureOffset + Warmth - 128.0) * Contrast) + 128.0;\r\n    rgb255.g = ((rgb255.g + ExposureOffset - 128.0) * Contrast) + 128.0;\r\n    rgb255.b = ((rgb255.b + ExposureOffset - Warmth - 128.0) * Contrast) + 128.0;\r\n\r\n    float luma = dot(rgb255, float3(0.2126, 0.7152, 0.0722));\r\n    rgb255 = luma + (rgb255 - luma) * Saturation;\r\n    return saturate(rgb255 / 255.0);\r\n}\r\n\r\nfloat4 PSMain(VertexOutput input) : SV_TARGET\r\n{\r\n    float y = NormalizeLuma(CameraLuma.Sample(CameraSampler, input.TexCoord));\n    y = ApplyLumaDenoise(y, input.TexCoord);\n    float2 uv = CameraChroma.Sample(CameraSampler, input.TexCoord) - float2(0.5, 0.5);\n    uv = SwapChromaChannels > 0.5 ? uv.yx : uv;\n    float3 rgb = float3(\n        y + 1.5748 * uv.y,\r\n        y - 0.1873 * uv.x - 0.4681 * uv.y,\r\n        y + 1.8556 * uv.x);\r\n    return float4(ApplyColorPolish(saturate(rgb)), 1.0);\r\n}";
 
 	public string DeviceDescription
 	{
@@ -282,6 +285,11 @@ internal sealed class Direct3D12SwapChainRenderer : IDisposable
 		checked((ulong)Math.Max(
 			0L,
 			Volatile.Read(ref _lastSubmittedFenceValue)));
+
+	public bool LastRenderAttemptWasBusy =>
+		Volatile.Read(ref _lastRenderAttemptWasBusy) != 0;
+
+	public bool IsGpuIdle => AreAllFrameResourcesAvailable();
 
 	public Direct3D12SwapChainRenderer(nint hwnd, int width, int height, nint nativeD3D12Device = 0)
 	{
@@ -341,39 +349,46 @@ internal sealed class Direct3D12SwapChainRenderer : IDisposable
 		_fence = _device.CreateFence<ID3D12Fence>(0uL);
 	}
 
-	public void RenderProofFrame(long frameNumber)
+	public bool RenderProofFrame(long frameNumber)
 	{
-		if (!_disposed)
+		if (_disposed
+			|| !TryBeginFrame(out FrameResource frameResource, out int frameIndex))
 		{
-			int frameIndex;
-			FrameResource frameResource = BeginFrame(out frameIndex);
-			ID3D12Resource? resource = _renderTargets[frameIndex] ?? throw new InvalidOperationException("DX12 render target is not ready.");
-			ResourceBarrier resourceBarrier = ResourceBarrier.BarrierTransition(resource, ResourceStates.Common, ResourceStates.RenderTarget);
-			ID3D12GraphicsCommandList commandList = _commandList;
-			ResourceBarrier reference = resourceBarrier;
-			commandList.ResourceBarrier(new Span<ResourceBarrier>(ref reference));
-			CpuDescriptorHandle rtvHandle = GetRtvHandle(frameIndex);
-			float num = (float)((double)(frameNumber % 120) / 120.0);
-			_commandList.OMSetRenderTargets(rtvHandle);
-			_commandList.ClearRenderTargetView(rtvHandle, new Color4(0.02f + num * 0.08f, 0.08f, 0.12f + num * 0.18f), []);
-			ResourceBarrier resourceBarrier2 = ResourceBarrier.BarrierTransition(resource, ResourceStates.RenderTarget, ResourceStates.Common);
-			ID3D12GraphicsCommandList commandList2 = _commandList;
-			ResourceBarrier reference2 = resourceBarrier2;
-			commandList2.ResourceBarrier(new Span<ResourceBarrier>(ref reference2));
-			ExecuteAndPresent(frameResource);
+			return false;
 		}
+		ID3D12Resource? resource = _renderTargets[frameIndex] ?? throw new InvalidOperationException("DX12 render target is not ready.");
+		ResourceBarrier resourceBarrier = ResourceBarrier.BarrierTransition(resource, ResourceStates.Common, ResourceStates.RenderTarget);
+		ID3D12GraphicsCommandList commandList = _commandList;
+		ResourceBarrier reference = resourceBarrier;
+		commandList.ResourceBarrier(new Span<ResourceBarrier>(ref reference));
+		CpuDescriptorHandle rtvHandle = GetRtvHandle(frameIndex);
+		float num = (float)((double)(frameNumber % 120) / 120.0);
+		_commandList.OMSetRenderTargets(rtvHandle);
+		_commandList.ClearRenderTargetView(rtvHandle, new Color4(0.02f + num * 0.08f, 0.08f, 0.12f + num * 0.18f), []);
+		ResourceBarrier resourceBarrier2 = ResourceBarrier.BarrierTransition(resource, ResourceStates.RenderTarget, ResourceStates.Common);
+		ID3D12GraphicsCommandList commandList2 = _commandList;
+		ResourceBarrier reference2 = resourceBarrier2;
+		commandList2.ResourceBarrier(new Span<ResourceBarrier>(ref reference2));
+		ExecuteAndPresent(frameResource);
+		return true;
 	}
 
-	public void RenderBgraFrame(byte[] bgraBytes, int width, int height, int stride, long frameNumber, VideoFrameColorSettings colorSettings = default(VideoFrameColorSettings), bool denoiseEnabled = false, double denoiseStrength = 0.0, PreviewTrackingOverlay? trackingOverlay = null)
+	public bool RenderBgraFrame(byte[] bgraBytes, int width, int height, int stride, long frameNumber, VideoFrameColorSettings colorSettings = default(VideoFrameColorSettings), bool denoiseEnabled = false, double denoiseStrength = 0.0, PreviewTrackingOverlay? trackingOverlay = null)
 	{
-		if (!_disposed && bgraBytes.Length >= stride * height)
+		if (_disposed || bgraBytes.Length < stride * height)
 		{
-			PreviewTrackingOverlay trackingOverlay2 = trackingOverlay ?? PreviewTrackingOverlay.Empty;
-			if (!TryRenderBgraFrameWithShader(bgraBytes, width, height, stride, colorSettings, denoiseEnabled, denoiseStrength, trackingOverlay2))
-			{
-				RenderBgraFrameToBackBuffer(bgraBytes, width, height, stride, trackingOverlay2);
-			}
+			return false;
 		}
+		PreviewTrackingOverlay trackingOverlay2 = trackingOverlay ?? PreviewTrackingOverlay.Empty;
+		return TryRenderBgraFrameWithShader(
+			bgraBytes,
+			width,
+			height,
+			stride,
+			colorSettings,
+			denoiseEnabled,
+			denoiseStrength,
+			trackingOverlay2);
 	}
 
 	public bool RenderNv12Frame(byte[] nv12Bytes, int width, int height, int stride, long frameNumber, VideoFrameColorSettings colorSettings, bool denoiseEnabled, double denoiseStrength, PreviewTrackingOverlay trackingOverlay, bool swapChromaChannels = false)
@@ -429,7 +444,11 @@ internal sealed class Direct3D12SwapChainRenderer : IDisposable
 		{
 			Marshal.AddRef(frame.Resource);
 			using ID3D12Resource cameraResource = new ID3D12Resource(frame.Resource);
-			RenderNativeNv12Resource(cameraResource, frame.Width, frame.Height, colorSettings, denoiseEnabled, denoiseStrength, trackingOverlay);
+			if (!RenderNativeNv12Resource(cameraResource, frame.Width, frame.Height, colorSettings, denoiseEnabled, denoiseStrength, trackingOverlay))
+			{
+				failureReason = "preview GPU frame resources are busy";
+				return false;
+			}
 			_nativeTexturePreviewFailureReason = null;
 			return true;
 		}
@@ -476,7 +495,11 @@ internal sealed class Direct3D12SwapChainRenderer : IDisposable
 			ID3D12Resource cameraResource =
 				GetSharedD3D11BridgeResource(
 					frame.D3D12SharedTextureHandle);
-			RenderNativeNv12Resource(cameraResource, frame.Width, frame.Height, colorSettings, denoiseEnabled, denoiseStrength, trackingOverlay);
+			if (!RenderNativeNv12Resource(cameraResource, frame.Width, frame.Height, colorSettings, denoiseEnabled, denoiseStrength, trackingOverlay))
+			{
+				failureReason = "preview GPU frame resources are busy";
+				return false;
+			}
 			_sharedD3D11BridgePreviewFailureReason = null;
 			return true;
 		}
@@ -569,7 +592,7 @@ internal sealed class Direct3D12SwapChainRenderer : IDisposable
 		}
 	}
 
-	private void RenderNativeNv12Resource(ID3D12Resource cameraResource, int width, int height, VideoFrameColorSettings colorSettings, bool denoiseEnabled, double denoiseStrength, PreviewTrackingOverlay trackingOverlay)
+	private bool RenderNativeNv12Resource(ID3D12Resource cameraResource, int width, int height, VideoFrameColorSettings colorSettings, bool denoiseEnabled, double denoiseStrength, PreviewTrackingOverlay trackingOverlay)
 	{
 		ShaderResourceViewDescription value = new ShaderResourceViewDescription
 		{
@@ -595,8 +618,10 @@ internal sealed class Direct3D12SwapChainRenderer : IDisposable
 		};
 		_device.CreateShaderResourceView(cameraResource, value, GetSrvCpuHandle(1));
 		_device.CreateShaderResourceView(cameraResource, value2, GetSrvCpuHandle(2));
-		int frameIndex;
-		FrameResource frameResource = BeginFrame(out frameIndex);
+		if (!TryBeginFrame(out FrameResource frameResource, out int frameIndex))
+		{
+			return false;
+		}
 		ID3D12Resource resource = _renderTargets[frameIndex] ?? throw new InvalidOperationException("DX12 render target is not ready.");
 		ResourceBarrier resourceBarrier = ResourceBarrier.BarrierTransition(cameraResource, ResourceStates.Common, ResourceStates.PixelShaderResource);
 		ResourceBarrier resourceBarrier2 = ResourceBarrier.BarrierTransition(resource, ResourceStates.Common, ResourceStates.RenderTarget);
@@ -623,6 +648,7 @@ internal sealed class Direct3D12SwapChainRenderer : IDisposable
 		ResourceBarrier resourceBarrier4 = ResourceBarrier.BarrierTransition(cameraResource, ResourceStates.PixelShaderResource, ResourceStates.Common);
 		_commandList.ResourceBarrier((!flag) ? new ResourceBarrier[2] { resourceBarrier3, resourceBarrier4 } : new ResourceBarrier[1] { resourceBarrier4 });
 		ExecuteAndPresent(frameResource, frameIndex, trackingOverlay, flag);
+		return true;
 	}
 
 	private bool TryRenderNv12FrameWithShader(byte[] nv12Bytes, int width, int height, int stride, VideoFrameColorSettings colorSettings, bool denoiseEnabled, double denoiseStrength, PreviewTrackingOverlay trackingOverlay, bool swapChromaChannels)
@@ -634,11 +660,16 @@ internal sealed class Direct3D12SwapChainRenderer : IDisposable
 		}
 		try
 		{
-			EnsureNv12Textures(width, height);
+			if (!TryEnsureNv12Textures(width, height))
+			{
+				return false;
+			}
 			ID3D12Resource? nv12YTexture = _nv12YTexture;
 			ID3D12Resource? nv12UvTexture = _nv12UvTexture;
-			int frameIndex;
-			FrameResource frameResource = BeginFrame(out frameIndex);
+			if (!TryBeginFrame(out FrameResource frameResource, out int frameIndex))
+			{
+				return false;
+			}
 			ID3D12Resource? nv12YUploadBuffer = frameResource.Nv12YUploadBuffer;
 			ID3D12Resource? nv12UvUploadBuffer = frameResource.Nv12UvUploadBuffer;
 			if (nv12YTexture is null || nv12UvTexture is null || nv12YUploadBuffer is null || nv12UvUploadBuffer is null)
@@ -718,10 +749,15 @@ internal sealed class Direct3D12SwapChainRenderer : IDisposable
 		}
 		try
 		{
-			EnsureCameraTexture(width, height);
+			if (!TryEnsureCameraTexture(width, height))
+			{
+				return false;
+			}
 			ID3D12Resource? cameraTexture = _cameraTexture;
-			int frameIndex;
-			FrameResource frameResource = BeginFrame(out frameIndex);
+			if (!TryBeginFrame(out FrameResource frameResource, out int frameIndex))
+			{
+				return false;
+			}
 			ID3D12Resource? cameraUploadBuffer = frameResource.CameraUploadBuffer;
 			if (cameraTexture is null || cameraUploadBuffer is null)
 			{
@@ -779,53 +815,15 @@ internal sealed class Direct3D12SwapChainRenderer : IDisposable
 		}
 	}
 
-	private unsafe void RenderBgraFrameToBackBuffer(byte[] bgraBytes, int width, int height, int stride, PreviewTrackingOverlay trackingOverlay)
-	{
-		if (width == _viewportWidth && height == _viewportHeight)
-		{
-			int frameIndex;
-			FrameResource frameResource = BeginFrame(out frameIndex);
-			ID3D12Resource iD3D12Resource = _renderTargets[frameIndex] ?? throw new InvalidOperationException("DX12 render target is not ready.");
-			ResourceBarrier resourceBarrier = ResourceBarrier.BarrierTransition(iD3D12Resource, ResourceStates.Common, ResourceStates.Common);
-			ID3D12GraphicsCommandList commandList = _commandList;
-			ResourceBarrier reference = resourceBarrier;
-			commandList.ResourceBarrier(new Span<ResourceBarrier>(ref reference));
-			_commandList.Close();
-			_commandQueue.ExecuteCommandList(_commandList);
-			WaitForGpu();
-			fixed (byte* srcData = bgraBytes)
-			{
-				iD3D12Resource.WriteToSubresource(0u, null, (nint)srcData, (uint)stride, (uint)(stride * height));
-			}
-			frameResource.CommandAllocator.Reset();
-			_commandList.Reset(frameResource.CommandAllocator);
-			ResourceBarrier resourceBarrier2 = ResourceBarrier.BarrierTransition(iD3D12Resource, ResourceStates.Common, ResourceStates.RenderTarget);
-			ID3D12GraphicsCommandList commandList2 = _commandList;
-			ResourceBarrier reference2 = resourceBarrier2;
-			commandList2.ResourceBarrier(new Span<ResourceBarrier>(ref reference2));
-			CpuDescriptorHandle rtvHandle = GetRtvHandle(frameIndex);
-			Viewport viewport = new Viewport(0f, 0f, _viewportWidth, _viewportHeight);
-			RawRect rawRect = new RawRect(0, 0, _viewportWidth, _viewportHeight);
-			_commandList.RSSetViewports(viewport);
-			_commandList.RSSetScissorRects(rawRect);
-			_commandList.OMSetRenderTargets(rtvHandle);
-			bool flag = _trackingOverlayRenderer?.PrepareDraw(frameIndex, trackingOverlay, _viewportWidth, _viewportHeight) ?? false;
-			ResourceBarrier resourceBarrier3 = ResourceBarrier.BarrierTransition(iD3D12Resource, ResourceStates.RenderTarget, ResourceStates.Common);
-			if (!flag)
-			{
-				ID3D12GraphicsCommandList commandList3 = _commandList;
-				ResourceBarrier reference3 = resourceBarrier3;
-				commandList3.ResourceBarrier(new Span<ResourceBarrier>(ref reference3));
-			}
-			ExecuteAndPresent(frameResource, frameIndex, trackingOverlay, flag);
-		}
-	}
-
-	private void EnsureCameraTexture(int width, int height)
+	private bool TryEnsureCameraTexture(int width, int height)
 	{
 		if (_cameraTexture is null || !CameraUploadBuffersReady() || _cameraTextureWidth != width || _cameraTextureHeight != height)
 		{
-			WaitForGpu();
+			if (!AreAllFrameResourcesAvailable())
+			{
+				Interlocked.Exchange(ref _lastRenderAttemptWasBusy, 1);
+				return false;
+			}
 			_cameraTexture?.Dispose();
 			ReleaseCameraUploadBuffers();
 			_cameraTexture = null;
@@ -856,13 +854,18 @@ internal sealed class Direct3D12SwapChainRenderer : IDisposable
 			};
 			_device.CreateShaderResourceView(_cameraTexture, value, _srvHeap.GetCPUDescriptorHandleForHeapStart());
 		}
+		return true;
 	}
 
-	private void EnsureNv12Textures(int width, int height)
+	private bool TryEnsureNv12Textures(int width, int height)
 	{
 		if (_nv12YTexture is null || _nv12UvTexture is null || !Nv12UploadBuffersReady() || _nv12TextureWidth != width || _nv12TextureHeight != height)
 		{
-			WaitForGpu();
+			if (!AreAllFrameResourcesAvailable())
+			{
+				Interlocked.Exchange(ref _lastRenderAttemptWasBusy, 1);
+				return false;
+			}
 			_nv12YTexture?.Dispose();
 			_nv12UvTexture?.Dispose();
 			ReleaseNv12UploadBuffers();
@@ -906,6 +909,7 @@ internal sealed class Direct3D12SwapChainRenderer : IDisposable
 			_device.CreateShaderResourceView(_nv12YTexture, value, GetSrvCpuHandle(1));
 			_device.CreateShaderResourceView(_nv12UvTexture, value2, GetSrvCpuHandle(2));
 		}
+		return true;
 	}
 
 	private PlacedSubresourceFootPrint GetTextureFootprint(ResourceDescription description, out ulong uploadBytes)
@@ -1047,8 +1051,10 @@ internal sealed class Direct3D12SwapChainRenderer : IDisposable
 	{
 		try
 		{
-			byte[] array = CompileShader("VSMain", "vs_5_0");
-			byte[] array2 = CompileShader("PSMain", "ps_5_0");
+			byte[] array =
+				EmbeddedShaderBytecode.Load("PreviewBgra.vs.cso");
+			byte[] array2 =
+				EmbeddedShaderBytecode.Load("PreviewBgra.ps.cso");
 			DescriptorRange[] ranges = new DescriptorRange[1]
 			{
 				new DescriptorRange(DescriptorRangeType.ShaderResourceView, 1u, 0u)
@@ -1088,70 +1094,87 @@ internal sealed class Direct3D12SwapChainRenderer : IDisposable
 		}
 	}
 
+
 	private void TryCreateNv12PreviewShaderPipeline()
 	{
 		try
 		{
-			byte[] array = CompileShader("Texture2D<float> CameraLuma : register(t0);\r\nTexture2D<float2> CameraChroma : register(t1);\r\nSamplerState CameraSampler : register(s0);\r\n\r\ncbuffer Nv12PreviewSettings : register(b0)\r\n{\r\n    float ExposureOffset;\r\n    float Contrast;\r\n    float Saturation;\r\n    float Warmth;\r\n    float DenoiseAmount;\r\n    float DenoiseEdgeThreshold;\n    float TexelWidth;\n    float TexelHeight;\n    float SwapChromaChannels;\n};\n\r\nstruct VertexOutput\r\n{\r\n    float4 Position : SV_POSITION;\r\n    float2 TexCoord : TEXCOORD0;\r\n};\r\n\r\nVertexOutput VSMain(uint vertexId : SV_VertexID)\r\n{\r\n    float2 positions[3] =\r\n    {\r\n        float2(-1.0, -1.0),\r\n        float2(-1.0, 3.0),\r\n        float2(3.0, -1.0)\r\n    };\r\n    float2 texCoords[3] =\r\n    {\r\n        float2(0.0, 1.0),\r\n        float2(0.0, -1.0),\r\n        float2(2.0, 1.0)\r\n    };\r\n\r\n    VertexOutput output;\r\n    output.Position = float4(positions[vertexId], 0.0, 1.0);\r\n    output.TexCoord = texCoords[vertexId];\r\n    return output;\r\n}\r\n\r\nfloat NormalizeLuma(float rawY)\r\n{\r\n    return saturate((rawY - (16.0 / 255.0)) * (255.0 / 219.0));\r\n}\r\n\r\nfloat EdgeAwareWeight(float sampleY, float centerY)\r\n{\r\n    return saturate(1.0 - abs(sampleY - centerY) / max(DenoiseEdgeThreshold, 0.0001));\r\n}\r\n\r\nfloat SampleNormalizedLuma(float2 texCoord)\r\n{\r\n    return NormalizeLuma(CameraLuma.Sample(CameraSampler, texCoord));\r\n}\r\n\r\nfloat ApplyLumaDenoise(float centerY, float2 texCoord)\r\n{\r\n    if (DenoiseAmount <= 0.001)\r\n    {\r\n        return centerY;\r\n    }\r\n\r\n    float2 xOffset = float2(TexelWidth, 0.0);\r\n    float2 yOffset = float2(0.0, TexelHeight);\r\n    float leftY = SampleNormalizedLuma(texCoord - xOffset);\r\n    float rightY = SampleNormalizedLuma(texCoord + xOffset);\r\n    float upY = SampleNormalizedLuma(texCoord - yOffset);\r\n    float downY = SampleNormalizedLuma(texCoord + yOffset);\r\n\r\n    float centerWeight = 2.0;\r\n    float leftWeight = EdgeAwareWeight(leftY, centerY);\r\n    float rightWeight = EdgeAwareWeight(rightY, centerY);\r\n    float upWeight = EdgeAwareWeight(upY, centerY);\r\n    float downWeight = EdgeAwareWeight(downY, centerY);\r\n    float totalWeight = centerWeight + leftWeight + rightWeight + upWeight + downWeight;\r\n    float smoothedY = (\r\n        centerY * centerWeight\r\n        + leftY * leftWeight\r\n        + rightY * rightWeight\r\n        + upY * upWeight\r\n        + downY * downWeight) / max(totalWeight, 0.0001);\r\n    return lerp(centerY, smoothedY, DenoiseAmount);\r\n}\r\n\r\nfloat3 ApplyColorPolish(float3 rgb)\r\n{\r\n    float3 rgb255 = rgb * 255.0;\r\n    rgb255.r = ((rgb255.r + ExposureOffset + Warmth - 128.0) * Contrast) + 128.0;\r\n    rgb255.g = ((rgb255.g + ExposureOffset - 128.0) * Contrast) + 128.0;\r\n    rgb255.b = ((rgb255.b + ExposureOffset - Warmth - 128.0) * Contrast) + 128.0;\r\n\r\n    float luma = dot(rgb255, float3(0.2126, 0.7152, 0.0722));\r\n    rgb255 = luma + (rgb255 - luma) * Saturation;\r\n    return saturate(rgb255 / 255.0);\r\n}\r\n\r\nfloat4 PSMain(VertexOutput input) : SV_TARGET\r\n{\r\n    float y = NormalizeLuma(CameraLuma.Sample(CameraSampler, input.TexCoord));\n    y = ApplyLumaDenoise(y, input.TexCoord);\n    float2 uv = CameraChroma.Sample(CameraSampler, input.TexCoord) - float2(0.5, 0.5);\n    uv = SwapChromaChannels > 0.5 ? uv.yx : uv;\n    float3 rgb = float3(\n        y + 1.5748 * uv.y,\r\n        y - 0.1873 * uv.x - 0.4681 * uv.y,\r\n        y + 1.8556 * uv.x);\r\n    return float4(ApplyColorPolish(saturate(rgb)), 1.0);\r\n}", "VSMain", "vs_5_0");
-			byte[] array2 = CompileShader("Texture2D<float> CameraLuma : register(t0);\r\nTexture2D<float2> CameraChroma : register(t1);\r\nSamplerState CameraSampler : register(s0);\r\n\r\ncbuffer Nv12PreviewSettings : register(b0)\r\n{\r\n    float ExposureOffset;\r\n    float Contrast;\r\n    float Saturation;\r\n    float Warmth;\r\n    float DenoiseAmount;\r\n    float DenoiseEdgeThreshold;\n    float TexelWidth;\n    float TexelHeight;\n    float SwapChromaChannels;\n};\n\r\nstruct VertexOutput\r\n{\r\n    float4 Position : SV_POSITION;\r\n    float2 TexCoord : TEXCOORD0;\r\n};\r\n\r\nVertexOutput VSMain(uint vertexId : SV_VertexID)\r\n{\r\n    float2 positions[3] =\r\n    {\r\n        float2(-1.0, -1.0),\r\n        float2(-1.0, 3.0),\r\n        float2(3.0, -1.0)\r\n    };\r\n    float2 texCoords[3] =\r\n    {\r\n        float2(0.0, 1.0),\r\n        float2(0.0, -1.0),\r\n        float2(2.0, 1.0)\r\n    };\r\n\r\n    VertexOutput output;\r\n    output.Position = float4(positions[vertexId], 0.0, 1.0);\r\n    output.TexCoord = texCoords[vertexId];\r\n    return output;\r\n}\r\n\r\nfloat NormalizeLuma(float rawY)\r\n{\r\n    return saturate((rawY - (16.0 / 255.0)) * (255.0 / 219.0));\r\n}\r\n\r\nfloat EdgeAwareWeight(float sampleY, float centerY)\r\n{\r\n    return saturate(1.0 - abs(sampleY - centerY) / max(DenoiseEdgeThreshold, 0.0001));\r\n}\r\n\r\nfloat SampleNormalizedLuma(float2 texCoord)\r\n{\r\n    return NormalizeLuma(CameraLuma.Sample(CameraSampler, texCoord));\r\n}\r\n\r\nfloat ApplyLumaDenoise(float centerY, float2 texCoord)\r\n{\r\n    if (DenoiseAmount <= 0.001)\r\n    {\r\n        return centerY;\r\n    }\r\n\r\n    float2 xOffset = float2(TexelWidth, 0.0);\r\n    float2 yOffset = float2(0.0, TexelHeight);\r\n    float leftY = SampleNormalizedLuma(texCoord - xOffset);\r\n    float rightY = SampleNormalizedLuma(texCoord + xOffset);\r\n    float upY = SampleNormalizedLuma(texCoord - yOffset);\r\n    float downY = SampleNormalizedLuma(texCoord + yOffset);\r\n\r\n    float centerWeight = 2.0;\r\n    float leftWeight = EdgeAwareWeight(leftY, centerY);\r\n    float rightWeight = EdgeAwareWeight(rightY, centerY);\r\n    float upWeight = EdgeAwareWeight(upY, centerY);\r\n    float downWeight = EdgeAwareWeight(downY, centerY);\r\n    float totalWeight = centerWeight + leftWeight + rightWeight + upWeight + downWeight;\r\n    float smoothedY = (\r\n        centerY * centerWeight\r\n        + leftY * leftWeight\r\n        + rightY * rightWeight\r\n        + upY * upWeight\r\n        + downY * downWeight) / max(totalWeight, 0.0001);\r\n    return lerp(centerY, smoothedY, DenoiseAmount);\r\n}\r\n\r\nfloat3 ApplyColorPolish(float3 rgb)\r\n{\r\n    float3 rgb255 = rgb * 255.0;\r\n    rgb255.r = ((rgb255.r + ExposureOffset + Warmth - 128.0) * Contrast) + 128.0;\r\n    rgb255.g = ((rgb255.g + ExposureOffset - 128.0) * Contrast) + 128.0;\r\n    rgb255.b = ((rgb255.b + ExposureOffset - Warmth - 128.0) * Contrast) + 128.0;\r\n\r\n    float luma = dot(rgb255, float3(0.2126, 0.7152, 0.0722));\r\n    rgb255 = luma + (rgb255 - luma) * Saturation;\r\n    return saturate(rgb255 / 255.0);\r\n}\r\n\r\nfloat4 PSMain(VertexOutput input) : SV_TARGET\r\n{\r\n    float y = NormalizeLuma(CameraLuma.Sample(CameraSampler, input.TexCoord));\n    y = ApplyLumaDenoise(y, input.TexCoord);\n    float2 uv = CameraChroma.Sample(CameraSampler, input.TexCoord) - float2(0.5, 0.5);\n    uv = SwapChromaChannels > 0.5 ? uv.yx : uv;\n    float3 rgb = float3(\n        y + 1.5748 * uv.y,\r\n        y - 0.1873 * uv.x - 0.4681 * uv.y,\r\n        y + 1.8556 * uv.x);\r\n    return float4(ApplyColorPolish(saturate(rgb)), 1.0);\r\n}", "PSMain", "ps_5_0");
-			DescriptorRange[] ranges = new DescriptorRange[1]
-			{
-				new DescriptorRange(DescriptorRangeType.ShaderResourceView, 2u, 0u)
-			};
-			RootParameter[] parameters = new RootParameter[2]
-			{
-				new RootParameter(new RootDescriptorTable(ranges), ShaderVisibility.Pixel),
-				new RootParameter(new RootConstants(0u, 0u, 9u), ShaderVisibility.Pixel)
-			};
-			StaticSamplerDescription[] samplers = new StaticSamplerDescription[1]
-			{
-				new StaticSamplerDescription(0u, Filter.MinMagMipLinear, TextureAddressMode.Clamp, TextureAddressMode.Clamp, TextureAddressMode.Clamp, 0f, 0u, ComparisonFunction.Never, StaticBorderColor.TransparentBlack, 0f, float.MaxValue, ShaderVisibility.Pixel)
-			};
-			RootSignatureDescription description = new RootSignatureDescription(RootSignatureFlags.AllowInputAssemblerInputLayout, parameters, samplers);
-			_nv12PreviewRootSignature = _device.CreateRootSignature(in description, RootSignatureVersion.Version1);
-			GraphicsPipelineStateDescription graphicsPipelineStateDescription = new GraphicsPipelineStateDescription();
-			graphicsPipelineStateDescription.RootSignature = _nv12PreviewRootSignature;
-			graphicsPipelineStateDescription.VertexShader = array;
-			graphicsPipelineStateDescription.PixelShader = array2;
-			graphicsPipelineStateDescription.BlendState = BlendDescription.Opaque;
-			graphicsPipelineStateDescription.RasterizerState = RasterizerDescription.CullNone;
-			graphicsPipelineStateDescription.DepthStencilState = DepthStencilDescription.None;
-			graphicsPipelineStateDescription.SampleMask = uint.MaxValue;
-			graphicsPipelineStateDescription.PrimitiveTopologyType = PrimitiveTopologyType.Triangle;
-			graphicsPipelineStateDescription.RenderTargetFormats = new Format[1] { Format.B8G8R8A8_UNorm };
-			graphicsPipelineStateDescription.SampleDescription = new SampleDescription(1u, 0u);
-			GraphicsPipelineStateDescription description2 = graphicsPipelineStateDescription;
-			_nv12PreviewPipelineState = _device.CreateGraphicsPipelineState<ID3D12PipelineState>(description2);
+			byte[] vertexShader =
+				EmbeddedShaderBytecode.Load("PreviewNv12.vs.cso");
+			byte[] pixelShader =
+				EmbeddedShaderBytecode.Load("PreviewNv12.ps.cso");
+			DescriptorRange[] ranges =
+			[
+				new DescriptorRange(
+					DescriptorRangeType.ShaderResourceView,
+					2u,
+					0u)
+			];
+			RootParameter[] parameters =
+			[
+				new RootParameter(
+					new RootDescriptorTable(ranges),
+					ShaderVisibility.Pixel),
+				new RootParameter(
+					new RootConstants(0u, 0u, 9u),
+					ShaderVisibility.Pixel)
+			];
+			StaticSamplerDescription[] samplers =
+			[
+				new StaticSamplerDescription(
+					0u,
+					Filter.MinMagMipLinear,
+					TextureAddressMode.Clamp,
+					TextureAddressMode.Clamp,
+					TextureAddressMode.Clamp,
+					0f,
+					0u,
+					ComparisonFunction.Never,
+					StaticBorderColor.TransparentBlack,
+					0f,
+					float.MaxValue,
+					ShaderVisibility.Pixel)
+			];
+			RootSignatureDescription rootDescription = new(
+				RootSignatureFlags.AllowInputAssemblerInputLayout,
+				parameters,
+				samplers);
+			_nv12PreviewRootSignature = _device.CreateRootSignature(
+				in rootDescription,
+				RootSignatureVersion.Version1);
+			_nv12PreviewPipelineState =
+				_device.CreateGraphicsPipelineState<ID3D12PipelineState>(
+					new GraphicsPipelineStateDescription
+					{
+						RootSignature = _nv12PreviewRootSignature,
+						VertexShader = vertexShader,
+						PixelShader = pixelShader,
+						BlendState = BlendDescription.Opaque,
+						RasterizerState = RasterizerDescription.CullNone,
+						DepthStencilState = DepthStencilDescription.None,
+						SampleMask = uint.MaxValue,
+						PrimitiveTopologyType =
+							PrimitiveTopologyType.Triangle,
+						RenderTargetFormats =
+							[Format.B8G8R8A8_UNorm],
+						SampleDescription =
+							new SampleDescription(1u, 0u)
+					});
 		}
 		catch (Exception ex)
 		{
 			_nv12PreviewUnavailable = true;
-			_nv12PreviewFailureReason = "NV12 shader pipeline creation failed: " + ex.Message;
+			_nv12PreviewFailureReason =
+				"NV12 shader pipeline creation failed: " + ex.Message;
 		}
-	}
-
-	private static byte[] CompileShader(string entryPoint, string profile)
-	{
-		return CompileShader("Texture2D<float4> CameraFrame : register(t0);\r\nSamplerState CameraSampler : register(s0);\r\n\r\ncbuffer ColorSettings : register(b0)\r\n{\r\n    float ExposureOffset;\r\n    float Contrast;\r\n    float Saturation;\r\n    float Warmth;\r\n    float DenoiseAmount;\r\n    float DenoiseEdgeThreshold;\n    float TexelWidth;\n    float TexelHeight;\n};\n\r\nstruct VertexOutput\r\n{\r\n    float4 Position : SV_POSITION;\r\n    float2 TexCoord : TEXCOORD0;\r\n};\r\n\r\nVertexOutput VSMain(uint vertexId : SV_VertexID)\r\n{\r\n    float2 positions[3] =\r\n    {\r\n        float2(-1.0, -1.0),\r\n        float2(-1.0, 3.0),\r\n        float2(3.0, -1.0)\r\n    };\r\n    float2 texCoords[3] =\r\n    {\r\n        float2(0.0, 1.0),\r\n        float2(0.0, -1.0),\r\n        float2(2.0, 1.0)\r\n    };\r\n\r\n    VertexOutput output;\r\n    output.Position = float4(positions[vertexId], 0.0, 1.0);\r\n    output.TexCoord = texCoords[vertexId];\r\n    return output;\r\n}\r\n\r\nfloat3 ApplyColorPolish(float3 rgb)\r\n{\r\n    float3 rgb255 = rgb * 255.0;\r\n    rgb255.r = ((rgb255.r + ExposureOffset + Warmth - 128.0) * Contrast) + 128.0;\r\n    rgb255.g = ((rgb255.g + ExposureOffset - 128.0) * Contrast) + 128.0;\r\n    rgb255.b = ((rgb255.b + ExposureOffset - Warmth - 128.0) * Contrast) + 128.0;\r\n\r\n    float luma = dot(rgb255, float3(0.2126, 0.7152, 0.0722));\r\n    rgb255 = luma + (rgb255 - luma) * Saturation;\r\n    return saturate(rgb255 / 255.0);\r\n}\r\n\r\nfloat Luma(float3 rgb)\r\n{\r\n    return dot(rgb, float3(0.2126, 0.7152, 0.0722));\r\n}\r\n\r\nfloat EdgeAwareWeight(float sampleY, float centerY)\r\n{\r\n    return saturate(1.0 - abs(sampleY - centerY) / max(DenoiseEdgeThreshold, 0.0001));\r\n}\r\n\r\nfloat3 ApplyBgraDenoise(float3 centerRgb, float2 texCoord)\r\n{\r\n    if (DenoiseAmount <= 0.001)\r\n    {\r\n        return centerRgb;\r\n    }\r\n\r\n    float2 xOffset = float2(TexelWidth, 0.0);\r\n    float2 yOffset = float2(0.0, TexelHeight);\r\n    float3 leftRgb = CameraFrame.Sample(CameraSampler, texCoord - xOffset).rgb;\r\n    float3 rightRgb = CameraFrame.Sample(CameraSampler, texCoord + xOffset).rgb;\r\n    float3 upRgb = CameraFrame.Sample(CameraSampler, texCoord - yOffset).rgb;\r\n    float3 downRgb = CameraFrame.Sample(CameraSampler, texCoord + yOffset).rgb;\r\n\r\n    float centerY = Luma(centerRgb);\r\n    float centerWeight = 2.0;\r\n    float leftWeight = EdgeAwareWeight(Luma(leftRgb), centerY);\r\n    float rightWeight = EdgeAwareWeight(Luma(rightRgb), centerY);\r\n    float upWeight = EdgeAwareWeight(Luma(upRgb), centerY);\r\n    float downWeight = EdgeAwareWeight(Luma(downRgb), centerY);\r\n    float totalWeight = centerWeight + leftWeight + rightWeight + upWeight + downWeight;\r\n    float3 smoothedRgb = (\r\n        centerRgb * centerWeight\r\n        + leftRgb * leftWeight\r\n        + rightRgb * rightWeight\r\n        + upRgb * upWeight\r\n        + downRgb * downWeight) / max(totalWeight, 0.0001);\r\n    return lerp(centerRgb, smoothedRgb, DenoiseAmount);\r\n}\r\n\r\nfloat4 PSMain(VertexOutput input) : SV_TARGET\r\n{\r\n    float4 color = CameraFrame.Sample(CameraSampler, input.TexCoord);\r\n    float3 denoised = ApplyBgraDenoise(color.rgb, input.TexCoord);\r\n    return float4(ApplyColorPolish(denoised), 1.0);\r\n}", entryPoint, profile);
-	}
-
-	private static byte[] CompileShader(string shaderSource, string entryPoint, string profile)
-	{
-		return Compiler.Compile(shaderSource, entryPoint, "AvatarBuilderPreview.hlsl", profile, ShaderFlags.OptimizationLevel3).ToArray();
 	}
 
 	public void Resize(int width, int height)
 	{
 		if (!_disposed && width > 0 && height > 0 && (width != _viewportWidth || height != _viewportHeight))
 		{
-			WaitForGpu();
-			_trackingOverlayRenderer?.ReleaseBackBuffers();
-			ReleaseRenderTargets();
-			_swapChain.ResizeBuffers(3u, (uint)width, (uint)height, Format.B8G8R8A8_UNorm, SwapChainFlags.None);
-			_viewportWidth = width;
-			_viewportHeight = height;
-			CreateRenderTargetViews();
-			TryAttachTrackingOverlayRenderer();
+			_pendingViewportWidth = width;
+			_pendingViewportHeight = height;
 		}
 	}
 
@@ -1264,15 +1287,64 @@ internal sealed class Direct3D12SwapChainRenderer : IDisposable
 		}
 	}
 
-	private FrameResource BeginFrame(out int frameIndex)
+	private bool TryBeginFrame(out FrameResource frameResource, out int frameIndex)
 	{
+		Interlocked.Exchange(ref _lastRenderAttemptWasBusy, 0);
 		RefreshPresentationResourcesIfRequested();
+		TryApplyPendingResize();
 		frameIndex = (int)_swapChain.CurrentBackBufferIndex;
-		FrameResource frameResource = _frameResources[frameIndex];
-		WaitForFrameResource(frameResource);
+		frameResource = _frameResources[frameIndex];
+		if (frameResource.FenceValue != 0uL
+			&& _fence.CompletedValue < frameResource.FenceValue)
+		{
+			Interlocked.Exchange(ref _lastRenderAttemptWasBusy, 1);
+			frameResource = null!;
+			return false;
+		}
+		frameResource.FenceValue = 0uL;
 		frameResource.CommandAllocator.Reset();
 		_commandList.Reset(frameResource.CommandAllocator);
-		return frameResource;
+		return true;
+	}
+
+	private void TryApplyPendingResize()
+	{
+		int width = _pendingViewportWidth;
+		int height = _pendingViewportHeight;
+		if (width <= 0
+			|| height <= 0
+			|| (width == _viewportWidth && height == _viewportHeight)
+			|| !AreAllFrameResourcesAvailable())
+		{
+			return;
+		}
+		_trackingOverlayRenderer?.ReleaseBackBuffers();
+		ReleaseRenderTargets();
+		_swapChain.ResizeBuffers(3u, (uint)width, (uint)height, Format.B8G8R8A8_UNorm, SwapChainFlags.None);
+		_viewportWidth = width;
+		_viewportHeight = height;
+		_pendingViewportWidth = 0;
+		_pendingViewportHeight = 0;
+		CreateRenderTargetViews();
+		TryAttachTrackingOverlayRenderer();
+	}
+
+	private bool AreAllFrameResourcesAvailable()
+	{
+		if (_disposed)
+		{
+			return false;
+		}
+		ulong completedValue = _fence.CompletedValue;
+		foreach (FrameResource frameResource in _frameResources)
+		{
+			if (frameResource.FenceValue != 0uL
+				&& completedValue < frameResource.FenceValue)
+			{
+				return false;
+			}
+		}
+		return true;
 	}
 
 	private void RefreshPresentationResourcesIfRequested()
@@ -1355,24 +1427,6 @@ internal sealed class Direct3D12SwapChainRenderer : IDisposable
 			Thread.Sleep(1);
 		}
 		return _disposed || _fence.CompletedValue >= fenceValue;
-	}
-
-	private void WaitForFrameResource(FrameResource frameResource)
-	{
-		if (!_disposed && frameResource.FenceValue != 0L)
-		{
-			if (_fence.CompletedValue < frameResource.FenceValue)
-			{
-				_fence.SetEventOnCompletion(frameResource.FenceValue, _fenceEvent);
-				if (!_fenceEvent.WaitOne(GpuOperationTimeout))
-				{
-					throw new TimeoutException(
-						"DX12 preview GPU did not release a frame resource within " +
-						$"{GpuOperationTimeout.TotalSeconds:0.#} seconds.");
-				}
-			}
-			frameResource.FenceValue = 0uL;
-		}
 	}
 
 	private void ClearFrameFenceValues()

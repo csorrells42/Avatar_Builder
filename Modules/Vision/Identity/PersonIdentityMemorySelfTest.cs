@@ -118,6 +118,50 @@ public static class PersonIdentityMemorySelfTest
 				return Fail(
 					"Retained face memory was not saved.");
 			}
+			byte[] header = new byte[16];
+			using (FileStream stream = new(
+				storePath,
+				FileMode.Open,
+				FileAccess.Read,
+				FileShare.ReadWrite | FileShare.Delete))
+			{
+				if (stream.Read(header, 0, header.Length) != header.Length
+					|| !string.Equals(
+						System.Text.Encoding.ASCII.GetString(header),
+						"SQLite format 3\0",
+						StringComparison.Ordinal))
+				{
+					return Fail(
+						"People memory was not stored as the current SQLite format.");
+				}
+			}
+			PersonIdentityReviewItem firstReview = memory
+				.GetIdentityReviewItems()
+				.Single(item => string.Equals(
+					item.AvatarProfileId,
+					"profile-a",
+					StringComparison.Ordinal));
+			if (!memory.UpdateIdentityReview(
+				firstReview.IdentityId,
+				"Christopher Test",
+				registerAsUser: true,
+				"Superuser"))
+			{
+				return Fail(
+					"Identity review could not update a retained person.");
+			}
+			var store = new PersonIdentityMemoryStore();
+			store.SaveContextPhoto(
+				root,
+				firstReview.IdentityId,
+				[0xff, 0xd8, 0xff, 0xd9]);
+			if (!File.Exists(store.GetContextPhotoPath(
+				root,
+				firstReview.IdentityId)))
+			{
+				return Fail(
+					"The retained identity context photo was not saved.");
+			}
 			using var reloaded = new PersonIdentityMemory(
 				initializeModels: false);
 			reloaded.ConfigureOutputFolder(root);
@@ -126,11 +170,42 @@ public static class PersonIdentityMemorySelfTest
 				return Fail(
 					"Two retained people did not survive a store reload.");
 			}
+			PersonIdentityReviewItem reloadedFirst = reloaded
+				.GetIdentityReviewItems()
+				.Single(item => string.Equals(
+					item.IdentityId,
+					firstReview.IdentityId,
+					StringComparison.OrdinalIgnoreCase));
+			if (!string.Equals(
+					reloadedFirst.DisplayName,
+					"Christopher Test",
+					StringComparison.Ordinal)
+				|| !reloadedFirst.IsRegisteredUser
+				|| !string.Equals(
+					reloadedFirst.PermissionLevel,
+					"Superuser",
+					StringComparison.Ordinal)
+				|| !File.Exists(reloadedFirst.ContextPhotoPath))
+			{
+				return Fail(
+					"Identity name, registration, role, or context photo " +
+					"did not survive review and reload.");
+			}
+			if (Directory.EnumerateFiles(
+				Path.GetDirectoryName(storePath)!,
+				"*.json",
+				SearchOption.TopDirectoryOnly).Any())
+			{
+				return Fail(
+					"A deprecated JSON people-memory store was written.");
+			}
 			return new PersonIdentityMemorySelfTestResult(
 				true,
 				"PASS: brief sightings expired without persistence; " +
 				"two sustained people were retained and reloaded; " +
-				"explicit avatar linking enforced a one-to-one mapping.");
+				"explicit avatar linking enforced a one-to-one mapping; " +
+				"SQLite identity review, Superuser labeling, and the " +
+				"full-context photo path round-tripped.");
 		}
 		catch (Exception ex)
 		{
