@@ -6,6 +6,8 @@ namespace AvatarBuilder.Modules.Vision.Common;
 
 public sealed class FaceLandmarkFrame
 {
+	private static readonly IReadOnlyDictionary<string, double> EmptyBlendshapeScores = new Dictionary<string, double>(0, StringComparer.OrdinalIgnoreCase);
+
 	public static FaceLandmarkFrame None { get; } = new FaceLandmarkFrame();
 
 	public bool HasFace { get; init; }
@@ -54,7 +56,15 @@ public sealed class FaceLandmarkFrame
 
 	public double HeadRollDegrees { get; init; }
 
-	public IReadOnlyDictionary<string, double> BlendshapeScores { get; init; } = new Dictionary<string, double>(StringComparer.OrdinalIgnoreCase);
+	public IReadOnlyDictionary<string, double> BlendshapeScores { get; init; } = EmptyBlendshapeScores;
+
+	public double? MediaPipeEyeBlinkLeftScore { get; init; }
+
+	public double? MediaPipeEyeBlinkRightScore { get; init; }
+
+	public double? MediaPipeJawOpenScore { get; init; }
+
+	public double? MediaPipeMouthCloseScore { get; init; }
 
 	public string DenseMeshTopology { get; init; } = "";
 

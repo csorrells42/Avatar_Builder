@@ -1,8 +1,8 @@
 using System;
+using System.Diagnostics;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Threading;
-using System.Threading.Tasks;
 using AvatarBuilder.Modules.Webcam.Common;
 using AvatarBuilder.Modules.Webcam.DirectX11;
 using AvatarBuilder.Modules.Webcam.MediaFoundation;
@@ -11,6 +11,8 @@ namespace AvatarBuilder.Modules.Webcam.DirectX12;
 
 public sealed class TextureNativeCameraStream : IDisposable
 {
+	private sealed record AcceptedSourceSample(IMFSample Sample, long FrameNumber, long CapturedAtTimestamp, DateTime CapturedAtUtc);
+
 	private static readonly TimeSpan StreamStartTimeout = TimeSpan.FromSeconds(8L);
 
 	private static readonly TimeSpan StreamStopTimeout = TimeSpan.FromSeconds(3L);
@@ -18,6 +20,8 @@ public sealed class TextureNativeCameraStream : IDisposable
 	private readonly object _stateLock = new object();
 
 	private readonly object _processedDenoiseLock = new object();
+
+	private readonly object _recordingWriteLock = new object();
 
 	private readonly CameraDevice _camera;
 
@@ -27,6 +31,14 @@ public sealed class TextureNativeCameraStream : IDisposable
 
 	private readonly CancellationTokenSource _cancellation = new CancellationTokenSource();
 
+	private readonly object _frameWorkerLock = new object();
+
+	private readonly AutoResetEvent _frameWorkerReady = new AutoResetEvent(initialState: false);
+
+	private readonly object _recordingWorkerLock = new object();
+
+	private readonly AutoResetEvent _recordingWorkerReady = new AutoResetEvent(initialState: false);
+
 	private MediaFoundationCameraDeviceFactory.MediaFoundationScope? _mediaFoundationScope;
 
 	private ITextureNativeDeviceManager? _deviceManager;
@@ -35,7 +47,25 @@ public sealed class TextureNativeCameraStream : IDisposable
 
 	private IMFSourceReader? _reader;
 
-	private Task? _captureTask;
+	private Thread? _captureThread;
+
+	private Thread? _frameWorkerThread;
+
+	private Thread? _recordingWorkerThread;
+
+	private AcceptedSourceSample? _acceptedSourceSample;
+
+	private AcceptedSourceSample? _acceptedRecordingSample;
+
+	private int _frameWorkerBusy;
+
+	private int _frameWorkerStopping;
+
+	private int _recordingWorkerBusy;
+
+	private int _recordingWorkerStopping;
+
+	private int _recordingAccepting;
 
 	private int _width;
 
@@ -81,6 +111,12 @@ public sealed class TextureNativeCameraStream : IDisposable
 
 	private long _framesRead;
 
+	private long _framesDroppedWhileProcessingBusy;
+
+	private long _lastSourceFrameTimestamp;
+
+	private int _frameInfoPublished;
+
 	private string _status = "Texture-native camera stream started.";
 
 	private bool _captureStarted;
@@ -98,6 +134,10 @@ public sealed class TextureNativeCameraStream : IDisposable
 	public string MediaSubtype => MediaFoundationInterop.FormatSubtype(_subtype);
 
 	public long FramesRead => Interlocked.Read(in _framesRead);
+
+	public long FramesDroppedWhileProcessingBusy => Interlocked.Read(in _framesDroppedWhileProcessingBusy);
+
+	public long LastSourceFrameTimestamp => Volatile.Read(ref _lastSourceFrameTimestamp);
 
 	public int SamplesWritten => _recorder?.SamplesWritten ?? _processedRecorder?.SamplesWritten ?? 0;
 
@@ -142,10 +182,27 @@ public sealed class TextureNativeCameraStream : IDisposable
 				return;
 			}
 			_captureStarted = true;
-			_captureTask = Task.Run(delegate
+			_frameWorkerThread = new Thread(FrameWorkerLoop)
 			{
-				CaptureLoop(_cancellation.Token);
-			});
+				IsBackground = true,
+				Name = "Avatar Builder newest camera frame",
+				Priority = ThreadPriority.AboveNormal
+			};
+			_recordingWorkerThread = new Thread(RecordingWorkerLoop)
+			{
+				IsBackground = true,
+				Name = "Avatar Builder camera recording",
+				Priority = ThreadPriority.BelowNormal
+			};
+			_captureThread = new Thread(() => CaptureLoop(_cancellation.Token))
+			{
+				IsBackground = true,
+				Name = "Avatar Builder camera ingestion",
+				Priority = ThreadPriority.Highest
+			};
+			_recordingWorkerThread.Start();
+			_frameWorkerThread.Start();
+			_captureThread.Start();
 		}
 		if (!_streamReady.Wait(StreamStartTimeout))
 		{
@@ -192,6 +249,10 @@ public sealed class TextureNativeCameraStream : IDisposable
 			_recordingPath = path;
 			_nextSampleTime = 0L;
 			_isPaused = false;
+			lock (_recordingWorkerLock)
+			{
+				Volatile.Write(ref _recordingAccepting, 1);
+			}
 			_status = "Texture-native GPU recording started: " + Path.GetFileName(path);
 			this.StatusChanged?.Invoke(this, _status);
 			return true;
@@ -221,6 +282,19 @@ public sealed class TextureNativeCameraStream : IDisposable
 	}
 
 	public TextureNativeRecordingResult? StopRecording()
+	{
+		lock (_recordingWorkerLock)
+		{
+			Volatile.Write(ref _recordingAccepting, 0);
+		}
+		WaitForRecordingWorkerIdle(StreamStopTimeout);
+		lock (_recordingWriteLock)
+		{
+			return StopRecordingCore();
+		}
+	}
+
+	private TextureNativeRecordingResult? StopRecordingCore()
 	{
 		MediaFoundationTextureVideoRecorder recorder;
 		MediaFoundationVideoRecorder processedRecorder;
@@ -303,15 +377,15 @@ public sealed class TextureNativeCameraStream : IDisposable
 		}
 		_cancellation.Cancel();
 		TryFlushSourceReader();
-		Task captureTask;
+		Thread captureThread;
 		lock (_stateLock)
 		{
-			captureTask = _captureTask;
+			captureThread = _captureThread;
 		}
 		bool flag = false;
 		try
 		{
-			flag = captureTask?.Wait(StreamStopTimeout) ?? true;
+			flag = captureThread?.Join(StreamStopTimeout) ?? true;
 		}
 		catch
 		{
@@ -323,13 +397,15 @@ public sealed class TextureNativeCameraStream : IDisposable
 			TryFlushSourceReader();
 			try
 			{
-				captureTask?.Wait(StreamStopTimeout);
+				captureThread?.Join(StreamStopTimeout);
 			}
 			catch
 			{
 			}
 		}
+		StopFrameWorker();
 		StopRecording();
+		StopRecordingWorker();
 	}
 
 	public void Dispose()
@@ -337,6 +413,8 @@ public sealed class TextureNativeCameraStream : IDisposable
 		Stop();
 		_cancellation.Dispose();
 		_streamReady.Dispose();
+		_frameWorkerReady.Dispose();
+		_recordingWorkerReady.Dispose();
 		TryShutdownMediaSource();
 		MediaFoundationInterop.ReleaseComObject(_reader);
 		_reader = null;
@@ -410,21 +488,19 @@ public sealed class TextureNativeCameraStream : IDisposable
 					MediaFoundationInterop.ReleaseComObject(sample);
 					continue;
 				}
-				try
+				long frameNumber = Interlocked.Increment(ref _framesRead);
+				long capturedAtTimestamp = Stopwatch.GetTimestamp();
+				DateTime capturedAtUtc = DateTime.UtcNow;
+				Volatile.Write(ref _lastSourceFrameTimestamp, capturedAtTimestamp);
+				if (TryAcceptNewestSourceSample(sample2, frameNumber, capturedAtTimestamp, capturedAtUtc))
 				{
-					long frameNumber = Interlocked.Increment(ref _framesRead);
-					using TextureNativeFrameLease textureNativeFrameLease = TryCreateFrameLease(sample2, frameNumber);
-					NotifyFrameAvailable(new TextureNativeFrameInfo(_width, _height, _fps, _deviceManager.ModeName, MediaFoundationInterop.FormatSubtype(_subtype), frameNumber));
-					if (textureNativeFrameLease != null)
-					{
-						NotifyTextureFrameAvailable(textureNativeFrameLease);
-					}
-					WriteRecordingSample(sample2);
+					sample = null;
 				}
-				finally
+				else
 				{
-					MediaFoundationInterop.ReleaseComObject(sample);
+					Interlocked.Increment(ref _framesDroppedWhileProcessingBusy);
 				}
+				MediaFoundationInterop.ReleaseComObject(sample);
 			}
 		}
 		catch (Exception ex)
@@ -436,6 +512,235 @@ public sealed class TextureNativeCameraStream : IDisposable
 			_streamReady.Set();
 			ReportStatus(ex.Message);
 		}
+	}
+
+	private bool TryAcceptNewestSourceSample(IMFSample sample, long frameNumber, long capturedAtTimestamp, DateTime capturedAtUtc)
+	{
+		if (Volatile.Read(ref _frameWorkerStopping) != 0
+			|| Interlocked.CompareExchange(ref _frameWorkerBusy, 1, 0) != 0)
+		{
+			return false;
+		}
+		bool accepted = false;
+		try
+		{
+			lock (_frameWorkerLock)
+			{
+				if (Volatile.Read(ref _frameWorkerStopping) == 0 && _acceptedSourceSample == null)
+				{
+					_acceptedSourceSample = new AcceptedSourceSample(sample, frameNumber, capturedAtTimestamp, capturedAtUtc);
+					accepted = true;
+				}
+			}
+			if (accepted)
+			{
+				_frameWorkerReady.Set();
+			}
+			return accepted;
+		}
+		finally
+		{
+			if (!accepted)
+			{
+				Interlocked.Exchange(ref _frameWorkerBusy, 0);
+			}
+		}
+	}
+
+	private void FrameWorkerLoop()
+	{
+		while (true)
+		{
+			_frameWorkerReady.WaitOne();
+			AcceptedSourceSample? accepted;
+			bool stopping;
+			lock (_frameWorkerLock)
+			{
+				accepted = _acceptedSourceSample;
+				_acceptedSourceSample = null;
+				stopping = Volatile.Read(ref _frameWorkerStopping) != 0;
+			}
+			if (accepted == null)
+			{
+				Interlocked.Exchange(ref _frameWorkerBusy, 0);
+				if (stopping)
+				{
+					break;
+				}
+				continue;
+			}
+			bool recordingOwnsSample = false;
+			try
+			{
+				recordingOwnsSample = ProcessAcceptedSourceSample(accepted);
+			}
+			catch (Exception ex)
+			{
+				ReportStatus("Newest-frame camera worker skipped one frame: " + ex.Message);
+			}
+			finally
+			{
+				if (!recordingOwnsSample)
+				{
+					MediaFoundationInterop.ReleaseComObject(accepted.Sample);
+				}
+				Interlocked.Exchange(ref _frameWorkerBusy, 0);
+			}
+			if (stopping)
+			{
+				break;
+			}
+		}
+	}
+
+	private bool ProcessAcceptedSourceSample(AcceptedSourceSample accepted)
+	{
+		using TextureNativeFrameLease? frame = TryCreateFrameLease(
+			accepted.Sample,
+			accepted.FrameNumber,
+			accepted.CapturedAtTimestamp,
+			accepted.CapturedAtUtc);
+		if (frame != null)
+		{
+			NotifyTextureFrameAvailable(frame);
+		}
+		if (Interlocked.CompareExchange(ref _frameInfoPublished, 1, 0) == 0)
+		{
+			NotifyFrameAvailable(new TextureNativeFrameInfo(
+				_width,
+				_height,
+				_fps,
+				_deviceManager?.ModeName ?? "DX12",
+				MediaFoundationInterop.FormatSubtype(_subtype),
+				accepted.FrameNumber));
+		}
+		return TryHandOffRecordingSample(accepted);
+	}
+
+	private bool TryHandOffRecordingSample(AcceptedSourceSample accepted)
+	{
+		if (Volatile.Read(ref _recordingAccepting) == 0
+			|| Volatile.Read(ref _recordingWorkerStopping) != 0
+			|| Interlocked.CompareExchange(ref _recordingWorkerBusy, 1, 0) != 0)
+		{
+			return false;
+		}
+
+		bool handedOff = false;
+		try
+		{
+			lock (_recordingWorkerLock)
+			{
+				if (Volatile.Read(ref _recordingAccepting) != 0
+					&& Volatile.Read(ref _recordingWorkerStopping) == 0
+					&& _acceptedRecordingSample == null)
+				{
+					_acceptedRecordingSample = accepted;
+					handedOff = true;
+				}
+			}
+			if (handedOff)
+			{
+				_recordingWorkerReady.Set();
+			}
+			return handedOff;
+		}
+		finally
+		{
+			if (!handedOff)
+			{
+				Interlocked.Exchange(ref _recordingWorkerBusy, 0);
+			}
+		}
+	}
+
+	private void RecordingWorkerLoop()
+	{
+		while (true)
+		{
+			_recordingWorkerReady.WaitOne();
+			AcceptedSourceSample? accepted;
+			bool stopping;
+			lock (_recordingWorkerLock)
+			{
+				accepted = _acceptedRecordingSample;
+				_acceptedRecordingSample = null;
+				stopping = Volatile.Read(ref _recordingWorkerStopping) != 0;
+			}
+			if (accepted == null)
+			{
+				Interlocked.Exchange(ref _recordingWorkerBusy, 0);
+				if (stopping)
+				{
+					break;
+				}
+				continue;
+			}
+			try
+			{
+				lock (_recordingWriteLock)
+				{
+					WriteRecordingSample(accepted.Sample);
+				}
+			}
+			catch (Exception ex)
+			{
+				ReportStatus("Recording lane skipped one frame after an encoder failure: " + ex.Message);
+			}
+			finally
+			{
+				MediaFoundationInterop.ReleaseComObject(accepted.Sample);
+				Interlocked.Exchange(ref _recordingWorkerBusy, 0);
+			}
+			if (stopping)
+			{
+				break;
+			}
+		}
+	}
+
+	private void StopRecordingWorker()
+	{
+		if (Interlocked.Exchange(ref _recordingWorkerStopping, 1) == 0)
+		{
+			lock (_recordingWorkerLock)
+			{
+				Volatile.Write(ref _recordingAccepting, 0);
+			}
+			_recordingWorkerReady.Set();
+		}
+
+		Thread? worker = _recordingWorkerThread;
+		if (worker != null && worker != Thread.CurrentThread)
+		{
+			worker.Join(StreamStopTimeout);
+		}
+		_recordingWorkerThread = null;
+	}
+
+	private void WaitForRecordingWorkerIdle(TimeSpan timeout)
+	{
+		long started = Stopwatch.GetTimestamp();
+		while (Volatile.Read(ref _recordingWorkerBusy) != 0
+			&& Stopwatch.GetElapsedTime(started) < timeout)
+		{
+			Thread.Sleep(1);
+		}
+	}
+
+	private void StopFrameWorker()
+	{
+		if (Interlocked.Exchange(ref _frameWorkerStopping, 1) == 0)
+		{
+			_frameWorkerReady.Set();
+		}
+		Thread? worker = _frameWorkerThread;
+		if (worker != null && worker != Thread.CurrentThread)
+		{
+			worker.Join(StreamStopTimeout);
+		}
+		_frameWorkerThread = null;
+		Interlocked.Exchange(ref _frameWorkerBusy, 0);
 	}
 
 	private void TryFlushSourceReader()
@@ -629,7 +934,7 @@ public sealed class TextureNativeCameraStream : IDisposable
 		}
 	}
 
-	private TextureNativeFrameLease? TryCreateFrameLease(IMFSample sample, long frameNumber)
+	private TextureNativeFrameLease? TryCreateFrameLease(IMFSample sample, long frameNumber, long capturedAtTimestamp, DateTime capturedAtUtc)
 	{
 		IMFMediaBuffer buffer = null;
 		PooledFrameBuffer pooledFrameBuffer = null;
@@ -639,15 +944,18 @@ public sealed class TextureNativeCameraStream : IDisposable
 			{
 				return null;
 			}
-			pooledFrameBuffer = TryCreateNv12Preview(buffer, out var nv12Stride);
+			int nv12Stride = 0;
 			IMFDXGIBuffer iMFDXGIBuffer = QueryDxgiBuffer(buffer);
 			if (iMFDXGIBuffer == null)
 			{
+				pooledFrameBuffer = TryCreateNv12Preview(
+					buffer,
+					out nv12Stride);
 				if (pooledFrameBuffer == null)
 				{
 					return null;
 				}
-				TextureNativeFrameLease result = new TextureNativeFrameLease(IntPtr.Zero, 0, _width, _height, _fps, (_deviceManager?.ModeName ?? "DX12") + " NV12 upload", MediaFoundationInterop.FormatSubtype(_subtype), frameNumber, IntPtr.Zero, pooledFrameBuffer, nv12Stride);
+				TextureNativeFrameLease result = new TextureNativeFrameLease(IntPtr.Zero, 0, _width, _height, _fps, (_deviceManager?.ModeName ?? "DX12") + " NV12 upload", MediaFoundationInterop.FormatSubtype(_subtype), frameNumber, IntPtr.Zero, pooledFrameBuffer, nv12Stride, capturedAtTimestamp, capturedAtUtc);
 				pooledFrameBuffer = null;
 				return result;
 			}
@@ -665,19 +973,37 @@ public sealed class TextureNativeCameraStream : IDisposable
 					return null;
 				}
 				nint num = IntPtr.Zero;
+				Direct3D11SharedTextureFrameLease? sharedTextureFrame = null;
 				try
 				{
 					string mediaSubtype = MediaFoundationInterop.FormatSubtype(_subtype);
-					if (!TextureNativePreviewPolicy.ShouldPreferNv12UploadFallback(mediaSubtype, _width, _height, pooledFrameBuffer?.Bytes, nv12Stride))
+					if (deviceManager is Direct3D11DeviceManager)
 					{
-						num = TryCreateD3D11SharedTextureHandle(resource, deviceManager);
+						sharedTextureFrame = TryCreateD3D11SharedTextureFrame(
+							resource,
+							subresource,
+							deviceManager,
+							out bool bridgeUnavailable);
+						if (sharedTextureFrame == null && !bridgeUnavailable)
+						{
+							Marshal.Release(resource);
+							return null;
+						}
+						if (sharedTextureFrame == null)
+						{
+							pooledFrameBuffer = TryCreateNv12Preview(
+								buffer,
+								out nv12Stride);
+						}
 					}
-					TextureNativeFrameLease result2 = new TextureNativeFrameLease(resource, subresource, _width, _height, _fps, deviceManager.ModeName, mediaSubtype, frameNumber, num, pooledFrameBuffer, nv12Stride);
+					TextureNativeFrameLease result2 = new TextureNativeFrameLease(resource, subresource, _width, _height, _fps, deviceManager.ModeName, mediaSubtype, frameNumber, num, pooledFrameBuffer, nv12Stride, capturedAtTimestamp, capturedAtUtc, sharedTextureFrame);
+					sharedTextureFrame = null;
 					pooledFrameBuffer = null;
 					return result2;
 				}
 				catch
 				{
+					sharedTextureFrame?.Dispose();
 					pooledFrameBuffer?.Dispose();
 					Marshal.Release(resource);
 					TextureNativeFrameLease.CloseOwnedSharedTextureHandle(num);
@@ -696,11 +1022,16 @@ public sealed class TextureNativeCameraStream : IDisposable
 		}
 	}
 
-	private nint TryCreateD3D11SharedTextureHandle(nint sourceTexture, ITextureNativeDeviceManager deviceManager)
+	private Direct3D11SharedTextureFrameLease? TryCreateD3D11SharedTextureFrame(
+		nint sourceTexture,
+		int sourceSubresource,
+		ITextureNativeDeviceManager deviceManager,
+		out bool bridgeUnavailable)
 	{
+		bridgeUnavailable = _d3d11SharedTextureBridgeUnavailable;
 		if (_subtype != MediaFoundationGuids.MFVideoFormat_NV12 || !(deviceManager is Direct3D11DeviceManager direct3D11DeviceManager) || _d3d11SharedTextureBridgeUnavailable)
 		{
-			return IntPtr.Zero;
+			return null;
 		}
 		try
 		{
@@ -708,20 +1039,26 @@ public sealed class TextureNativeCameraStream : IDisposable
 			{
 				_d3d11SharedTextureBridge = direct3D11DeviceManager.CreateSharedTextureBridge(_width, _height);
 			}
-			if (_d3d11SharedTextureBridge.TryCopyToSharedHandle(sourceTexture, out nint duplicatedSharedHandle, out string failureReason))
+			if (_d3d11SharedTextureBridge.TryCopyToSharedFrame(
+				sourceTexture,
+				sourceSubresource,
+				out Direct3D11SharedTextureFrameLease? frame,
+				out string? failureReason))
 			{
-				return duplicatedSharedHandle;
+				return frame;
 			}
 			if (!string.IsNullOrWhiteSpace(failureReason))
 			{
 				DisableD3D11SharedTextureBridge(failureReason);
+				bridgeUnavailable = true;
 			}
 		}
 		catch (Exception ex)
 		{
 			DisableD3D11SharedTextureBridge(ex.Message);
+			bridgeUnavailable = true;
 		}
-		return IntPtr.Zero;
+		return null;
 	}
 
 	private void DisableD3D11SharedTextureBridge(string? reason)

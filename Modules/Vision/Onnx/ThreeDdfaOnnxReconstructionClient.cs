@@ -71,7 +71,7 @@ public sealed class ThreeDdfaOnnxReconstructionClient : IDisposable
 					FaceBox = faceBox,
 					Mode = ToProtocolMode(mode),
 					DenseSampleStride = Math.Clamp(denseSampleStride, 1, 200),
-					IncludeTopology = (mode == ThreeDdfaOnnxRequestMode.Full && _denseTopology.Count == 0),
+					IncludeTopology = ((mode == ThreeDdfaOnnxRequestMode.Full || mode == ThreeDdfaOnnxRequestMode.CanonicalModel) && _denseTopology.Count == 0),
 					ImageBase64 = Convert.ToBase64String(array)
 				};
 				string value = JsonSerializer.Serialize(threeDdfaOnnxSidecarRequest, JsonOptions);
@@ -80,7 +80,8 @@ public sealed class ThreeDdfaOnnxReconstructionClient : IDisposable
 				_process.StandardInput.WriteLine(value);
 				_process.StandardInput.Flush();
 				Task<string> task = _process.StandardOutput.ReadLineAsync();
-				TimeSpan timeout = ((mode != ThreeDdfaOnnxRequestMode.Full) ? (_firstResponseAfterStart ? TimeSpan.FromMilliseconds(ReadStartupTimeoutMilliseconds()) : _timeout) : (_firstResponseAfterStart ? TimeSpan.FromSeconds(60L) : TimeSpan.FromSeconds(30L)));
+				bool denseModelRequest = mode == ThreeDdfaOnnxRequestMode.Full || mode == ThreeDdfaOnnxRequestMode.CanonicalModel;
+				TimeSpan timeout = ((!denseModelRequest) ? (_firstResponseAfterStart ? TimeSpan.FromMilliseconds(ReadStartupTimeoutMilliseconds()) : _timeout) : (_firstResponseAfterStart ? TimeSpan.FromSeconds(60L) : TimeSpan.FromSeconds(30L)));
 				if (!task.Wait(timeout))
 				{
 					RestartAfterFailure("3DDFA/ONNX sidecar timed out waiting for a reconstruction response.");
@@ -106,7 +107,7 @@ public sealed class ThreeDdfaOnnxReconstructionClient : IDisposable
 				{
 					_denseTopology = threeDdfaOnnxSidecarResponse.DenseEdges;
 				}
-				else if (mode == ThreeDdfaOnnxRequestMode.Full && _denseTopology.Count > 0)
+				else if ((mode == ThreeDdfaOnnxRequestMode.Full || mode == ThreeDdfaOnnxRequestMode.CanonicalModel) && _denseTopology.Count > 0)
 				{
 					threeDdfaOnnxSidecarResponse.DenseEdges = _denseTopology;
 				}
@@ -296,10 +297,11 @@ public sealed class ThreeDdfaOnnxReconstructionClient : IDisposable
 	{
 		return mode switch
 		{
-			ThreeDdfaOnnxRequestMode.FaceBoxOnly => "faceBoxOnly", 
-			ThreeDdfaOnnxRequestMode.Preview => "preview", 
-			ThreeDdfaOnnxRequestMode.Full => "full", 
-			_ => "tracking", 
+			ThreeDdfaOnnxRequestMode.FaceBoxOnly => "faceBoxOnly",
+			ThreeDdfaOnnxRequestMode.Preview => "preview",
+			ThreeDdfaOnnxRequestMode.Full => "full",
+			ThreeDdfaOnnxRequestMode.CanonicalModel => "model",
+			_ => "tracking",
 		};
 	}
 

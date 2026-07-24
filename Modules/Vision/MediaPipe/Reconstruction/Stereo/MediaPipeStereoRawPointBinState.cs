@@ -1,6 +1,6 @@
 namespace AvatarBuilder.Modules.Vision.MediaPipe.Reconstruction.Stereo;
 
-public sealed class MediaPipeStereoRawPointBinState
+public readonly record struct MediaPipeStereoRawPointBinState
 {
 	public int BinX { get; init; }
 

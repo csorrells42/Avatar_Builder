@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.Linq;
 using AvatarBuilder.Modules.Vision.Reconstruction;
 
 namespace AvatarBuilder.Modules.Vision.MediaPipe.Reconstruction.Stereo;
@@ -568,7 +567,7 @@ public sealed class MediaPipeStereoFaceReconstructor
 	public void Restore(MediaPipeStereoFaceState? state, string subjectId, string subjectDisplayName)
 	{
 		Reset(subjectId, subjectDisplayName);
-		if (state == null || !string.Equals(state.SchemaVersion, "calibrated-stereo-face-v1", StringComparison.Ordinal) || !string.Equals(state.SubjectId, subjectId, StringComparison.OrdinalIgnoreCase))
+		if (state == null || !string.Equals(state.SubjectId, subjectId, StringComparison.OrdinalIgnoreCase))
 		{
 			return;
 		}
@@ -700,43 +699,61 @@ public sealed class MediaPipeStereoFaceReconstructor
 	public MediaPipeStereoFaceModel CreateModel()
 	{
 		MediaPipeStereoFaceVertex[] array = new MediaPipeStereoFaceVertex[478];
-		List<double> list = new List<double>(478);
-		int num = 0;
+		Span<double> span = stackalloc double[478];
+		int deviationCount = 0;
+		int directlyMeasuredCount = 0;
 		for (int i = 0; i < array.Length; i++)
 		{
 			array[i] = _vertices[i].CreateVertex(DynamicIdentityMask[i]);
 			if (array[i].DirectObservationCount > 1)
 			{
-				list.Add(array[i].StandardDeviationInches);
+				span[deviationCount++] = array[i].StandardDeviationInches;
 			}
-			if (array[i].EvidenceClass == "directly-measured")
+			if (array[i].EvidenceClass == MediaPipeStereoEvidenceClasses.DirectlyMeasured)
 			{
-				num++;
+				directlyMeasuredCount++;
 			}
 		}
-		list.Sort();
-		double num2 = ((list.Count == 0) ? 0.0 : list[list.Count / 2]);
-		double num3 = (double)num * 100.0 / 478.0;
+		span[..deviationCount].Sort();
+		double num2 = ((deviationCount == 0) ? 0.0 : span[deviationCount / 2]);
+		double num3 = (double)directlyMeasuredCount * 100.0 / 478.0;
 		double faceWidthInches = Distance(array, 234, 454);
 		double faceHeightInches = Distance(array, 10, 152);
-		double measuredDepthInches = Extent(array, (MediaPipeStereoFaceVertex point) => point.ZInches);
-		List<MediaPipeStereoDenseFaceVertex> list2 = new List<MediaPipeStereoDenseFaceVertex>(_denseVertices.Length);
-		int num4 = 0;
-		DenseVertexAccumulator[] denseVertices = _denseVertices;
-		foreach (DenseVertexAccumulator denseVertexAccumulator in denseVertices)
+		double measuredDepthInches = ExtentZ(array);
+		int denseVertexCount = 0;
+		for (int i = 0; i < _denseVertices.Length; i++)
 		{
+			if (_denseVertices[i].HasEvidence)
+			{
+				denseVertexCount++;
+			}
+		}
+		MediaPipeStereoDenseFaceVertex[] array2 = new MediaPipeStereoDenseFaceVertex[denseVertexCount];
+		int denseVertexIndex = 0;
+		int directlyMeasuredDenseCount = 0;
+		for (int i = 0; i < _denseVertices.Length; i++)
+		{
+			DenseVertexAccumulator denseVertexAccumulator = _denseVertices[i];
 			if (denseVertexAccumulator.HasEvidence)
 			{
 				MediaPipeStereoDenseFaceVertex mediaPipeStereoDenseFaceVertex = denseVertexAccumulator.CreateVertex();
-				list2.Add(mediaPipeStereoDenseFaceVertex);
-				if (mediaPipeStereoDenseFaceVertex.EvidenceClass == "directly-measured")
+				array2[denseVertexIndex++] = mediaPipeStereoDenseFaceVertex;
+				if (mediaPipeStereoDenseFaceVertex.EvidenceClass == MediaPipeStereoEvidenceClasses.DirectlyMeasured)
 				{
-					num4++;
+					directlyMeasuredDenseCount++;
 				}
 			}
 		}
-		double denseStableVertexPercent = ((list2.Count == 0) ? 0.0 : ((double)num4 * 100.0 / (double)list2.Count));
-		string status = ((_acceptedFrameCount == 0L) ? _lastFrameStatus : ($"Measured {_acceptedFrameCount:n0} synchronized stereo frames in physical scale; {num3:0.#}% of vertices are stable direct measurements and median spread is {num2:0.000} in. Dense stereo has measured {list2.Count:n0}/{MediaPipeDenseStereoMatcher.MaximumSampleCount:n0} surface samples. " + _lastFrameStatus + " " + _lastDenseFrameStatus));
+		double denseStableVertexPercent = ((array2.Length == 0) ? 0.0 : ((double)directlyMeasuredDenseCount * 100.0 / (double)array2.Length));
+		long rawMaximumBinObservationCount = 0;
+		foreach (RawPointBinAccumulator rawPointBin in _rawPointBins.Values)
+		{
+			if (rawPointBin.ObservationCount > rawMaximumBinObservationCount)
+			{
+				rawMaximumBinObservationCount = rawPointBin.ObservationCount;
+			}
+		}
+		string status = ((_acceptedFrameCount == 0L) ? _lastFrameStatus : ($"Measured {_acceptedFrameCount:n0} synchronized stereo frames in physical scale; {num3:0.#}% of vertices are stable direct measurements and median spread is {num2:0.000} in. Dense stereo has measured {array2.Length:n0}/{MediaPipeDenseStereoMatcher.MaximumSampleCount:n0} surface samples. " + _lastFrameStatus + " " + _lastDenseFrameStatus));
 		return new MediaPipeStereoFaceModel
 		{
 			SubjectId = _subjectId,
@@ -756,16 +773,16 @@ public sealed class MediaPipeStereoFaceReconstructor
 			FaceHeightInches = faceHeightInches,
 			MeasuredDepthInches = measuredDepthInches,
 			DenseStableVertexPercent = denseStableVertexPercent,
-			DenseMeasuredVertexCount = list2.Count,
+			DenseMeasuredVertexCount = array2.Length,
 			DenseMaximumVertexCount = MediaPipeDenseStereoMatcher.MaximumSampleCount,
 			RawTriangulatedObservationCount = _rawTriangulatedObservationCount,
 			RawPointBinCount = _rawPointBins.Count,
-			RawMaximumBinObservationCount = ((_rawPointBins.Count == 0) ? 0 : _rawPointBins.Values.Max((RawPointBinAccumulator bin) => bin.ObservationCount)),
+			RawMaximumBinObservationCount = rawMaximumBinObservationCount,
 			RawUnstoredObservationCount = _rawUnstoredObservationCount,
 			Status = status,
 			Vertices = array,
 			TopologyEdges = TopologyEdges,
-			DenseVertices = list2
+			DenseVertices = array2
 		};
 	}
 
@@ -823,8 +840,10 @@ public sealed class MediaPipeStereoFaceReconstructor
 			if ((uint)mediaPipeStereoDenseRigPoint.SampleIndex < (uint)_denseVertices.Length)
 			{
 				Point3 point = basis.ToLocal(mediaPipeStereoDenseRigPoint.XInches, mediaPipeStereoDenseRigPoint.YInches, mediaPipeStereoDenseRigPoint.ZInches);
-				double num2 = 1.0 / (1.0 + Math.Pow(mediaPipeStereoDenseRigPoint.ReprojectionResidualPercent / 1.25, 2.0));
-				double num3 = 1.0 / (1.0 + Math.Pow(mediaPipeStereoDenseRigPoint.MatchErrorPixels / 1.5, 2.0));
+				double reprojectionRatio = mediaPipeStereoDenseRigPoint.ReprojectionResidualPercent / 1.25;
+				double matchErrorRatio = mediaPipeStereoDenseRigPoint.MatchErrorPixels / 1.5;
+				double num2 = 1.0 / (1.0 + reprojectionRatio * reprojectionRatio);
+				double num3 = 1.0 / (1.0 + matchErrorRatio * matchErrorRatio);
 				double num4 = (mediaPipeStereoDenseRigPoint.IsExpressionSurface ? 0.3 : 1.0);
 				double num5 = num2 * num3 * num4;
 				bool flag = point.IsFinite && Math.Abs(point.X) <= basis.EyeSpanInches * 2.4 && Math.Abs(point.Y) <= basis.EyeSpanInches * 3.4 && Math.Abs(point.Z) <= basis.EyeSpanInches * 2.4 && num5 >= 0.02 && _denseVertices[mediaPipeStereoDenseRigPoint.SampleIndex].CanAccept(point, mediaPipeStereoDenseRigPoint.IsExpressionSurface);
@@ -880,23 +899,36 @@ public sealed class MediaPipeStereoFaceReconstructor
 
 	private IReadOnlyList<MediaPipeStereoDenseVertexAccumulatorState> CreateDenseAccumulatorStates()
 	{
-		List<MediaPipeStereoDenseVertexAccumulatorState> list = new List<MediaPipeStereoDenseVertexAccumulatorState>();
-		DenseVertexAccumulator[] denseVertices = _denseVertices;
-		foreach (DenseVertexAccumulator denseVertexAccumulator in denseVertices)
+		int count = 0;
+		for (int i = 0; i < _denseVertices.Length; i++)
 		{
-			if (denseVertexAccumulator.HasEvidence)
+			if (_denseVertices[i].HasEvidence)
 			{
-				list.Add(denseVertexAccumulator.CreateState());
+				count++;
 			}
 		}
-		return list;
+		MediaPipeStereoDenseVertexAccumulatorState[] states = new MediaPipeStereoDenseVertexAccumulatorState[count];
+		int destinationIndex = 0;
+		for (int i = 0; i < _denseVertices.Length; i++)
+		{
+			DenseVertexAccumulator denseVertexAccumulator = _denseVertices[i];
+			if (denseVertexAccumulator.HasEvidence)
+			{
+				states[destinationIndex++] = denseVertexAccumulator.CreateState();
+			}
+		}
+		return states;
 	}
 
 	private IReadOnlyList<MediaPipeStereoRawPointBinState> CreateRawPointBinStates()
 	{
-		return (from pair in _rawPointBins
-			orderby pair.Key.X, pair.Key.Y, pair.Key.Z
-			select pair.Value.CreateState()).ToArray();
+		MediaPipeStereoRawPointBinState[] states = new MediaPipeStereoRawPointBinState[_rawPointBins.Count];
+		int index = 0;
+		foreach (RawPointBinAccumulator rawPointBin in _rawPointBins.Values)
+		{
+			states[index++] = rawPointBin.CreateState();
+		}
+		return states;
 	}
 
 	private static double Distance(IReadOnlyList<MediaPipeStereoFaceVertex> vertices, int first, int second)
@@ -907,10 +939,13 @@ public sealed class MediaPipeStereoFaceReconstructor
 		}
 		MediaPipeStereoFaceVertex mediaPipeStereoFaceVertex = vertices[first];
 		MediaPipeStereoFaceVertex mediaPipeStereoFaceVertex2 = vertices[second];
-		return Math.Sqrt(Math.Pow(mediaPipeStereoFaceVertex.XInches - mediaPipeStereoFaceVertex2.XInches, 2.0) + Math.Pow(mediaPipeStereoFaceVertex.YInches - mediaPipeStereoFaceVertex2.YInches, 2.0) + Math.Pow(mediaPipeStereoFaceVertex.ZInches - mediaPipeStereoFaceVertex2.ZInches, 2.0));
+		double deltaX = mediaPipeStereoFaceVertex.XInches - mediaPipeStereoFaceVertex2.XInches;
+		double deltaY = mediaPipeStereoFaceVertex.YInches - mediaPipeStereoFaceVertex2.YInches;
+		double deltaZ = mediaPipeStereoFaceVertex.ZInches - mediaPipeStereoFaceVertex2.ZInches;
+		return Math.Sqrt(deltaX * deltaX + deltaY * deltaY + deltaZ * deltaZ);
 	}
 
-	private static double Extent(IReadOnlyList<MediaPipeStereoFaceVertex> vertices, Func<MediaPipeStereoFaceVertex, double> selector)
+	private static double ExtentZ(IReadOnlyList<MediaPipeStereoFaceVertex> vertices)
 	{
 		double num = double.PositiveInfinity;
 		double num2 = double.NegativeInfinity;
@@ -918,7 +953,7 @@ public sealed class MediaPipeStereoFaceReconstructor
 		{
 			if (vertex.DirectObservationCount != 0L && !DynamicIdentityMask[vertex.Index])
 			{
-				double val = selector(vertex);
+				double val = vertex.ZInches;
 				num = Math.Min(num, val);
 				num2 = Math.Max(num2, val);
 			}

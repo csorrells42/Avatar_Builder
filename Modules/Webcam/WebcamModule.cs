@@ -13,4 +13,11 @@ public static class WebcamModule
 	{
 		return Dx12Camera.Start(target, options);
 	}
+
+	public static Dx12CameraWindow CreateDx12CameraWindow(
+		Dx12CameraOptions? options = null,
+		string title = "Avatar Builder Camera Monitor")
+	{
+		return new Dx12CameraWindow(options, title);
+	}
 }

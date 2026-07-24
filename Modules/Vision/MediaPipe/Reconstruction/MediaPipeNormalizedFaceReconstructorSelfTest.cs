@@ -19,7 +19,7 @@ public static class MediaPipeNormalizedFaceReconstructorSelfTest
 		{
 			for (int j = 0; j < 2; j++)
 			{
-				if (!mediaPipeNormalizedFaceReconstructor.TryAddFrame(CreateFrame(array, capturedAtUtc, i)))
+				if (!mediaPipeNormalizedFaceReconstructor.TryAddFrame(CreateFrame(array, capturedAtUtc, i, 11.0)))
 				{
 					return new MediaPipeNormalizedFaceReconstructorSelfTestResult(Succeeded: false, $"MediaPipe geometry self-test rejected synthetic B={i} frame.");
 				}
@@ -80,26 +80,36 @@ public static class MediaPipeNormalizedFaceReconstructorSelfTest
 		array[263] = new TestPoint(0.5, 0.0, 0.0);
 		array[10] = new TestPoint(0.0, 0.75, 0.0);
 		array[152] = new TestPoint(0.0, -0.75, 0.0);
-		array[1] = new TestPoint(0.05, 0.08, 0.35);
+		array[6] = new TestPoint(0.0, -0.04, 0.2);
+		array[197] = new TestPoint(0.0, -0.08, 0.24);
+		array[195] = new TestPoint(0.0, -0.12, 0.28);
+		array[5] = new TestPoint(0.0, -0.16, 0.31);
+		array[4] = new TestPoint(0.0, -0.2, 0.33);
+		array[1] = new TestPoint(0.0, -0.24, 0.35);
+		array[2] = new TestPoint(0.0, -0.28, 0.32);
 		return array;
 	}
 
-	private static MediaPipeGeometryFrame CreateFrame(TestPoint[] canonical, DateTime capturedAtUtc, double yawDegrees)
+	private static MediaPipeGeometryFrame CreateFrame(TestPoint[] canonical, DateTime capturedAtUtc, double yawDegrees, double mediaPipeRollDegrees)
 	{
 		double num = yawDegrees * Math.PI / 180.0;
 		double num2 = Math.Cos(num);
 		double num3 = Math.Sin(num);
+		double num4 = -mediaPipeRollDegrees * Math.PI / 180.0;
+		double num5 = Math.Cos(num4);
+		double num6 = Math.Sin(num4);
 		FaceMeshLandmarkPoint[] array = new FaceMeshLandmarkPoint[canonical.Length];
 		for (int i = 0; i < canonical.Length; i++)
 		{
 			TestPoint testPoint = canonical[i];
-			double num4 = num2 * testPoint.X + num3 * testPoint.Z;
-			double y = testPoint.Y;
+			double num7 = num2 * testPoint.X + num3 * testPoint.Z;
+			double num8 = num5 * num7 - num6 * testPoint.Y;
+			double num9 = num6 * num7 + num5 * testPoint.Y;
 			array[i] = new FaceMeshLandmarkPoint
 			{
 				Index = i,
-				X = 0.5 + 700.0 * num4 / 3840.0,
-				Y = 0.5 - 700.0 * y / 2160.0,
+				X = 0.5 + 700.0 * num8 / 3840.0,
+				Y = 0.5 - 700.0 * num9 / 2160.0,
 				Z = 0.0
 			};
 		}
@@ -112,9 +122,15 @@ public static class MediaPipeNormalizedFaceReconstructorSelfTest
 			HorizontalFieldOfViewDegrees = 71.4,
 			ARotationAroundXDegrees = 0.0,
 			BRotationAroundYDegrees = yawDegrees,
-			CRotationAroundZDegrees = 0.0,
+			CRotationAroundZDegrees = mediaPipeRollDegrees,
 			Landmarks = array,
-			FacialTransformationMatrix = Array.Empty<double>()
+			FacialTransformationMatrix =
+			[
+				num5 * num2, -num6, num5 * num3, 0.0,
+				num6 * num2, num5, num6 * num3, 0.0,
+				-num3, 0.0, num2, 0.0,
+				0.0, 0.0, 0.0, 1.0
+			]
 		};
 	}
 }

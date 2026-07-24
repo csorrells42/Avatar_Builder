@@ -6,6 +6,14 @@ using System.Linq;
 
 namespace AvatarBuilder.Modules.Vision.MediaPipe;
 
+public sealed record MediaPipeDelegateProbeResult(bool IsAvailable, string Status);
+
+internal sealed record MediaPipeDirectMlModelEnvironment(
+	string DetectorModelPath,
+	string LandmarkerModelPath,
+	bool IsReady,
+	string Status);
+
 public sealed class MediaPipeSidecarPythonEnvironment
 {
 	private const string PythonOverrideVariable = "AVATAR_BUILDER_MEDIAPIPE_PYTHON";
@@ -16,15 +24,54 @@ public sealed class MediaPipeSidecarPythonEnvironment
 
 	private const string RelativeScriptPath = "Modules/Vision/MediaPipe/Sidecar/mediapipe_face_landmarker_sidecar.py";
 
+	private const string RelativeDirectMlScriptPath = "Modules/Vision/MediaPipe/Sidecar/mediapipe_face_landmarker_directml_sidecar.py";
+
+	private const string RelativeDetectorOnnxPath = "dependencies/vision/dense-face-landmarks/onnx/face_detector.onnx";
+
+	private const string RelativeLandmarkerOnnxPath = "dependencies/vision/dense-face-landmarks/onnx/face_landmarks_detector.onnx";
+
 	public string PythonPath { get; private init; } = "";
 
 	public string ScriptPath { get; private init; } = "";
 
 	public string ModelPath { get; private init; } = "";
 
+	public string DirectMlScriptPath { get; private init; } = "";
+
+	public string DetectorOnnxPath { get; private init; } = "";
+
+	public string LandmarkerOnnxPath { get; private init; } = "";
+
 	public bool IsReady { get; private init; }
 
 	public string Status { get; private init; } = "not checked";
+
+	internal static MediaPipeDirectMlModelEnvironment DetectDirectMlModels()
+	{
+		string detectorModelPath = FindRuntimeFile(RelativeDetectorOnnxPath);
+		string landmarkerModelPath = FindRuntimeFile(RelativeLandmarkerOnnxPath);
+		if (string.IsNullOrWhiteSpace(detectorModelPath))
+		{
+			return new MediaPipeDirectMlModelEnvironment(
+				"",
+				landmarkerModelPath,
+				false,
+				"MediaPipe DirectML detector model is missing.");
+		}
+		if (string.IsNullOrWhiteSpace(landmarkerModelPath))
+		{
+			return new MediaPipeDirectMlModelEnvironment(
+				detectorModelPath,
+				"",
+				false,
+				"MediaPipe DirectML 478-point landmark model is missing.");
+		}
+		return new MediaPipeDirectMlModelEnvironment(
+			detectorModelPath,
+			landmarkerModelPath,
+			true,
+			"MediaPipe DirectML detector and 478-point landmark models are ready.");
+	}
 
 	public static MediaPipeSidecarPythonEnvironment Detect(DenseFaceLandmarkModelInfo modelInfo)
 	{
@@ -47,6 +94,9 @@ public sealed class MediaPipeSidecarPythonEnvironment
 			return NotReady("Python not configured for MediaPipe sidecar. Set AVATAR_BUILDER_MEDIAPIPE_PYTHON or run tools\\SetupMediaPipeSidecar.ps1.");
 		}
 		(bool, string) tuple = CheckMediaPipeImport(text2);
+		string directMlScriptPath = FindRuntimeFile(RelativeDirectMlScriptPath);
+		string detectorOnnxPath = FindRuntimeFile(RelativeDetectorOnnxPath);
+		string landmarkerOnnxPath = FindRuntimeFile(RelativeLandmarkerOnnxPath);
 		if (!tuple.Item1)
 		{
 			return new MediaPipeSidecarPythonEnvironment
@@ -54,6 +104,9 @@ public sealed class MediaPipeSidecarPythonEnvironment
 				PythonPath = text2,
 				ScriptPath = text,
 				ModelPath = modelInfo.ModelPath,
+				DirectMlScriptPath = directMlScriptPath,
+				DetectorOnnxPath = detectorOnnxPath,
+				LandmarkerOnnxPath = landmarkerOnnxPath,
 				Status = tuple.Item2
 			};
 		}
@@ -62,9 +115,109 @@ public sealed class MediaPipeSidecarPythonEnvironment
 			PythonPath = text2,
 			ScriptPath = text,
 			ModelPath = modelInfo.ModelPath,
+			DirectMlScriptPath = directMlScriptPath,
+			DetectorOnnxPath = detectorOnnxPath,
+			LandmarkerOnnxPath = landmarkerOnnxPath,
 			IsReady = true,
 			Status = "MediaPipe sidecar ready: " + Path.GetFileName(text2)
 		};
+	}
+
+	public MediaPipeDelegateProbeResult ProbeDelegate(MediaPipeExecutionBackend backend)
+	{
+		if (!IsReady)
+		{
+			return new MediaPipeDelegateProbeResult(false, Status);
+		}
+		try
+		{
+			using Process process = new Process
+			{
+				StartInfo = new ProcessStartInfo
+				{
+					FileName = PythonPath,
+					UseShellExecute = false,
+					RedirectStandardOutput = true,
+					RedirectStandardError = true,
+					CreateNoWindow = true
+				}
+			};
+			ConfigureStartInfo(process.StartInfo, backend, probe: true);
+			if (!process.Start())
+			{
+				return new MediaPipeDelegateProbeResult(false, $"MediaPipe {backend.ToDisplayName()} delegate probe did not start.");
+			}
+			if (!process.WaitForExit(12000))
+			{
+				TryKill(process);
+				return new MediaPipeDelegateProbeResult(false, $"MediaPipe {backend.ToDisplayName()} delegate probe timed out.");
+			}
+			string output = process.StandardOutput.ReadToEnd().Trim();
+			string error = process.StandardError.ReadToEnd().Trim();
+			if (process.ExitCode == 0 && output.Contains("\"ok\":true", StringComparison.OrdinalIgnoreCase))
+			{
+				return new MediaPipeDelegateProbeResult(true, backend == MediaPipeExecutionBackend.Gpu
+					? "MediaPipe GPU (DirectML) detector and 478-point landmarker are ready."
+					: "MediaPipe CPU sidecar is ready.");
+			}
+			string detail = ExtractProbeFailure(string.IsNullOrWhiteSpace(error) ? output : error);
+			return new MediaPipeDelegateProbeResult(false, $"MediaPipe {backend.ToDisplayName()} delegate is unavailable: {detail}");
+		}
+		catch (Exception ex)
+		{
+			return new MediaPipeDelegateProbeResult(false, $"MediaPipe {backend.ToDisplayName()} delegate probe failed: {ex.Message}");
+		}
+	}
+
+	public void ConfigureStartInfo(ProcessStartInfo startInfo, MediaPipeExecutionBackend backend, bool probe)
+	{
+		if (backend == MediaPipeExecutionBackend.Gpu)
+		{
+			if (string.IsNullOrWhiteSpace(DirectMlScriptPath) || !File.Exists(DirectMlScriptPath))
+			{
+				throw new FileNotFoundException("MediaPipe DirectML sidecar script is missing.", DirectMlScriptPath);
+			}
+			if (string.IsNullOrWhiteSpace(DetectorOnnxPath) || !File.Exists(DetectorOnnxPath))
+			{
+				throw new FileNotFoundException("MediaPipe DirectML detector model is missing.", DetectorOnnxPath);
+			}
+			if (string.IsNullOrWhiteSpace(LandmarkerOnnxPath) || !File.Exists(LandmarkerOnnxPath))
+			{
+				throw new FileNotFoundException("MediaPipe DirectML landmark model is missing.", LandmarkerOnnxPath);
+			}
+			startInfo.ArgumentList.Add(DirectMlScriptPath);
+			startInfo.ArgumentList.Add("--detector-model");
+			startInfo.ArgumentList.Add(DetectorOnnxPath);
+			startInfo.ArgumentList.Add("--landmarker-model");
+			startInfo.ArgumentList.Add(LandmarkerOnnxPath);
+		}
+		else
+		{
+			startInfo.ArgumentList.Add(ScriptPath);
+			startInfo.ArgumentList.Add("--model");
+			startInfo.ArgumentList.Add(ModelPath);
+			startInfo.ArgumentList.Add("--delegate");
+			startInfo.ArgumentList.Add("cpu");
+		}
+		if (probe)
+		{
+			startInfo.ArgumentList.Add("--probe");
+		}
+	}
+
+	private static string ExtractProbeFailure(string detail)
+	{
+		if (string.IsNullOrWhiteSpace(detail))
+		{
+			return "the runtime did not provide a reason";
+		}
+		string[] lines = detail.Split(new string[2] { "\r\n", "\n" }, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+		string message = lines.FirstOrDefault((string line) => line.Contains("GPU processing is disabled", StringComparison.OrdinalIgnoreCase))
+			?? lines.FirstOrDefault((string line) => line.Contains("delegate", StringComparison.OrdinalIgnoreCase) && line.Contains("failed", StringComparison.OrdinalIgnoreCase))
+			?? lines.LastOrDefault()
+			?? detail.Trim();
+		const int maximumStatusLength = 320;
+		return message.Length <= maximumStatusLength ? message : message[..maximumStatusLength] + "...";
 	}
 
 	private static MediaPipeSidecarPythonEnvironment NotReady(string status)
@@ -77,13 +230,21 @@ public sealed class MediaPipeSidecarPythonEnvironment
 
 	private static string FindScriptPath()
 	{
-		List<string> list = new List<string>();
-		list.Add(Path.Combine(AppContext.BaseDirectory, "Modules/Vision/MediaPipe/Sidecar/mediapipe_face_landmarker_sidecar.py".Replace('/', Path.DirectorySeparatorChar)));
-		list.Add(Path.Combine(Environment.CurrentDirectory, "Modules/Vision/MediaPipe/Sidecar/mediapipe_face_landmarker_sidecar.py".Replace('/', Path.DirectorySeparatorChar)));
+		return FindRuntimeFile(RelativeScriptPath);
+	}
+
+	private static string FindRuntimeFile(string relativePath)
+	{
+		string platformPath = relativePath.Replace('/', Path.DirectorySeparatorChar);
+		List<string> list = new List<string>
+		{
+			Path.Combine(AppContext.BaseDirectory, platformPath),
+			Path.Combine(Environment.CurrentDirectory, platformPath)
+		};
 		list.AddRange(from root in EnumerateAncestors(AppContext.BaseDirectory)
-			select Path.Combine(root, "Modules/Vision/MediaPipe/Sidecar/mediapipe_face_landmarker_sidecar.py".Replace('/', Path.DirectorySeparatorChar)));
+			select Path.Combine(root, platformPath));
 		list.AddRange(from root in EnumerateAncestors(Environment.CurrentDirectory)
-			select Path.Combine(root, "Modules/Vision/MediaPipe/Sidecar/mediapipe_face_landmarker_sidecar.py".Replace('/', Path.DirectorySeparatorChar)));
+			select Path.Combine(root, platformPath));
 		return list.FirstOrDefault(File.Exists) ?? "";
 	}
 
@@ -92,7 +253,7 @@ public sealed class MediaPipeSidecarPythonEnvironment
 		string[] array = new string[2] { "AVATAR_BUILDER_MEDIAPIPE_PYTHON", "AVATAR_BUILDER_PYTHON" };
 		for (int i = 0; i < array.Length; i++)
 		{
-			string environmentVariable = Environment.GetEnvironmentVariable(array[i]);
+			string? environmentVariable = Environment.GetEnvironmentVariable(array[i]);
 			if (!string.IsNullOrWhiteSpace(environmentVariable) && File.Exists(environmentVariable))
 			{
 				return environmentVariable;
@@ -166,7 +327,7 @@ public sealed class MediaPipeSidecarPythonEnvironment
 
 	private static IEnumerable<string> EnumerateAncestors(string start)
 	{
-		DirectoryInfo directory = new DirectoryInfo(start);
+		DirectoryInfo? directory = new DirectoryInfo(start);
 		if (File.Exists(start))
 		{
 			directory = Directory.GetParent(start) ?? directory;

@@ -1,6 +1,6 @@
 namespace AvatarBuilder.Modules.Vision.MediaPipe.Reconstruction;
 
-public sealed class MediaPipeVertexAccumulatorState
+public readonly record struct MediaPipeVertexAccumulatorState
 {
 	public int Index { get; init; }
 

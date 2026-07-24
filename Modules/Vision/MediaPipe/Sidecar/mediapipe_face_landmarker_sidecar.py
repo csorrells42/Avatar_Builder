@@ -6,14 +6,19 @@ import time
 import traceback
 
 
-def load_runtime(model_path):
+def load_runtime(model_path, delegate_name):
     import cv2
     import mediapipe as mp
     import numpy as np
     from mediapipe.tasks import python
     from mediapipe.tasks.python import vision
 
-    base_options = python.BaseOptions(model_asset_path=model_path)
+    delegate = (
+        python.BaseOptions.Delegate.GPU
+        if delegate_name == "gpu"
+        else python.BaseOptions.Delegate.CPU
+    )
+    base_options = python.BaseOptions(model_asset_path=model_path, delegate=delegate)
     options = vision.FaceLandmarkerOptions(
         base_options=base_options,
         running_mode=vision.RunningMode.VIDEO,
@@ -33,20 +38,39 @@ class SharedMemoryFrameReader:
         self._mapping = None
         self._mapping_name = ""
         self._capacity_bytes = 0
+        self._image_byte_length = 0
+        self._width = 0
+        self._height = 0
+        self._stride = 0
+        self._pixel_format = ""
 
     def read_image(self, mp, cv2, np, request):
-        name = str(request.get("sharedMemoryName", ""))
-        capacity_bytes = int(request.get("sharedMemoryCapacityBytes", 0))
-        image_byte_length = int(request.get("imageByteLength", 0))
-        width = int(request.get("imageWidth", 0))
-        height = int(request.get("imageHeight", 0))
-        stride = int(request.get("imageStride", 0))
-        pixel_format = str(request.get("imagePixelFormat", ""))
+        name = request.get("sharedMemoryName")
+        if name:
+            capacity_bytes = int(request.get("sharedMemoryCapacityBytes", 0))
+            image_byte_length = int(request.get("imageByteLength", 0))
+            width = int(request.get("imageWidth", 0))
+            height = int(request.get("imageHeight", 0))
+            stride = int(request.get("imageStride", 0))
+            pixel_format = str(request.get("imagePixelFormat", ""))
+            if capacity_bytes <= 0 or capacity_bytes > 512 * 1024 * 1024:
+                raise ValueError(f"invalid shared memory capacity: {capacity_bytes}")
+            self._ensure_mapping(str(name), capacity_bytes)
+            self._image_byte_length = image_byte_length
+            self._width = width
+            self._height = height
+            self._stride = stride
+            self._pixel_format = pixel_format
+        elif self._mapping is None:
+            raise ValueError("shared memory transport is not initialized")
+        else:
+            capacity_bytes = self._capacity_bytes
+            image_byte_length = self._image_byte_length
+            width = self._width
+            height = self._height
+            stride = self._stride
+            pixel_format = self._pixel_format
 
-        if not name:
-            raise ValueError("shared memory name is missing")
-        if capacity_bytes <= 0 or capacity_bytes > 512 * 1024 * 1024:
-            raise ValueError(f"invalid shared memory capacity: {capacity_bytes}")
         if width <= 0 or height <= 0 or stride < width * 4:
             raise ValueError(f"invalid BGRA dimensions: {width}x{height}, stride {stride}")
         if image_byte_length != stride * height or image_byte_length > capacity_bytes:
@@ -56,7 +80,6 @@ class SharedMemoryFrameReader:
         if pixel_format.upper() != "BGRA32":
             raise ValueError(f"unsupported shared image format: {pixel_format}")
 
-        self._ensure_mapping(name, capacity_bytes)
         pixel_rows = np.ndarray(
             shape=(height, stride),
             dtype=np.uint8,
@@ -66,6 +89,103 @@ class SharedMemoryFrameReader:
         bgra = pixel_rows[:, : width * 4].reshape((height, width, 4))
         rgb = cv2.cvtColor(bgra, cv2.COLOR_BGRA2RGB)
         return mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+
+    def close(self):
+        if self._mapping is not None:
+            self._mapping.close()
+            self._mapping = None
+        self._mapping_name = ""
+        self._capacity_bytes = 0
+        self._image_byte_length = 0
+        self._width = 0
+        self._height = 0
+        self._stride = 0
+        self._pixel_format = ""
+
+    def _ensure_mapping(self, name, capacity_bytes):
+        if (
+            self._mapping is not None
+            and self._mapping_name == name
+            and self._capacity_bytes == capacity_bytes
+        ):
+            return
+
+        self.close()
+        self._mapping = mmap.mmap(
+            -1,
+            capacity_bytes,
+            tagname=name,
+            access=mmap.ACCESS_READ,
+        )
+        self._mapping_name = name
+        self._capacity_bytes = capacity_bytes
+
+
+class SharedMemoryLandmarkWriter:
+    MAXIMUM_LANDMARK_COUNT = 512
+    VALUES_PER_LANDMARK = 3
+    MAXIMUM_TRANSFORMATION_MATRIX_VALUE_COUNT = 16
+    TRANSFORMATION_MATRIX_OFFSET_BYTES = (
+        MAXIMUM_LANDMARK_COUNT * VALUES_PER_LANDMARK * 4
+    )
+
+    def __init__(self):
+        self._mapping = None
+        self._mapping_name = ""
+        self._capacity_bytes = 0
+
+    def configure(self, request):
+        name = request.get("landmarkSharedMemoryName")
+        if name:
+            capacity_bytes = int(request.get("landmarkSharedMemoryCapacityBytes", 0))
+            required_bytes = (
+                self.TRANSFORMATION_MATRIX_OFFSET_BYTES
+                + self.MAXIMUM_TRANSFORMATION_MATRIX_VALUE_COUNT * 4
+            )
+            if required_bytes > capacity_bytes or capacity_bytes <= 0 or capacity_bytes > 1024 * 1024:
+                raise ValueError(f"invalid landmark shared memory capacity: {capacity_bytes}")
+            self._ensure_mapping(str(name), capacity_bytes)
+        elif self._mapping is None:
+            raise ValueError("landmark shared memory transport is not initialized")
+
+    def write(self, np, landmarks, transformation_matrix):
+        if self._mapping is None:
+            raise ValueError("landmark shared memory transport is not initialized")
+        required_bytes = (
+            self.TRANSFORMATION_MATRIX_OFFSET_BYTES
+            + self.MAXIMUM_TRANSFORMATION_MATRIX_VALUE_COUNT * 4
+        )
+        if required_bytes > self._capacity_bytes:
+            raise ValueError(f"invalid landmark shared memory capacity: {self._capacity_bytes}")
+        if len(landmarks) > self.MAXIMUM_LANDMARK_COUNT:
+            raise ValueError(f"invalid landmark count: {len(landmarks)}")
+
+        values = np.ndarray(
+            shape=(len(landmarks), self.VALUES_PER_LANDMARK),
+            dtype=np.float32,
+            buffer=self._mapping,
+            offset=0,
+        )
+        for index, landmark in enumerate(landmarks):
+            values[index, 0] = landmark.x
+            values[index, 1] = landmark.y
+            values[index, 2] = landmark.z
+
+        if transformation_matrix is None:
+            return 0
+        matrix_values = np.asarray(transformation_matrix, dtype=np.float32).reshape(-1)
+        if len(matrix_values) > self.MAXIMUM_TRANSFORMATION_MATRIX_VALUE_COUNT:
+            raise ValueError(
+                f"invalid transformation matrix value count: {len(matrix_values)}"
+            )
+        matrix_target = np.ndarray(
+            shape=(len(matrix_values),),
+            dtype=np.float32,
+            buffer=self._mapping,
+            offset=self.TRANSFORMATION_MATRIX_OFFSET_BYTES,
+        )
+        matrix_target[:] = matrix_values
+        return len(matrix_values)
 
     def close(self):
         if self._mapping is not None:
@@ -87,75 +207,92 @@ class SharedMemoryFrameReader:
             -1,
             capacity_bytes,
             tagname=name,
-            access=mmap.ACCESS_READ,
+            access=mmap.ACCESS_WRITE,
         )
         self._mapping_name = name
         self._capacity_bytes = capacity_bytes
 
 
-def handle_request(mp, cv2, np, landmarker, frame_reader, request):
-    total_started = time.perf_counter()
+def handle_request(mp, cv2, np, landmarker, frame_reader, landmark_writer, request):
+    collect_diagnostics = bool(request.get("collectDiagnostics", False))
+    total_started = time.perf_counter() if collect_diagnostics else 0.0
     request_id = request.get("requestId", "")
-    transport_started = time.perf_counter()
+    transport_started = time.perf_counter() if collect_diagnostics else 0.0
     image = frame_reader.read_image(mp, cv2, np, request)
-    transport_ms = elapsed_ms(transport_started)
-    inference_started = time.perf_counter()
+    landmark_writer.configure(request)
+    transport_ms = elapsed_ms(transport_started) if collect_diagnostics else 0.0
+    inference_started = time.perf_counter() if collect_diagnostics else 0.0
     timestamp_ms = int(request.get("timestampMilliseconds", 0))
     result = landmarker.detect_for_video(image, timestamp_ms)
-    inference_ms = elapsed_ms(inference_started)
+    inference_ms = elapsed_ms(inference_started) if collect_diagnostics else 0.0
     if not result.face_landmarks:
-        return {
+        response = {
             "requestId": request_id,
             "ok": True,
             "hasFace": False,
-            "status": "MediaPipe sidecar searching",
-            "landmarks": [],
-            "timingsMilliseconds": {
+            "landmarkCount": 0,
+        }
+        if collect_diagnostics:
+            response["timingsMilliseconds"] = {
                 "decode": transport_ms,
                 "sharedMemoryRead": transport_ms,
                 "inference": inference_ms,
                 "total": elapsed_ms(total_started),
-            },
-        }
-
-    landmarks = [
-        {"x": landmark.x, "y": landmark.y, "z": landmark.z}
-        for landmark in result.face_landmarks[0]
-    ]
-    blendshapes = []
-    if result.face_blendshapes:
-        blendshapes = [
-            {
-                "categoryName": category.category_name,
-                "score": float(category.score),
             }
-            for category in result.face_blendshapes[0]
-        ]
-    facial_transformation_matrix = []
-    if result.facial_transformation_matrixes:
-        try:
-            facial_transformation_matrix = (
-                np.asarray(result.facial_transformation_matrixes[0], dtype=float)
-                .reshape(-1)
-                .tolist()
-            )
-        except Exception:
-            facial_transformation_matrix = []
-    return {
+        return response
+
+    face_landmarks = result.face_landmarks[0]
+    facial_transformation_matrix = (
+        result.facial_transformation_matrixes[0]
+        if result.facial_transformation_matrixes
+        else None
+    )
+    facial_transformation_matrix_count = landmark_writer.write(
+        np,
+        face_landmarks,
+        facial_transformation_matrix,
+    )
+    eye_blink_left = None
+    eye_blink_right = None
+    jaw_open = None
+    mouth_close = None
+    if result.face_blendshapes:
+        found_blendshapes = 0
+        for category in result.face_blendshapes[0]:
+            name = category.category_name
+            if name == "eyeBlinkLeft":
+                eye_blink_left = float(category.score)
+                found_blendshapes += 1
+            elif name == "eyeBlinkRight":
+                eye_blink_right = float(category.score)
+                found_blendshapes += 1
+            elif name == "jawOpen":
+                jaw_open = float(category.score)
+                found_blendshapes += 1
+            elif name == "mouthClose":
+                mouth_close = float(category.score)
+                found_blendshapes += 1
+            if found_blendshapes == 4:
+                break
+    response = {
         "requestId": request_id,
         "ok": True,
         "hasFace": True,
-        "status": f"MediaPipe dense landmark lock ({len(landmarks)} points, {len(blendshapes)} blendshapes)",
-        "landmarks": landmarks,
-        "blendshapes": blendshapes,
-        "facialTransformationMatrix": facial_transformation_matrix,
-        "timingsMilliseconds": {
+        "landmarkCount": len(face_landmarks),
+        "eyeBlinkLeft": eye_blink_left,
+        "eyeBlinkRight": eye_blink_right,
+        "jawOpen": jaw_open,
+        "mouthClose": mouth_close,
+        "facialTransformationMatrixCount": facial_transformation_matrix_count,
+    }
+    if collect_diagnostics:
+        response["timingsMilliseconds"] = {
             "decode": transport_ms,
             "sharedMemoryRead": transport_ms,
             "inference": inference_ms,
             "total": elapsed_ms(total_started),
-        },
-    }
+        }
+    return response
 
 
 def elapsed_ms(started):
@@ -170,17 +307,31 @@ def write_response(response):
 def main():
     parser = argparse.ArgumentParser(description="Avatar Builder MediaPipe Face Landmarker sidecar")
     parser.add_argument("--model", required=True, help="Path to face_landmarker.task")
+    parser.add_argument("--delegate", choices=("cpu", "gpu"), default="cpu")
+    parser.add_argument("--probe", action="store_true")
     args = parser.parse_args()
 
     try:
-        mp, cv2, np, landmarker = load_runtime(args.model)
+        mp, cv2, np, landmarker = load_runtime(args.model, args.delegate)
     except Exception as exc:
         sys.stderr.write(f"MediaPipe sidecar startup failed: {exc}\n")
         sys.stderr.write(traceback.format_exc())
         sys.stderr.flush()
         return 3
 
+    if args.probe:
+        landmarker.close()
+        write_response(
+            {
+                "ok": True,
+                "delegate": args.delegate,
+                "status": f"MediaPipe {args.delegate.upper()} delegate ready",
+            }
+        )
+        return 0
+
     frame_reader = SharedMemoryFrameReader()
+    landmark_writer = SharedMemoryLandmarkWriter()
     try:
         for line in sys.stdin:
             line = line.strip()
@@ -191,7 +342,7 @@ def main():
             try:
                 request = json.loads(line)
                 request_id = request.get("requestId", "")
-                write_response(handle_request(mp, cv2, np, landmarker, frame_reader, request))
+                write_response(handle_request(mp, cv2, np, landmarker, frame_reader, landmark_writer, request))
             except Exception as exc:
                 write_response(
                     {
@@ -199,10 +350,11 @@ def main():
                         "ok": False,
                         "hasFace": False,
                         "status": f"MediaPipe sidecar request failed: {exc}",
-                        "landmarks": [],
+                        "landmarkCount": 0,
                     }
                 )
     finally:
+        landmark_writer.close()
         frame_reader.close()
         landmarker.close()
 

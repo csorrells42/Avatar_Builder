@@ -79,12 +79,9 @@ public sealed class MediaPipeNormalizedFaceReconstructor
 	{
 		public static bool TryCreate(MediaPipeGeometryFrame frame, out RotationMatrix rotation)
 		{
-			if (TryCreateFromFacialMatrix(frame.FacialTransformationMatrix, out rotation))
-			{
-				return true;
-			}
-			rotation = CreateFromEuler(frame.ARotationAroundXDegrees, frame.BRotationAroundYDegrees, frame.CRotationAroundZDegrees);
-			return true;
+			return TryCreateFromFacialMatrix(
+				frame.FacialTransformationMatrix,
+				out rotation);
 		}
 
 		private static bool TryCreateFromFacialMatrix(IReadOnlyList<double> values, out RotationMatrix rotation)
@@ -106,19 +103,6 @@ public sealed class MediaPipeNormalizedFaceReconstructor
 			return true;
 		}
 
-		private static RotationMatrix CreateFromEuler(double aDegrees, double bDegrees, double cDegrees)
-		{
-			double num = aDegrees * Math.PI / 180.0;
-			double num2 = bDegrees * Math.PI / 180.0;
-			double num3 = cDegrees * Math.PI / 180.0;
-			double num4 = Math.Cos(num);
-			double num5 = Math.Sin(num);
-			double num6 = Math.Cos(num2);
-			double num7 = Math.Sin(num2);
-			double num8 = Math.Cos(num3);
-			double num9 = Math.Sin(num3);
-			return new RotationMatrix(new Vector3(num8 * num6 - num9 * num5 * num7, (0.0 - num9) * num4, num8 * num7 + num9 * num5 * num6), new Vector3(num9 * num6 + num8 * num5 * num7, num8 * num4, num9 * num7 - num8 * num5 * num6), new Vector3((0.0 - num4) * num7, num5, num4 * num6));
-		}
 	}
 
 	private sealed class VertexAccumulator
@@ -595,7 +579,7 @@ public sealed class MediaPipeNormalizedFaceReconstructor
 	public void Restore(MediaPipeNormalizedFaceState? state, string subjectId, string subjectDisplayName)
 	{
 		Reset(subjectId, subjectDisplayName);
-		if (state == null || !string.Equals(state.SchemaVersion, "mediapipe-visible-geometry-v2", StringComparison.Ordinal) || !string.Equals(state.SubjectId, subjectId, StringComparison.OrdinalIgnoreCase))
+		if (state == null || !string.Equals(state.SubjectId, subjectId, StringComparison.OrdinalIgnoreCase))
 		{
 			return;
 		}
@@ -646,8 +630,8 @@ public sealed class MediaPipeNormalizedFaceReconstructor
 			FaceMeshLandmarkPoint obj = frame.Landmarks[i];
 			double num5 = (obj.X - point.X) * (double)frame.FrameWidthPixels / scale;
 			double num6 = (0.0 - (obj.Y - point.Y) * (double)frame.FrameHeightPixels) / scale;
-			double unrolledU = num3 * num5 + num4 * num6;
-			double unrolledV = (0.0 - num4) * num5 + num3 * num6;
+			double unrolledU = num3 * num5 - num4 * num6;
+			double unrolledV = num4 * num5 + num3 * num6;
 			span[i] = new NormalizedMeasurement(num5, num6, unrolledU, unrolledV);
 		}
 		Span<bool> span2 = stackalloc bool[478];
@@ -710,22 +694,24 @@ public sealed class MediaPipeNormalizedFaceReconstructor
 	public MediaPipeNormalizedFaceModel CreateModel()
 	{
 		MediaPipeNormalizedFaceVertex[] array = new MediaPipeNormalizedFaceVertex[478];
-		List<double> list = new List<double>(478);
+		Span<double> residuals = stackalloc double[478];
+		int residualCount = 0;
 		int num = 0;
 		for (int i = 0; i < array.Length; i++)
 		{
 			array[i] = _vertices[i].CreateVertex(DynamicIdentityMask[i]);
 			if (array[i].DirectObservationCount > 0)
 			{
-				list.Add(array[i].ResidualPercent);
+				residuals[residualCount++] = array[i].ResidualPercent;
 			}
 			if (array[i].EvidenceClass == "directly-measured")
 			{
 				num++;
 			}
 		}
-		list.Sort();
-		double medianResidualPercent = ((list.Count == 0) ? 0.0 : list[list.Count / 2]);
+		Span<double> observedResiduals = residuals[..residualCount];
+		observedResiduals.Sort();
+		double medianResidualPercent = residualCount == 0 ? 0.0 : observedResiduals[residualCount / 2];
 		IReadOnlyList<MediaPipeSilhouetteAngleProfile> readOnlyList = CreateSilhouetteProfiles();
 		IReadOnlyList<MediaPipeVisualHullSlice> readOnlyList2 = CreateVisualHullSlices(readOnlyList);
 		double num2 = ((array.Length == 0) ? 0.0 : ((double)num * 100.0 / (double)array.Length));

@@ -19,9 +19,9 @@ Stopping avatar capture leaves camera preview and live MediaPipe tracking availa
 Camera capture and preview never wait for face analysis, model building, or disk writes.
 
 - The camera renderer presents frames independently.
-- Each MediaPipe analysis lane has one worker and one replaceable newest pending frame.
-- Main and stereo geometry builders have one worker and one replaceable newest pending result.
-- A new input replaces stale pending work instead of extending a queue.
+- Each MediaPipe analysis lane has one worker and one accepted frame slot.
+- Main and stereo geometry builders have one worker and no waiting slot.
+- While a slot is occupied, new inputs are ignored before copying or conversion. Accepted work always finishes.
 - Model publication and persistence run away from the WPF UI thread.
 
 This keeps latency and memory bounded when camera input is faster than the available processing rate.
@@ -36,16 +36,17 @@ This keeps latency and memory bounded when camera input is faster than the avail
 - DX12 Preview Viewport
 - Show Face Mesh Overlay
 - Show Live Wireframe Only
-- MediaPipe Convergence Audit
-- Tracking Fidelity: 4K, HD, or Safe Preview
+- MediaPipe Processor: CPU (Stable) or GPU (DirectML)
 
-MediaPipe is the only face-landmark backend. The retired DECA/FLAME and 3DDFA paths are not part of the runtime.
+MediaPipe is the primary face-landmark and measured-geometry backend. CPU uses the established MediaPipe Tasks graph by default. GPU uses converted copies of the official MediaPipe detector and 478-point landmark models through ONNX Runtime DirectML. The GPU path is enabled only after its detector, landmarker, and DirectML provider pass a startup probe; a failed probe leaves CPU active. 3DDFA-V2 remains available as a backup face-box tracker and as the explicit dense scaffold that measured MediaPipe evidence reshapes.
+
+The CPU and GPU paths share the same one-in-flight, zero-waiting contract. A frame is accepted only while the processor is idle, every accepted frame finishes, and arrivals during that work are dropped before pixel conversion or shared-memory copying. On the development workstation, the DirectML path measured about 8.4 ms per saved 4K frame through the complete C# client and shared-memory transport after a one-time process warmup. That is roughly 119 processed frames per second of available inference capacity; live camera rate and preview presentation remain independent limits.
 
 ## Dual-camera workspace
 
 The preserved dual-camera module runs two independent camera and MediaPipe lanes. It supports physical checkerboard calibration, coordinate translation, stereo face capture, raw-point inspection, and probability-surface inspection.
 
-Each camera lane keeps only the newest waiting analysis frame. Calibration and registration coordinators also operate on the newest available pair. Stereo model construction is asynchronous and latest-only.
+Each camera lane accepts a frame only when its analysis slot is empty. Calibration and registration coordinators operate on the newest compatible observations without growing queues. Stereo model construction is asynchronous, one-in-flight, and zero-waiting.
 
 ## Stored data
 

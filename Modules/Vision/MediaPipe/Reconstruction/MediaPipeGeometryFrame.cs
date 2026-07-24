@@ -28,23 +28,10 @@ public sealed class MediaPipeGeometryFrame
 	public static MediaPipeGeometryFrame Create(FaceLandmarkFrame frame, int frameWidthPixels, int frameHeightPixels, string cameraId, double horizontalFieldOfViewDegrees)
 	{
 		ArgumentNullException.ThrowIfNull(frame, "frame");
-		FaceMeshLandmarkPoint[] array = new FaceMeshLandmarkPoint[frame.DenseMeshPoints.Count];
-		for (int i = 0; i < array.Length; i++)
-		{
-			FaceMeshLandmarkPoint faceMeshLandmarkPoint = frame.DenseMeshPoints[i];
-			array[i] = new FaceMeshLandmarkPoint
-			{
-				Index = faceMeshLandmarkPoint.Index,
-				X = faceMeshLandmarkPoint.X,
-				Y = faceMeshLandmarkPoint.Y,
-				Z = faceMeshLandmarkPoint.Z
-			};
-		}
-		double[] array2 = new double[frame.FacialTransformationMatrix.Count];
-		for (int j = 0; j < array2.Length; j++)
-		{
-			array2[j] = frame.FacialTransformationMatrix[j];
-		}
+		FaceMeshLandmarkPoint[] landmarks = frame.DenseMeshPoints as FaceMeshLandmarkPoint[]
+			?? CopyLandmarks(frame.DenseMeshPoints);
+		double[] transformationMatrix = frame.FacialTransformationMatrix as double[]
+			?? CopyTransformationMatrix(frame.FacialTransformationMatrix);
 		return new MediaPipeGeometryFrame
 		{
 			CapturedAtUtc = frame.CapturedAtUtc,
@@ -55,8 +42,28 @@ public sealed class MediaPipeGeometryFrame
 			ARotationAroundXDegrees = frame.HeadPitchDegrees,
 			BRotationAroundYDegrees = frame.HeadYawDegrees,
 			CRotationAroundZDegrees = frame.HeadRollDegrees,
-			Landmarks = array,
-			FacialTransformationMatrix = array2
+			Landmarks = landmarks,
+			FacialTransformationMatrix = transformationMatrix
 		};
+	}
+
+	private static FaceMeshLandmarkPoint[] CopyLandmarks(System.Collections.Generic.IReadOnlyList<FaceMeshLandmarkPoint> source)
+	{
+		FaceMeshLandmarkPoint[] copy = new FaceMeshLandmarkPoint[source.Count];
+		for (int i = 0; i < copy.Length; i++)
+		{
+			copy[i] = source[i];
+		}
+		return copy;
+	}
+
+	private static double[] CopyTransformationMatrix(System.Collections.Generic.IReadOnlyList<double> source)
+	{
+		double[] copy = new double[source.Count];
+		for (int i = 0; i < copy.Length; i++)
+		{
+			copy[i] = source[i];
+		}
+		return copy;
 	}
 }

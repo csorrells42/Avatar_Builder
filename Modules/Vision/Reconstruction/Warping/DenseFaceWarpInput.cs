@@ -13,7 +13,13 @@ public sealed class DenseFaceWarpInput
 
 	public IReadOnlyList<DenseFaceWarpVertex> SourceVertices { get; init; } = Array.Empty<DenseFaceWarpVertex>();
 
+	public IReadOnlyList<DenseFaceWarpVertex> MeasuredVertices { get; init; } = Array.Empty<DenseFaceWarpVertex>();
+
+	public IReadOnlyList<double> MeasuredConfidences { get; init; } = Array.Empty<double>();
+
 	public IReadOnlyList<MeshTopologyEdge> TopologyEdges { get; init; } = Array.Empty<MeshTopologyEdge>();
+
+	public IReadOnlyList<MeshTopologyEdge> MeasuredTopologyEdges { get; init; } = Array.Empty<MeshTopologyEdge>();
 
 	public IReadOnlyList<DenseFaceWarpControlPoint> ControlPoints { get; init; } = Array.Empty<DenseFaceWarpControlPoint>();
 }

@@ -10,7 +10,7 @@ Responsibilities:
 - Give each viewport its own camera selector, mode selector, and on/off lifecycle.
 - Prefer a 4K MJPEG mode near 30 fps when a camera provides one.
 - Capture physical cameras through the texture-native path when available and route DirectShow-only virtual cameras through a compatible capture adapter into the same DX12 presenter.
-- Keep each camera preview at the source frame rate while vision consumes only the newest available frame.
+- Keep each camera preview at the source frame rate while vision accepts a frame only when its analysis slot is empty.
 - Run one independent MediaPipe tracker and analysis worker per active camera.
 - Pair only the newest timestamp-compatible observations for optional cross-camera registration; never queue registration work.
 - Translate each camera's 3D MediaPipe scan into the other camera's normalized face space and visualize the residual alignment.
@@ -22,9 +22,9 @@ Responsibilities:
 
 ## Ownership Contract
 
-`DualCameraLane` owns exactly one active capture adapter, one `MediaPipeFaceLandmarkerSidecarTracker`, and one analysis worker. The adapter is either a texture-native `Dx12Camera` or a compatible DirectShow capture feeding `Dx12UploadCamera`; they never run together in one lane. The lane finishes its active frame and keeps only the newest pending frame, replacing and disposing older pending input. There is no cross-camera frame sharing and no growing analysis queue.
+`DualCameraLane` owns exactly one active capture adapter, one `MediaPipeFaceLandmarkerSidecarTracker`, and one analysis worker. The adapter is either a texture-native `Dx12Camera` or a compatible DirectShow capture feeding `Dx12UploadCamera`; they never run together in one lane. The lane reserves its only analysis slot before duplicating frame data, finishes that accepted frame, and ignores new arrivals until the slot is free. There is no cross-camera frame sharing and no analysis queue.
 
-The preview path is not throttled by analysis. MediaPipe runs as fast as its worker allows while newer arrivals replace stale pending input. The camera continues presenting source frames independently, so inference cannot create latency or catch-up work.
+The preview path is not throttled by analysis. MediaPipe runs as fast as its worker allows while arrivals during active work are ignored. The camera continues presenting source frames independently, so inference cannot create latency or catch-up work.
 
 The health monitor is also lane-local. A fault in one camera never restarts the other camera or its MediaPipe sidecar. Both lanes prefer 4K/30 when the selected camera exposes it. Single-in-flight handoffs keep camera presentation and MediaPipe analysis self-throttling instead of reducing the requested camera mode.
 
@@ -38,7 +38,7 @@ Direct-view ownership is computed from the projected area of the MediaPipe trian
 
 `Build 3D Face` consumes only physically calibrated pairs. It converts rig-space landmarks into a head-fixed coordinate system with the eye midpoint as origin, X along the eyes, Y from chin toward forehead, and Z toward the nose. This removes head translation and A/B/C rotation while preserving dimensions in inches.
 
-The reconstruction worker is independent of both camera lanes and keeps one active frame plus one replaceable newest pending frame. It robustly accumulates the 478 directly measured anchors and a separate image-matched stereo layer, rejects high-residual and hidden-side observations, and keeps eyes and lips as expression evidence rather than allowing them to deform identity shape. The matcher reuses the lanes' existing analysis images; it does not add another 4K copy or run on either camera thread. The resumable model and self-contained viewer are stored at `<profile folder>\StereoFaceGeometry`.
+The reconstruction worker is independent of both camera lanes and accepts one synchronized pair only when idle. It robustly accumulates the 478 directly measured anchors and a separate image-matched stereo layer, rejects high-residual and hidden-side observations, and keeps eyes and lips as expression evidence rather than allowing them to deform identity shape. The matcher reuses the lanes' existing analysis images; it does not add another 4K copy or run on either camera thread. The resumable model and self-contained viewer are stored at `<profile folder>\StereoFaceGeometry`.
 
 ## Entry Points
 

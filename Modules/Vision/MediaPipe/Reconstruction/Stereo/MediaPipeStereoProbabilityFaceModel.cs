@@ -5,10 +5,6 @@ namespace AvatarBuilder.Modules.Vision.MediaPipe.Reconstruction.Stereo;
 
 public sealed class MediaPipeStereoProbabilityFaceModel
 {
-	public const string CurrentSchemaVersion = "stereo-probability-face-v2";
-
-	public string SchemaVersion { get; init; } = "stereo-probability-face-v2";
-
 	public string SubjectId { get; init; } = "";
 
 	public string SubjectDisplayName { get; init; } = "";

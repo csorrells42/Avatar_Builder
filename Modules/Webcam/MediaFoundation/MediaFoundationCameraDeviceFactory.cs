@@ -82,7 +82,7 @@ internal static class MediaFoundationCameraDeviceFactory
 		{
 			mediaSource = CreateMediaSource(iMFActivate, camera.Name);
 			IMFAttributes attributes;
-			int num = MediaFoundationInterop.MFCreateAttributes(out attributes, 3);
+			int num = MediaFoundationInterop.MFCreateAttributes(out attributes, 4);
 			if (MediaFoundationInterop.Failed(num))
 			{
 				throw new InvalidOperationException($"Media Foundation source-reader attributes failed: 0x{num:X8}");
@@ -90,6 +90,7 @@ internal static class MediaFoundationCameraDeviceFactory
 			try
 			{
 				MediaFoundationInterop.ThrowIfFailed(attributes.SetUINT32(in MediaFoundationGuids.MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, 1));
+				MediaFoundationInterop.ThrowIfFailed(attributes.SetUINT32(in MediaFoundationGuids.MF_LOW_LATENCY, 1));
 				MediaFoundationInterop.ThrowIfFailed(attributes.SetUINT32(in MediaFoundationGuids.MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING, 1));
 				IMFSourceReader reader;
 				int num2 = MediaFoundationInterop.MFCreateSourceReaderFromMediaSource(mediaSource, attributes, out reader);
@@ -131,10 +132,11 @@ internal static class MediaFoundationCameraDeviceFactory
 		try
 		{
 			mediaSource = CreateMediaSource(iMFActivate, camera.Name);
-			MediaFoundationInterop.ThrowIfFailed(MediaFoundationInterop.MFCreateAttributes(out IMFAttributes attributes, 5));
+			MediaFoundationInterop.ThrowIfFailed(MediaFoundationInterop.MFCreateAttributes(out IMFAttributes attributes, 6));
 			try
 			{
 				MediaFoundationInterop.ThrowIfFailed(attributes.SetUINT32(in MediaFoundationGuids.MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, 1));
+				MediaFoundationInterop.ThrowIfFailed(attributes.SetUINT32(in MediaFoundationGuids.MF_LOW_LATENCY, 1));
 				if (enableAdvancedVideoProcessing)
 				{
 					MediaFoundationInterop.ThrowIfFailed(attributes.SetUINT32(in MediaFoundationGuids.MF_SOURCE_READER_ENABLE_ADVANCED_VIDEO_PROCESSING, 1));

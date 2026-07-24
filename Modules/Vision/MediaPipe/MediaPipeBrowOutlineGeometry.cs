@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.Linq;
 using AvatarBuilder.Modules.Vision.Common;
 
 namespace AvatarBuilder.Modules.Vision.MediaPipe;
@@ -21,51 +20,44 @@ internal static class MediaPipeBrowOutlineGeometry
 		{
 			return Array.Empty<int>();
 		}
-		Dictionary<int, FaceMeshLandmarkPoint> dictionary = new Dictionary<int, FaceMeshLandmarkPoint>(meshPoints.Count);
-		foreach (FaceMeshLandmarkPoint meshPoint in meshPoints)
+		Span<IndexedPoint> points = candidateIndices.Count <= 64
+			? stackalloc IndexedPoint[candidateIndices.Count]
+			: new IndexedPoint[candidateIndices.Count];
+		int pointCount = 0;
+		for (int i = 0; i < candidateIndices.Count; i++)
 		{
-			if (double.IsFinite(meshPoint.X) && double.IsFinite(meshPoint.Y))
+			int candidateIndex = candidateIndices[i];
+			if (TryGetMeshPoint(meshPoints, candidateIndex, out FaceMeshLandmarkPoint value) &&
+				double.IsFinite(value.X) &&
+				double.IsFinite(value.Y))
 			{
-				dictionary[meshPoint.Index] = meshPoint;
+				points[pointCount++] = new IndexedPoint(candidateIndex, value.X, value.Y);
 			}
 		}
-		List<IndexedPoint> list = new List<IndexedPoint>(candidateIndices.Count);
-		foreach (int candidateIndex in candidateIndices)
-		{
-			if (dictionary.TryGetValue(candidateIndex, out var value))
-			{
-				list.Add(new IndexedPoint(candidateIndex, value.X, value.Y));
-			}
-		}
-		list.Sort(delegate(IndexedPoint left, IndexedPoint right)
-		{
-			int num4 = left.X.CompareTo(right.X);
-			if (num4 != 0)
-			{
-				return num4;
-			}
-			int num5 = left.Y.CompareTo(right.Y);
-			return (num5 == 0) ? left.Index.CompareTo(right.Index) : num5;
-		});
-		RemoveDuplicateCoordinates(list);
-		if (list.Count < 3)
+		Span<IndexedPoint> validPoints = points[..pointCount];
+		SortPoints(validPoints);
+		pointCount = RemoveDuplicateCoordinates(validPoints);
+		if (pointCount < 3)
 		{
 			return Array.Empty<int>();
 		}
-		IndexedPoint[] array = new IndexedPoint[list.Count * 2];
+		Span<IndexedPoint> uniquePoints = validPoints[..pointCount];
+		Span<IndexedPoint> array = pointCount <= 64
+			? stackalloc IndexedPoint[pointCount * 2]
+			: new IndexedPoint[pointCount * 2];
 		int count = 0;
-		foreach (IndexedPoint item in list)
+		for (int i = 0; i < uniquePoints.Length; i++)
 		{
-			AppendHullPoint(array, ref count, item);
+			AppendHullPoint(array, ref count, uniquePoints[i]);
 		}
 		int num = count;
-		for (int num2 = list.Count - 2; num2 >= 0; num2--)
+		for (int num2 = uniquePoints.Length - 2; num2 >= 0; num2--)
 		{
-			while (count > num && count >= 2 && Cross(array[count - 2], array[count - 1], list[num2]) <= 1E-10)
+			while (count > num && count >= 2 && Cross(array[count - 2], array[count - 1], uniquePoints[num2]) <= 1E-10)
 			{
 				count--;
 			}
-			array[count++] = list[num2];
+			array[count++] = uniquePoints[num2];
 		}
 		count--;
 		if (count < 3)
@@ -91,20 +83,19 @@ internal static class MediaPipeBrowOutlineGeometry
 			failureReason = "The eyebrow outline is open.";
 			return false;
 		}
-		if (outlineIndices.Count < 3 || outlineIndices.Distinct().Count() != outlineIndices.Count)
+		if (outlineIndices.Count < 3 || ContainsDuplicateIndices(outlineIndices))
 		{
 			failureReason = "The eyebrow outline needs at least three unique vertices.";
 			return false;
 		}
-		Dictionary<int, FaceMeshLandmarkPoint> dictionary = new Dictionary<int, FaceMeshLandmarkPoint>(meshPoints.Count);
-		foreach (FaceMeshLandmarkPoint meshPoint in meshPoints)
-		{
-			dictionary[meshPoint.Index] = meshPoint;
-		}
-		IndexedPoint[] array = new IndexedPoint[outlineIndices.Count];
+		Span<IndexedPoint> array = outlineIndices.Count <= 64
+			? stackalloc IndexedPoint[outlineIndices.Count]
+			: new IndexedPoint[outlineIndices.Count];
 		for (int i = 0; i < outlineIndices.Count; i++)
 		{
-			if (!dictionary.TryGetValue(outlineIndices[i], out var value) || !double.IsFinite(value.X) || !double.IsFinite(value.Y))
+			if (!TryGetMeshPoint(meshPoints, outlineIndices[i], out FaceMeshLandmarkPoint value) ||
+				!double.IsFinite(value.X) ||
+				!double.IsFinite(value.Y))
 			{
 				failureReason = $"Eyebrow vertex {outlineIndices[i]} is missing or invalid.";
 				return false;
@@ -150,23 +141,86 @@ internal static class MediaPipeBrowOutlineGeometry
 		return true;
 	}
 
-	private static void RemoveDuplicateCoordinates(List<IndexedPoint> points)
+	private static void SortPoints(Span<IndexedPoint> points)
+	{
+		for (int i = 1; i < points.Length; i++)
+		{
+			IndexedPoint point = points[i];
+			int insertAt = i - 1;
+			while (insertAt >= 0 && Compare(points[insertAt], point) > 0)
+			{
+				points[insertAt + 1] = points[insertAt];
+				insertAt--;
+			}
+			points[insertAt + 1] = point;
+		}
+	}
+
+	private static int Compare(IndexedPoint left, IndexedPoint right)
+	{
+		int result = left.X.CompareTo(right.X);
+		if (result != 0)
+		{
+			return result;
+		}
+		result = left.Y.CompareTo(right.Y);
+		return result != 0 ? result : left.Index.CompareTo(right.Index);
+	}
+
+	private static int RemoveDuplicateCoordinates(Span<IndexedPoint> points)
 	{
 		int num = 1;
-		for (int i = 1; i < points.Count; i++)
+		for (int i = 1; i < points.Length; i++)
 		{
 			if (!SamePoint(points[i], points[num - 1]))
 			{
 				points[num++] = points[i];
 			}
 		}
-		if (num < points.Count)
-		{
-			points.RemoveRange(num, points.Count - num);
-		}
+		return num;
 	}
 
-	private static void AppendHullPoint(IndexedPoint[] hull, ref int count, IndexedPoint point)
+	private static bool ContainsDuplicateIndices(IReadOnlyList<int> indices)
+	{
+		for (int i = 0; i < indices.Count - 1; i++)
+		{
+			for (int j = i + 1; j < indices.Count; j++)
+			{
+				if (indices[i] == indices[j])
+				{
+					return true;
+				}
+			}
+		}
+		return false;
+	}
+
+	private static bool TryGetMeshPoint(
+		IReadOnlyList<FaceMeshLandmarkPoint> meshPoints,
+		int index,
+		out FaceMeshLandmarkPoint point)
+	{
+		if ((uint)index < (uint)meshPoints.Count)
+		{
+			point = meshPoints[index];
+			if (point.Index == index)
+			{
+				return true;
+			}
+		}
+		for (int i = 0; i < meshPoints.Count; i++)
+		{
+			point = meshPoints[i];
+			if (point.Index == index)
+			{
+				return true;
+			}
+		}
+		point = default;
+		return false;
+	}
+
+	private static void AppendHullPoint(Span<IndexedPoint> hull, ref int count, IndexedPoint point)
 	{
 		while (count >= 2 && Cross(hull[count - 2], hull[count - 1], point) <= 1E-10)
 		{

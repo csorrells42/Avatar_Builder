@@ -1,4 +1,5 @@
 using System;
+using System.Buffers;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.Diagnostics;
@@ -18,13 +19,8 @@ using System.Windows.Media.Imaging;
 using System.Windows.Shapes;
 using System.Windows.Threading;
 using AvatarBuilder.Modules.Infrastructure;
-using AvatarBuilder.Modules.Storage.AvatarObservations;
-using AvatarBuilder.Modules.Storage.AvatarObservations.Review;
 using AvatarBuilder.Modules.Vision.Analysis;
 using AvatarBuilder.Modules.Vision.Common;
-using AvatarBuilder.Modules.Vision.Deca;
-using AvatarBuilder.Modules.Vision.Deca.StandardModel;
-using AvatarBuilder.Modules.Vision.Diagnostics;
 using AvatarBuilder.Modules.Vision.MediaPipe;
 using AvatarBuilder.Modules.Vision.MediaPipe.Reconstruction;
 using AvatarBuilder.Modules.Vision.Onnx;
@@ -48,19 +44,20 @@ public partial class MainWindow : Window, IComponentConnector
 {
 	private sealed record CameraControlBinding(CameraDevice Camera, CameraControlItem Control, TextBlock ValueText, Slider Slider, CheckBox AutoCheckBox);
 
-	private sealed record TrackingFidelityOption(int MaxOutputWidth, double MaxFramesPerSecond);
+	private sealed record FaceBoxTrackingFrameResult(
+		FaceBoxSystem FaceBoxSystem,
+		int FaceBoxSystemGeneration,
+		FaceLandmarkTrackingResult TrackingResult,
+		ThreeDdfaOnnxSidecarResponse? ThreeDdfaResponse,
+		long CapturedAtTimestamp,
+		DateTime CapturedAtUtc,
+		int SourceWidth,
+		int SourceHeight,
+		BitmapSource? SourceFrame);
 
-	private sealed record LiveWireframeProjectedPoint(int Index, double X, double Y, double Z);
+	private sealed record FaceAnalysisResult(FaceLandmarkFrame RawLandmarkFrame, FaceLandmarkFrame ReconstructedLandmarkFrame, FaceLandmarkMetrics Metrics, FaceLockStabilityAnalysis Stability);
 
-	private sealed record FaceBoxTrackingFrameResult(FaceBoxSystem FaceBoxSystem, int FaceBoxSystemGeneration, FaceLandmarkTrackingResult TrackingResult, ThreeDdfaOnnxSidecarResponse? ThreeDdfaResponse, AvatarReconstructionSnapshot? ThreeDdfaSnapshot, string ProfileId, long SessionGeneration, DateTime CapturedAtUtc, BitmapSource SourceFrame, AvatarCaptureQualityAssessment CaptureQuality, FaceFrameGeometry FaceGeometry, double InferenceMilliseconds);
-
-	private sealed record AvatarLearningState(bool Active, string Title, string Detail, Color Accent);
-
-	private sealed record AvatarTrackingSanityState(string Detail, Color Accent);
-
-	private sealed record AvatarReportSnapshot(string Folder, string SubjectId, string SubjectDisplayName, AvatarCaptureQualityAssessment CaptureQuality, bool UserLoggedIn, bool AvatarCaptureRequested, bool AvatarCaptureActive, string AvatarCaptureStatus, string AvatarCaptureCorrection, FaceFrameGeometry FaceFrameGeometry, FaceReconstructionLaneStatus ReconstructionLane);
-
-	private sealed record AvatarReportSaveResult(string AvatarSystemDashboardPath, string AvatarModelHtmlPath);
+	private readonly record struct AvatarLearningState(string Title, string Detail, Brush Accent);
 
 	private sealed record AvatarLoginSelection(string ProfileId, string NewDisplayName);
 
@@ -78,19 +75,11 @@ public partial class MainWindow : Window, IComponentConnector
 
 	private const string ShutdownLogFileName = "AvatarBuilder-shutdown.log";
 
-	private const bool UseDecaAvatarReconstruction = false;
-
-	private const bool UseThreeDdfaAvatarReconstructionFallback = false;
-
-	private const double FallbackAvatarReconstructionSampleIntervalMilliseconds = 1000.0;
-
 	private const double Insta360Link2ProHorizontalFovDegrees = 71.4;
 
-	private static readonly TimeSpan FaceFeatureDetectionTargetInterval = TimeSpan.FromMilliseconds(15L);
+	private static readonly TimeSpan MaximumLiveAwarenessFrameAge = TimeSpan.FromMilliseconds(250L);
 
 	private static readonly TimeSpan RecoverableVisionErrorStatusInterval = TimeSpan.FromSeconds(3L);
-
-	private static readonly HashSet<string> PhotoTrainingImageExtensions = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { ".jpg", ".jpeg", ".png", ".bmp" };
 
 	private static readonly SolidColorBrush StartActionButtonBackground = CreateFrozenBrush(31, 122, 67);
 
@@ -99,6 +88,26 @@ public partial class MainWindow : Window, IComponentConnector
 	private static readonly SolidColorBrush StopActionButtonBackground = CreateFrozenBrush(157, 47, 47);
 
 	private static readonly SolidColorBrush StopActionButtonBorder = CreateFrozenBrush(224, 105, 105);
+
+	private static readonly SolidColorBrush AvatarStoppedBrush = CreateFrozenBrush(89, 97, 107);
+
+	private static readonly SolidColorBrush AvatarWaitingBrush = CreateFrozenBrush(215, 165, 58);
+
+	private static readonly SolidColorBrush AvatarActiveBrush = CreateFrozenBrush(74, 163, 107);
+
+	private static readonly SolidColorBrush AvatarLoginActiveBrush = CreateFrozenBrush(128, 224, 164);
+
+	private static readonly SolidColorBrush AvatarLoginInactiveBrush = CreateFrozenBrush(byte.MaxValue, 207, 122);
+
+	private static readonly SolidColorBrush GuidanceGoodBrush = CreateFrozenBrush(128, 224, 164);
+
+	private static readonly SolidColorBrush GuidanceWarningBrush = CreateFrozenBrush(byte.MaxValue, 210, 122);
+
+	private static readonly SolidColorBrush GuidanceBlockedBrush = CreateFrozenBrush(byte.MaxValue, 154, 154);
+
+	private static readonly SolidColorBrush GuidanceIdleBrush = CreateFrozenBrush(185, 215, 239);
+
+	private static readonly BitmapSource EmptyBgraBitmap = CreateEmptyBgraBitmap();
 
 	private static readonly int[] DenseMeshEyeA = new int[16]
 	{
@@ -147,6 +156,22 @@ public partial class MainWindow : Window, IComponentConnector
 
 	private static readonly SolidColorBrush FaceMeshOverlayPointBrush = CreateFrozenBrush(220, 239, byte.MaxValue, 184);
 
+	private static readonly SolidColorBrush LiveWireframeMeshBrush = CreateFrozenBrush(47, 108, 143, 88);
+
+	private static readonly SolidColorBrush WireframeEyeBrush = CreateFrozenBrush(143, 242, 197, 242);
+
+	private static readonly SolidColorBrush WireframeBrowBrush = CreateFrozenBrush(201, 247, 163, 242);
+
+	private static readonly SolidColorBrush WireframeMouthBrush = CreateFrozenBrush(byte.MaxValue, 159, 189, 242);
+
+	private static readonly SolidColorBrush WireframeJawBrush = CreateFrozenBrush(byte.MaxValue, 209, 102, 242);
+
+	private static readonly SolidColorBrush WireframeNoseBrush = CreateFrozenBrush(217, 232, byte.MaxValue, 242);
+
+	private static readonly SolidColorBrush WireframeFaceBrush = CreateFrozenBrush(101, 200, byte.MaxValue, 242);
+
+	private static readonly SolidColorBrush WireframeDefaultBrush = CreateFrozenBrush(220, 239, byte.MaxValue, 224);
+
 	private static readonly PreviewOverlayEdge[] MediaPipePreviewMeshEdges = CreateMediaPipePreviewMeshEdges();
 
 	private static readonly PreviewOverlayIndexedPath[] MediaPipePreviewMeshBaseFeaturePaths = CreateMediaPipePreviewMeshBaseFeaturePaths();
@@ -159,7 +184,13 @@ public partial class MainWindow : Window, IComponentConnector
 
 	private readonly CameraPreviewService _previewService = new CameraPreviewService();
 
-	private CompositeFaceLandmarkTracker? _faceLandmarkTracker = new CompositeFaceLandmarkTracker();
+	private CompositeFaceLandmarkTracker? _faceLandmarkTracker = new CompositeFaceLandmarkTracker(MediaPipeExecutionBackend.Gpu);
+
+	private MediaPipeDirectMlTextureTracker? _directMlTextureTracker;
+
+	private int _directMlTextureTrackerCameraGeneration = -1;
+
+	private MediaPipeExecutionBackend _mediaPipeExecutionBackend = MediaPipeExecutionBackend.Gpu;
 
 	private readonly FaceLandmarkTemporalReconstructor _faceLandmarkReconstructor = new FaceLandmarkTemporalReconstructor();
 
@@ -167,19 +198,13 @@ public partial class MainWindow : Window, IComponentConnector
 
 	private readonly FaceLockStabilityAnalyzer _faceLockStabilityAnalyzer = new FaceLockStabilityAnalyzer();
 
-	private readonly FaceFrameGeometryEstimator _faceFrameGeometryEstimator = new FaceFrameGeometryEstimator();
-
 	private readonly ThreeDdfaOnnxModelInfo _threeDdfaOnnxModelInfo;
 
 	private readonly ThreeDdfaOnnxSidecarEnvironment _threeDdfaOnnxEnvironment;
 
-	private readonly DecaSidecarEnvironment _decaEnvironment;
-
 	private ThreeDdfaOnnxReconstructionClient? _threeDdfaAvatarClient;
 
 	private ThreeDdfaOnnxReconstructionClient? _threeDdfaFaceBoxClient;
-
-	private DecaReconstructionClient? _decaAvatarClient;
 
 	private readonly AvatarBuilderStartupOptions _startupOptions;
 
@@ -189,69 +214,37 @@ public partial class MainWindow : Window, IComponentConnector
 
 	private readonly AvatarCaptureQualityAnalyzer _avatarCaptureQualityAnalyzer = new AvatarCaptureQualityAnalyzer();
 
-	private readonly AvatarObservationRepository _avatarObservationRepository = new AvatarObservationRepository();
-
-	private readonly AvatarDataReviewServer _avatarDataReviewServer;
-
-	private readonly AvatarObservationStorageService _avatarObservationStorageService;
-
-	private readonly AvatarStandardModelStore _avatarStandardModelStore = new AvatarStandardModelStore();
-
-	private readonly ManualStandardModelCaptureService _manualStandardModelCaptureService;
-
-	private readonly AvatarModelHistoryStore _avatarModelHistoryStore = new AvatarModelHistoryStore();
-
-	private readonly AvatarModelStore _avatarModelStore = new AvatarModelStore();
-
-	private readonly AvatarSystemDashboardStore _avatarSystemDashboardStore = new AvatarSystemDashboardStore();
-
-	private readonly VisionBenchmarkRecorder _visionBenchmarkRecorder = new VisionBenchmarkRecorder();
-
-	private readonly PoseAlignmentAuditor _poseAlignmentAuditor = new PoseAlignmentAuditor();
-
-	private readonly MediaPipeConvergenceAuditor _mediaPipeConvergenceAuditor = new MediaPipeConvergenceAuditor();
-
 	private readonly MediaPipeGeometryPipeline _mediaPipeGeometryPipeline = new MediaPipeGeometryPipeline();
+
+	private readonly LatestTextureFrameWorker _directX12AnalysisWorker;
 
 	private readonly object _faceLandmarkTrackerLock = new object();
 
+	private readonly object _faceAnalysisStateLock = new object();
+
+	private int _faceAnalysisGeneration;
+
 	private readonly object _threeDdfaClientLock = new object();
 
-	private readonly object _decaClientLock = new object();
-
 	private readonly object _directX12PreviewLock = new object();
-
-	private readonly object _personalFaceReportWriterLock = new object();
-
-	private readonly object _avatarReportStorageLock = new object();
-
-	private readonly object _threeDdfaTopologyLock = new object();
-
-	private readonly Dictionary<string, AvatarStandardPoseSample> _standardPoseAtlas = new Dictionary<string, AvatarStandardPoseSample>(StringComparer.Ordinal);
 
 	private readonly SemaphoreSlim _cameraLifecycleGate = new SemaphoreSlim(1, 1);
 
 	private readonly DispatcherTimer _cameraHealthTimer;
 
-	private readonly DispatcherTimer _photoTrainingTimer;
-
-	private List<MeshTopologyEdge> _threeDdfaDenseTopologyEdges = new List<MeshTopologyEdge>();
-
 	private IReadOnlyList<CameraDevice> _cameras = Array.Empty<CameraDevice>();
 
-	private IReadOnlyList<string> _photoTrainingImagePaths = Array.Empty<string>();
+	private string _preferredCameraDevicePath = string.Empty;
+
+	private string _preferredCameraName = string.Empty;
 
 	private CancellationTokenSource? _modeLoadCancellation;
 
 	private CancellationTokenSource? _cameraStartCancellation;
 
-	private string _standardModelStatus = "Standard model: log in to capture or review.";
-
 	private string _outputFolder;
 
 	private BitmapSource? _latestFrame;
-
-	private BitmapSource? _photoTrainingFrame;
 
 	private FaceFeatureDetection _currentFaceFeatureDetection = FaceFeatureDetection.None;
 
@@ -261,23 +254,15 @@ public partial class MainWindow : Window, IComponentConnector
 
 	private FaceLandmarkFrame? _cachedNativeOverlayLandmarkFrame;
 
-	private AvatarReconstructionSnapshot? _cachedNativeOverlayAvatarSnapshot;
-
 	private PreviewTrackingOverlay _cachedNativeTrackingOverlay = PreviewTrackingOverlay.Empty;
 
 	private FaceLandmarkMetrics _currentFaceLandmarkMetrics = FaceLandmarkMetrics.None;
 
 	private FaceLockStabilityAnalysis _currentFaceLockStabilityAnalysis = FaceLockStabilityAnalysis.Waiting;
 
-	private FaceFrameGeometry _currentFaceFrameGeometry = FaceFrameGeometry.None;
-
 	private ThreeDdfaOnnxSidecarResponse _currentThreeDdfaOnnxResponse = ThreeDdfaOnnxSidecarResponse.Waiting;
 
-	private AvatarReconstructionSnapshot? _currentAvatarReconstructionSnapshot;
-
 	private MediaPipeNormalizedFaceModel _currentMediaPipeGeometryModel = MediaPipeNormalizedFaceModel.Empty;
-
-	private AvatarObservationCapture? _currentManualStandardModelCandidate;
 
 	private ThreeDdfaOnnxSidecarFaceBox? _threeDdfaTrackingFaceBox;
 
@@ -292,95 +277,77 @@ public partial class MainWindow : Window, IComponentConnector
 		DataFolderName = ""
 	};
 
-	private string _avatarSystemDashboardPath = "";
-
-	private string _avatarModelHtmlPath = "";
-
-	private AvatarReportSnapshot? _pendingAvatarReportSnapshot;
-
-	private Task? _avatarReportWriterTask;
-
 	private Direct3D12PreviewHost? _directX12PreviewHost;
 
 	private Dx12Camera? _directX12NativeCamera;
 
-	private DateTime _lastPreviewFrameAcceptedAt = DateTime.MinValue;
+	private long _cameraStartedTimestamp;
 
-	private DateTime _cameraStartedAtUtc = DateTime.MinValue;
+	private long _lastCameraSourceFrameTimestamp;
 
-	private DateTime _lastCameraSourceFrameAtUtc = DateTime.MinValue;
+	private long _lastCameraPresentedFrameTimestamp;
 
-	private DateTime _lastDirectX12DiagnosticsAtUtc = DateTime.MinValue;
-
-	private DateTime _lastDirectX12AnalysisFrameAtUtc = DateTime.MinValue;
-
-	private TimeSpan? _lastAvatarObservationWorkerDuration;
-
-	private TimeSpan? _lastAvatarObservationWorkerStartWait;
+	private long _nextCameraRecoveryTimestamp;
 
 	private TimeSpan? _lastMediaPipeGeometryProcessingDuration;
 
-	private DateTime _previewReplacementWindowStartedAtUtc = DateTime.MinValue;
-
-	private string _avatarCaptureGateReason = "waiting for face landmarks";
+	private long _lastAvatarStatusUiRefreshTimestamp;
 
 	private string _lastFaceBoxBackendStatus = "waiting";
 
 	private double _directX12PreviewMaxRenderFramesPerSecond;
 
-	private TimeSpan _directX12AnalysisFrameInterval = TimeSpan.FromSeconds(0.2);
+	private int _uiFrameInFlight;
 
-	private int _directX12AnalysisMaxOutputWidth = 3840;
+	private int _faceFeatureDetectionInFlight;
 
-	private int _previewFramesReplacedSinceWarning;
+	private int _faceTrackingEnabled = 1;
 
-	private int _uiFramePending;
+	private int _mediaPipeGeometryUiUpdateInFlight;
 
-	private int _previewWarningPending;
+	private int _faceResultUiUpdateInFlight;
 
-	private int _faceFeatureDetectionPending;
-
-	private int _avatarReconstructionPending;
-
-	private int _manualStandardModelSavePending;
-
-	private long _lastRecoverableVisionErrorStatusTicks;
+	private long _lastRecoverableVisionErrorStatusTimestamp;
 
 	private long _directX12FrameNumber;
 
-	private int _directX12AnalysisWorkerQueued;
+	private long _directX12AnalysisCompletedFrames;
 
-	private int _automaticCameraRecoveryAttempts;
+	private long _lastPipelineDiagnosticsTimestamp;
+
+	private long _lastPipelineDiagnosticsSourceFrames;
+
+	private long _lastPipelineDiagnosticsAnalysisFrames;
+
+	private double _measuredCameraIngestionFramesPerSecond;
+
+	private double _measuredAnalysisFramesPerSecond;
+
+	private int _directX12AnalysisInFlight;
+
+	private int _consecutiveCameraRecoveryAttempts;
 
 	private bool _avatarLearningRequested;
-
-	private bool _liveStandardModelModeActive;
 
 	private bool _avatarModelInitializationPending;
 
 	private bool _avatarModelReadyForCapture;
 
-	private bool _avatarCaptureGateAccepted;
-
 	private bool _showFaceMeshOverlay;
-
-	private bool _showAvatarModelOverlay;
 
 	private bool _showLiveWireframePreview;
 
 	private bool _cachedNativeOverlayIncludesFaceMesh;
 
-	private bool _cachedNativeOverlayIncludesAvatarModel;
-
 	private bool _isDirectX12PreviewEnabled = true;
 
 	private bool _isCameraEnabled;
 
+	private bool _cameraShouldRun;
+
 	private bool _cameraRecoveryPending;
 
 	private bool _isUpdatingCameraToggle;
-
-	private bool _isChoosingCameraModeForFidelity;
 
 	private bool _isRefreshingCameras;
 
@@ -398,19 +365,9 @@ public partial class MainWindow : Window, IComponentConnector
 
 	private bool _startupOptionsApplied;
 
-	private bool _photoTrainingModeActive;
-
-	private DecaIdentityFitProfile _photoTrainingIdentityFitProfile;
-
-	private int _photoTrainingImageIndex = -1;
-
-	private int _photoTrainingLoadGeneration;
-
 	private int _previewActivationGeneration;
 
 	private int _cameraLifecycleGeneration;
-
-	private int _selectedTrackingFidelityIndex = 2;
 
 	private int _faceBoxSystemGeneration;
 
@@ -418,24 +375,26 @@ public partial class MainWindow : Window, IComponentConnector
 
 	private FaceCueGuideLayout? _activeFaceCueLayout;
 
-	private DateTime _lastFaceAutoFollowAt = DateTime.MinValue;
+	private long _lastFaceAutoFollowTimestamp;
 
-	private DateTime _lastFaceFeatureDetectionAt = DateTime.MinValue;
-
-	private DateTime _lastFaceFeatureLockAt = DateTime.MinValue;
-
-	private DateTime _lastAvatarReconstructionRequestAtUtc = DateTime.MinValue;
+	private long _lastFaceFeatureLockTimestamp;
 
 	private DateTime _lastThreeDdfaFaceBoxesAtUtc = DateTime.MinValue;
 
-	private static readonly IReadOnlyList<TrackingFidelityOption> TrackingFidelityOptions = new global::_003C_003Ez__ReadOnlyArray<TrackingFidelityOption>(new TrackingFidelityOption[3]
-	{
-		new TrackingFidelityOption(960, 15.0),
-		new TrackingFidelityOption(1920, 18.0),
-		new TrackingFidelityOption(3840, 15.0)
-	});
-
 	private static readonly TimeSpan CameraStallTimeout = TimeSpan.FromSeconds(6L);
+
+	private static readonly TimeSpan CameraPresentationStallTimeout =
+		TimeSpan.FromSeconds(4L);
+
+	private static readonly TimeSpan CameraRecoveryMaximumBackoff =
+		TimeSpan.FromSeconds(5L);
+
+	private static readonly TimeSpan CameraRecoveryNativeReleaseWait =
+		TimeSpan.FromMilliseconds(750L);
+
+	private Task _pendingNativeCameraDisposal = Task.CompletedTask;
+
+	private static readonly long AvatarStatusUiRefreshIntervalTicks = Stopwatch.Frequency;
 
 	private string CurrentAvatarProfileId
 	{
@@ -473,105 +432,15 @@ public partial class MainWindow : Window, IComponentConnector
 		}
 	}
 
-	private bool HasCompleteHumanStandardModel => AvatarStandardPoseGrid.IsComplete(_standardPoseAtlas);
+	private bool IsAvatarReconstructionReady => _mediaPipeGeometryPipeline.IsConfigured;
 
-	private bool HasRequiredCaptureFoundation
-	{
-		get
-		{
-			if (!IsMediaPipeOnlyGeometryMode)
-			{
-				return HasCompleteHumanStandardModel;
-			}
-			return true;
-		}
-	}
+	private string ActiveAvatarReconstructionBackendId => "mediapipe-geometry-measurement-v1";
 
-	private bool IsStandardModelBuildModeActive
-	{
-		get
-		{
-			if (!_liveStandardModelModeActive)
-			{
-				return _photoTrainingModeActive;
-			}
-			return true;
-		}
-	}
+	private string ActiveAvatarReconstructionName => "MediaPipe geometry";
 
-	private bool IsDecaAvatarReconstructionActive => false;
-
-	private bool IsDecaFallbackActive => false;
-
-	private bool IsAvatarReconstructionReady
-	{
-		get
-		{
-			if (!IsMediaPipeOnlyGeometryMode || !_mediaPipeGeometryPipeline.IsConfigured)
-			{
-				return IsDecaAvatarReconstructionActive;
-			}
-			return true;
-		}
-	}
-
-	private bool IsMediaPipeOnlyGeometryMode => true;
-
-	private string ActiveAvatarReconstructionBackendId
-	{
-		get
-		{
-			if (!IsDecaAvatarReconstructionActive)
-			{
-				if (!IsMediaPipeOnlyGeometryMode)
-				{
-					return "3ddfa-v2-onnx-reconstruction";
-				}
-				return "mediapipe-geometry-measurement-v1";
-			}
-			return "deca-flame-recurrent-v4";
-		}
-	}
-
-	private string ActiveAvatarReconstructionName
-	{
-		get
-		{
-			if (!IsDecaAvatarReconstructionActive)
-			{
-				if (!IsDecaFallbackActive)
-				{
-					if (!IsMediaPipeOnlyGeometryMode)
-					{
-						return "3DDFA_V2 ONNX";
-					}
-					return "MediaPipe geometry";
-				}
-				return "3DDFA_V2 ONNX (DECA fallback)";
-			}
-			return "DECA/FLAME";
-		}
-	}
-
-	private string ActiveAvatarReconstructionReadinessStatus
-	{
-		get
-		{
-			if (IsMediaPipeOnlyGeometryMode)
-			{
-				if (!_mediaPipeGeometryPipeline.IsConfigured)
-				{
-					return "MediaPipe visible-evidence geometry is waiting for an avatar user profile.";
-				}
-				return "MediaPipe visible-evidence geometry is active and persistent; DECA/FLAME and 3DDFA are paused.";
-			}
-			if (IsDecaAvatarReconstructionActive)
-			{
-				return _decaEnvironment.Status;
-			}
-			return _threeDdfaOnnxEnvironment.Status;
-		}
-	}
+	private string ActiveAvatarReconstructionReadinessStatus => _mediaPipeGeometryPipeline.IsConfigured
+		? "MediaPipe visible-evidence geometry is active and persistent."
+		: "MediaPipe visible-evidence geometry is waiting for an avatar user profile.";
 
 	private static SolidColorBrush CreateFrozenBrush(byte red, byte green, byte blue)
 	{
@@ -587,6 +456,38 @@ public partial class MainWindow : Window, IComponentConnector
 		return solidColorBrush;
 	}
 
+	private static void SetTextIfChanged(TextBlock textBlock, string text)
+	{
+		if (!string.Equals(textBlock.Text, text, StringComparison.Ordinal))
+		{
+			textBlock.Text = text;
+		}
+	}
+
+	private static void SetContentIfChanged(ContentControl control, object content)
+	{
+		if (!Equals(control.Content, content))
+		{
+			control.Content = content;
+		}
+	}
+
+	private static void SetHeaderIfChanged(HeaderedItemsControl control, object header)
+	{
+		if (!Equals(control.Header, header))
+		{
+			control.Header = header;
+		}
+	}
+
+	private static void SetIfChanged(DependencyObject target, DependencyProperty property, object value)
+	{
+		if (!Equals(target.GetValue(property), value))
+		{
+			target.SetValue(property, value);
+		}
+	}
+
 	public MainWindow()
 		: this(AvatarBuilderStartupOptions.Default)
 	{
@@ -597,20 +498,12 @@ public partial class MainWindow : Window, IComponentConnector
 		_startupOptions = startupOptions ?? AvatarBuilderStartupOptions.Default;
 		_threeDdfaOnnxModelInfo = ThreeDdfaOnnxModelInfo.Load();
 		_threeDdfaOnnxEnvironment = ThreeDdfaOnnxSidecarEnvironment.Detect(_threeDdfaOnnxModelInfo);
-		_decaEnvironment = DecaSidecarEnvironment.Detect();
-		_threeDdfaAvatarClient = null;
-		_decaAvatarClient = null;
-		_manualStandardModelCaptureService = new ManualStandardModelCaptureService(_avatarObservationRepository, _avatarStandardModelStore);
-		_avatarObservationStorageService = new AvatarObservationStorageService(_avatarObservationRepository, FinalizeAvatarObservationBatchAsync);
-		_avatarDataReviewServer = new AvatarDataReviewServer(_avatarObservationRepository);
-		_avatarObservationStorageService.BatchCompleted += AvatarObservationBatchCompleted;
-		_avatarObservationStorageService.WorkerStarted += AvatarObservationWorkerStarted;
-		_avatarObservationStorageService.WorkerCompleted += AvatarObservationWorkerCompleted;
 		InitializeComponent();
+		_directX12AnalysisWorker = new LatestTextureFrameWorker(
+			"Avatar Builder latest-frame analysis",
+			ProcessDirectX12AnalysisFrame);
 		_mediaPipeGeometryPipeline.ModelUpdated += MediaPipeGeometryPipelineModelUpdated;
 		_outputFolder = ResolveInitialOutputFolder(_startupOptions.OutputFolder);
-		_visionBenchmarkRecorder.SetOutputRoot(_outputFolder);
-		ResetAvatarCaptureGate("waiting for face landmarks");
 		_previewService.FrameAvailable += PreviewFrameAvailable;
 		_previewService.CameraFrameAvailable += PreviewCameraFrameAvailable;
 		_previewService.StatusChanged += PreviewStatusChanged;
@@ -619,11 +512,6 @@ public partial class MainWindow : Window, IComponentConnector
 			Interval = TimeSpan.FromSeconds(1L)
 		};
 		_cameraHealthTimer.Tick += CameraHealthTimerTick;
-		_photoTrainingTimer = new DispatcherTimer(DispatcherPriority.Background)
-		{
-			Interval = TimeSpan.FromMilliseconds(30L)
-		};
-		_photoTrainingTimer.Tick += PhotoTrainingTimerTick;
 	}
 
 	private async void WindowLoaded(object sender, RoutedEventArgs e)
@@ -631,12 +519,9 @@ public partial class MainWindow : Window, IComponentConnector
 		DarkWindowFrame.Apply(this);
 		EnsureOutputFolderConfiguredForLaunch();
 		InitializeAvatarProfiles(!_startupOptions.SkipLoginPrompt);
-		_poseAlignmentAuditor.SetOutputRoot(GetAvatarDataFolder());
-		_mediaPipeConvergenceAuditor.SetOutputRoot(GetAvatarDataFolder());
 		UpdateFaceBoxSystemMenuChecks();
+		UpdateMediaPipeProcessorMenuChecks();
 		UpdateFaceBoxOptionsUi();
-		UpdateTrackingFidelityMenuChecks();
-		ApplyTrackingFidelity();
 		UpdateSettingLabels();
 		if (IsAvatarUserLoggedIn)
 		{
@@ -644,7 +529,6 @@ public partial class MainWindow : Window, IComponentConnector
 		}
 		PrepareAvatarCaptureFolder(showStatus: false);
 		UpdateAvatarLearningStatusUi();
-		UpdatePhotoTrainingUi();
 		_cameraHealthTimer.Start();
 		base.Dispatcher.InvokeAsync((Func<Task>)async delegate
 		{
@@ -665,18 +549,12 @@ public partial class MainWindow : Window, IComponentConnector
 		{
 			return;
 		}
-		ResumeDirectX12PreviewPresentation();
-		if (_isCameraEnabled)
-		{
-			_lastDirectX12AnalysisFrameAtUtc = DateTime.MinValue;
-			BitmapSource latestFrame = _latestFrame;
-			if (latestFrame != null)
+			ResumeDirectX12PreviewPresentation();
+			if (_isCameraEnabled)
 			{
-				_lastFaceFeatureDetectionAt = DateTime.MinValue;
-				QueueFaceFeatureDetection(latestFrame, DateTime.UtcNow);
+				BitmapSource latestFrame = _latestFrame;
+				UpdateFaceCueGuideOverlay(latestFrame);
 			}
-			UpdateFaceCueGuideOverlay(latestFrame);
-		}
 	}
 
 	private void ResumeDirectX12PreviewPresentation()
@@ -708,13 +586,13 @@ public partial class MainWindow : Window, IComponentConnector
 		if (!_startupOptionsApplied)
 		{
 			_startupOptionsApplied = true;
-			if (_startupOptions.StartAvatarLearning && IsAvatarUserLoggedIn && _avatarModelReadyForCapture && HasRequiredCaptureFoundation)
+			if (_startupOptions.StartAvatarLearning && IsAvatarUserLoggedIn && _avatarModelReadyForCapture)
 			{
 				_avatarLearningRequested = true;
 			}
 			if (_startupOptions.OpenAvatarSystem)
 			{
-				OpenAvatarSystemClicked(this, new RoutedEventArgs());
+				OpenMediaPipeGeometryClicked(this, new RoutedEventArgs());
 			}
 			UpdateAvatarLearningStatusUi();
 			if (_startupOptions.EasyAvatarMode)
@@ -750,7 +628,6 @@ public partial class MainWindow : Window, IComponentConnector
 				LogInAvatarProfile(avatarProfile2, loadModel: false, announce: false);
 				return;
 			}
-			ResetAvatarCaptureGate("no avatar user logged in; capture stopped");
 			UpdateAvatarSessionUi();
 		}
 	}
@@ -886,20 +763,16 @@ public partial class MainWindow : Window, IComponentConnector
 
 	private void ApplyCurrentAvatarProfile(AvatarProfile profile, bool loadModel)
 	{
-		_avatarObservationStorageService.DiscardPendingCandidates();
 		if (_avatarUserSession.IsLoggedIn && !string.Equals(_avatarUserSession.LoggedInProfileId, profile.Id, StringComparison.OrdinalIgnoreCase))
 		{
 			_avatarUserSession.LogOut();
 		}
 		_currentAvatarProfile = profile;
 		_avatarLearningRequested = false;
-		_liveStandardModelModeActive = false;
-		_poseAlignmentAuditor.SetOutputRoot(GetAvatarDataFolder());
-		_mediaPipeConvergenceAuditor.SetOutputRoot(GetAvatarDataFolder());
 		_avatarProfileStore.SelectProfile(_outputFolder, _avatarProfileRegistry, profile.Id);
 		if (loadModel)
 		{
-			ResetAvatarRuntimeForProfile("selected avatar profile changed; login required before avatar capture");
+			ResetAvatarRuntimeForProfile();
 		}
 		UpdateAvatarSessionUi();
 		UpdateAvatarLearningStatusUi();
@@ -907,10 +780,6 @@ public partial class MainWindow : Window, IComponentConnector
 
 	private void LogInAvatarProfile(AvatarProfile profile, bool loadModel, bool announce)
 	{
-		StopPhotoTrainingMode(announce: false);
-		_avatarObservationStorageService.DiscardPendingCandidates();
-		_standardPoseAtlas.Clear();
-		_liveStandardModelModeActive = false;
 		if (!string.Equals(CurrentAvatarProfileId, profile.Id, StringComparison.OrdinalIgnoreCase) || loadModel)
 		{
 			ApplyCurrentAvatarProfile(profile, loadModel);
@@ -919,9 +788,6 @@ public partial class MainWindow : Window, IComponentConnector
 		_avatarModelReadyForCapture = false;
 		_avatarUserSession.LogIn(profile.Id);
 		_currentThreeDdfaOnnxResponse = ThreeDdfaOnnxSidecarResponse.Waiting;
-		_currentAvatarReconstructionSnapshot = null;
-		_currentManualStandardModelCandidate = null;
-		ResetAvatarCaptureGate("avatar user logged in; waiting for high-confidence face tracking");
 		_currentAvatarCaptureQuality = AvatarCaptureQualityAssessment.Waiting;
 		UpdateAvatarSessionUi();
 		UpdateAvatarLearningStatusUi();
@@ -934,21 +800,12 @@ public partial class MainWindow : Window, IComponentConnector
 	private void LogOutAvatarUser(bool announce)
 	{
 		string currentAvatarProfileDisplayName = CurrentAvatarProfileDisplayName;
-		StopPhotoTrainingMode(announce: false);
-		_avatarObservationStorageService.DiscardPendingCandidates();
-		_standardPoseAtlas.Clear();
-		_liveStandardModelModeActive = false;
 		_avatarLearningRequested = false;
 		_avatarModelReadyForCapture = false;
 		_avatarUserSession.LogOut();
 		_currentThreeDdfaOnnxResponse = ThreeDdfaOnnxSidecarResponse.Waiting;
-		_currentAvatarReconstructionSnapshot = null;
-		_currentManualStandardModelCandidate = null;
-		ResetAvatarCaptureGate("no avatar user logged in; capture stopped");
-		UpdateAvatarCaptureQuality();
 		UpdateAvatarSessionUi();
 		UpdateAvatarLearningStatusUi();
-		QueueAvatarSessionStatusReport();
 		if (announce)
 		{
 			SetStatus(currentAvatarProfileDisplayName + " logged out. Avatar capture has stopped.");
@@ -958,13 +815,11 @@ public partial class MainWindow : Window, IComponentConnector
 	private void UpdateAvatarSessionUi()
 	{
 		bool isAvatarUserLoggedIn = IsAvatarUserLoggedIn;
-		LoginLogoutMenuItem.Header = (isAvatarUserLoggedIn ? ("_Logout " + CurrentAvatarProfileDisplayName) : "_Login...");
-		LoginLogoutMenuItem.IsEnabled = !_avatarModelInitializationPending;
-		AvatarLoginStatusText.Text = ((!isAvatarUserLoggedIn) ? "No avatar user logged in. Use File > Login to begin a capture session." : (_avatarModelInitializationPending ? ("Logged in as " + CurrentAvatarProfileDisplayName + ". Please wait while the stored avatar model is calculated.") : ((!_avatarModelReadyForCapture) ? ("Logged in as " + CurrentAvatarProfileDisplayName + ", but the avatar model is not ready. Log out and back in to retry.") : ((!HasRequiredCaptureFoundation) ? ("Logged in as " + CurrentAvatarProfileDisplayName + ". Build the 9-view Standard Model before starting Avatar Capture.") : (IsMediaPipeOnlyGeometryMode ? ("Logged in as " + CurrentAvatarProfileDisplayName + ". MediaPipe measured geometry is ready; Avatar Capture can be started.") : ("Logged in as " + CurrentAvatarProfileDisplayName + ". The 9-view Standard Model is ready; Avatar Capture can be started."))))));
-		AvatarLoginStatusText.Foreground = new SolidColorBrush(isAvatarUserLoggedIn ? Color.FromRgb(128, 224, 164) : Color.FromRgb(byte.MaxValue, 207, 122));
-		AvatarLearningToggleButton.IsEnabled = _avatarLearningRequested || (isAvatarUserLoggedIn && _avatarModelReadyForCapture && !_avatarModelInitializationPending && HasRequiredCaptureFoundation && !IsStandardModelBuildModeActive);
-		UpdateStandardModelUi();
-		UpdatePhotoTrainingUi();
+		SetHeaderIfChanged(LoginLogoutMenuItem, isAvatarUserLoggedIn ? "_Logout " + CurrentAvatarProfileDisplayName : "_Login...");
+		SetIfChanged(LoginLogoutMenuItem, MenuItem.IsEnabledProperty, !_avatarModelInitializationPending);
+		SetTextIfChanged(AvatarLoginStatusText, (!isAvatarUserLoggedIn) ? "No avatar user logged in. Use File > Login to begin a capture session." : (_avatarModelInitializationPending ? ("Logged in as " + CurrentAvatarProfileDisplayName + ". Please wait while measured face geometry is loaded.") : ((!_avatarModelReadyForCapture) ? ("Logged in as " + CurrentAvatarProfileDisplayName + ", but measured geometry is not ready. Log out and back in to retry.") : ("Logged in as " + CurrentAvatarProfileDisplayName + ". MediaPipe measured geometry is ready; Avatar Capture can be started."))));
+		SetIfChanged(AvatarLoginStatusText, TextBlock.ForegroundProperty, isAvatarUserLoggedIn ? AvatarLoginActiveBrush : AvatarLoginInactiveBrush);
+		SetIfChanged(AvatarLearningToggleButton, Button.IsEnabledProperty, _avatarLearningRequested || (isAvatarUserLoggedIn && _avatarModelReadyForCapture && !_avatarModelInitializationPending));
 	}
 
 	private async Task InitializeAvatarModelAfterLoginAsync(bool showPopup)
@@ -988,20 +843,11 @@ public partial class MainWindow : Window, IComponentConnector
 		{
 			string folder = GetAvatarDataFolder();
 			Directory.CreateDirectory(folder);
-			if (IsMediaPipeOnlyGeometryMode)
-			{
-				_currentMediaPipeGeometryModel = await _mediaPipeGeometryPipeline.ConfigureProfileAsync(folder, CurrentAvatarProfileId, CurrentAvatarProfileDisplayName);
-			}
-			else
-			{
-				AvatarReportSnapshot snapshot = CreateAvatarReportSnapshot(folder);
-				ApplyAvatarReportSaveResult(await Task.Run(() => WriteAvatarReports(snapshot, null, forceFullModelRebuild: true)));
-				SeedDecaRecurrentModelFromStoredAvatar(folder);
-			}
+			_currentMediaPipeGeometryModel = await _mediaPipeGeometryPipeline.ConfigureProfileAsync(folder, CurrentAvatarProfileId, CurrentAvatarProfileDisplayName);
 			if (!_isClosing && IsAvatarUserLoggedIn && string.Equals(profileId, CurrentAvatarProfileId, StringComparison.Ordinal))
 			{
 				_avatarModelReadyForCapture = true;
-				SetStatus(IsMediaPipeOnlyGeometryMode ? (CurrentAvatarProfileDisplayName + "'s measured MediaPipe geometry is loaded. Avatar capture is ready.") : (CurrentAvatarProfileDisplayName + "'s stored avatar model is calculated. Avatar capture is ready."));
+				SetStatus(CurrentAvatarProfileDisplayName + "'s measured MediaPipe geometry is loaded. Avatar capture is ready.");
 			}
 		}
 		catch (Exception ex)
@@ -1045,14 +891,14 @@ public partial class MainWindow : Window, IComponentConnector
 			{
 				(UIElement)new TextBlock
 				{
-					Text = "Calculating Avatar Model",
+					Text = "Loading Measured Face Geometry",
 					FontSize = 18.0,
 					FontWeight = FontWeights.SemiBold,
 					Margin = new Thickness(0.0, 0.0, 0.0, 12.0)
 				},
 				(UIElement)new TextBlock
 				{
-					Text = "Please wait while the retained scans are calculated into the model. Full recalculation happens once at login; capture uses incremental five-scan updates afterward.",
+					Text = "Please wait while the saved MediaPipe measurements and dense warp data are loaded for this user.",
 					Foreground = new SolidColorBrush(Color.FromRgb(185, 215, 239)),
 					TextWrapping = TextWrapping.Wrap
 				}
@@ -1061,63 +907,11 @@ public partial class MainWindow : Window, IComponentConnector
 		return window;
 	}
 
-	private void QueueAvatarSessionStatusReport()
+	private void ResetAvatarRuntimeForProfile()
 	{
-		if (!base.IsLoaded)
-		{
-			return;
-		}
-		try
-		{
-			QueueAvatarReportSave(CreateAvatarReportSnapshot(GetAvatarDataFolder()));
-		}
-		catch
-		{
-		}
-	}
-
-	private void ResetAvatarCaptureGate(string reason, bool accepted = false)
-	{
-		_avatarCaptureGateAccepted = accepted;
-		_avatarCaptureGateReason = (string.IsNullOrWhiteSpace(reason) ? "waiting for face landmarks" : reason);
-	}
-
-	private void ResetAvatarRuntimeForProfile(string reason)
-	{
-		_liveStandardModelModeActive = false;
-		ResetAvatarCaptureGate(reason);
 		_currentAvatarCaptureQuality = AvatarCaptureQualityAssessment.Waiting;
 		_currentThreeDdfaOnnxResponse = ThreeDdfaOnnxSidecarResponse.Waiting;
-		_currentAvatarReconstructionSnapshot = null;
-		_currentManualStandardModelCandidate = null;
-		_avatarSystemDashboardPath = "";
-		_avatarModelHtmlPath = "";
-		lock (_decaClientLock)
-		{
-			_decaAvatarClient?.SetCurrentModelShapeCoefficients(Array.Empty<double>());
-		}
-	}
-
-	private void SeedDecaRecurrentModelFromStoredAvatar(string folder)
-	{
-		AvatarStandardModel avatarStandardModel = _avatarStandardModelStore.Read(folder);
-		_standardPoseAtlas.Clear();
-		if (avatarStandardModel?.PoseAtlas != null)
-		{
-			foreach (KeyValuePair<string, AvatarStandardPoseSample> poseAtla in avatarStandardModel.PoseAtlas)
-			{
-				if (AvatarStandardPoseGrid.DirectionKeys.Contains<string>(poseAtla.Key, StringComparer.Ordinal) && AvatarStandardPoseGrid.IsStructurallyComplete(poseAtla.Value))
-				{
-					_standardPoseAtlas[poseAtla.Key] = poseAtla.Value;
-				}
-			}
-		}
-		AvatarModel avatarModel = (((object)avatarStandardModel == null) ? _avatarModelStore.Read(folder) : null);
-		IReadOnlyList<double> currentModelShapeCoefficients = avatarStandardModel?.ShapeCoefficients ?? avatarModel?.Identity.MappedShapeCoefficients;
-		lock (_decaClientLock)
-		{
-			_decaAvatarClient?.SetCurrentModelShapeCoefficients(currentModelShapeCoefficients);
-		}
+		_currentMediaPipeGeometryModel = MediaPipeNormalizedFaceModel.Empty;
 	}
 
 	private async void WindowClosing(object? sender, CancelEventArgs e)
@@ -1133,12 +927,11 @@ public partial class MainWindow : Window, IComponentConnector
 		}
 		_shutdownStarted = true;
 		_isClosing = true;
+		_cameraShouldRun = false;
 		Hide();
 		WriteShutdownTrace("Shutdown started.");
 		TryShutdownStep(_cameraHealthTimer.Stop);
 		_cameraHealthTimer.Tick -= CameraHealthTimerTick;
-		TryShutdownStep(_photoTrainingTimer.Stop);
-		_photoTrainingTimer.Tick -= PhotoTrainingTimerTick;
 		TryShutdownStep(delegate
 		{
 			_modeLoadCancellation?.Cancel();
@@ -1161,8 +954,9 @@ public partial class MainWindow : Window, IComponentConnector
 			WriteShutdownTrace("Camera preview stop failed: " + ex.Message);
 		}
 		WriteShutdownTrace("Disposing camera and vision services.");
+		TryShutdownStep(_directX12AnalysisWorker.Dispose);
+		TryShutdownStep(DisposeDirectMlTextureTracker);
 		TryShutdownStep(_previewService.Dispose);
-		TryShutdownStep(ResetPreviewFramePump);
 		CompositeFaceLandmarkTracker tracker;
 		lock (_faceLandmarkTrackerLock)
 		{
@@ -1190,16 +984,6 @@ public partial class MainWindow : Window, IComponentConnector
 		{
 			faceBoxClient?.Dispose();
 		});
-		DecaReconstructionClient decaClient;
-		lock (_decaClientLock)
-		{
-			decaClient = _decaAvatarClient;
-			_decaAvatarClient = null;
-		}
-		TryShutdownStep(delegate
-		{
-			decaClient?.Dispose();
-		});
 		WriteShutdownTrace("Camera and vision services disposed.");
 		_mediaPipeGeometryPipeline.ModelUpdated -= MediaPipeGeometryPipelineModelUpdated;
 		try
@@ -1212,41 +996,9 @@ public partial class MainWindow : Window, IComponentConnector
 		{
 			WriteShutdownTrace("MediaPipe geometry shutdown failed: " + ex2.Message);
 		}
-		_avatarObservationStorageService.BatchCompleted -= AvatarObservationBatchCompleted;
-		_avatarObservationStorageService.WorkerStarted -= AvatarObservationWorkerStarted;
-		_avatarObservationStorageService.WorkerCompleted -= AvatarObservationWorkerCompleted;
-		try
-		{
-			_ = 2;
-			try
-			{
-				WriteShutdownTrace("Stopping avatar storage worker.");
-				await _avatarObservationStorageService.DisposeAsync();
-				WriteShutdownTrace("Avatar storage worker stopped.");
-			}
-			catch (Exception ex3)
-			{
-				WriteShutdownTrace("Avatar storage shutdown failed: " + ex3.Message);
-			}
-		}
-		finally
-		{
-			try
-			{
-				WriteShutdownTrace("Stopping local avatar review server.");
-				await _avatarDataReviewServer.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(3L));
-				WriteShutdownTrace("Local avatar review server stopped.");
-			}
-			catch (Exception ex4)
-			{
-				WriteShutdownTrace("Local avatar review shutdown failed: " + ex4.Message);
-			}
-			TryShutdownStep(_visionBenchmarkRecorder.Dispose);
-			TryShutdownStep(_mediaPipeConvergenceAuditor.Dispose);
-			_shutdownCompleted = true;
-			WriteShutdownTrace("Shutdown completed; closing WPF window.");
-			Close();
-		}
+		_shutdownCompleted = true;
+		WriteShutdownTrace("Shutdown completed; closing WPF window.");
+		Close();
 	}
 
 	private static void TryShutdownStep(Action cleanup)
@@ -1310,7 +1062,35 @@ public partial class MainWindow : Window, IComponentConnector
 		CameraComboBox.DisplayMemberPath = "DisplayName";
 		if (_cameras.Count > 0)
 		{
-			CameraComboBox.SelectedIndex = 0;
+			int preferredIndex = -1;
+			if (!string.IsNullOrWhiteSpace(
+				_preferredCameraDevicePath))
+			{
+				preferredIndex = _cameras
+					.Select((camera, index) => (camera, index))
+					.Where(item => string.Equals(
+						item.camera.DevicePath,
+						_preferredCameraDevicePath,
+						StringComparison.OrdinalIgnoreCase))
+					.Select(item => item.index)
+					.DefaultIfEmpty(-1)
+					.First();
+			}
+			if (preferredIndex < 0
+				&& !string.IsNullOrWhiteSpace(_preferredCameraName))
+			{
+				preferredIndex = _cameras
+					.Select((camera, index) => (camera, index))
+					.Where(item => string.Equals(
+						item.camera.Name,
+						_preferredCameraName,
+						StringComparison.OrdinalIgnoreCase))
+					.Select(item => item.index)
+					.DefaultIfEmpty(-1)
+					.First();
+			}
+			CameraComboBox.SelectedIndex =
+				preferredIndex >= 0 ? preferredIndex : 0;
 			SetStatus($"Found {_cameras.Count} camera{((_cameras.Count == 1) ? "" : "s")}.");
 		}
 		else
@@ -1372,6 +1152,13 @@ public partial class MainWindow : Window, IComponentConnector
 		object selectedItem = CameraComboBox.SelectedItem;
 		if (selectedItem is CameraDevice camera)
 		{
+			if (!_cameraRecoveryPending)
+			{
+				_preferredCameraDevicePath =
+					camera.DevicePath ?? string.Empty;
+				_preferredCameraName =
+					camera.Name ?? string.Empty;
+			}
 			await LoadCameraModesAsync(camera);
 			await LoadCameraControlsAsync(camera);
 			if (_isCameraEnabled)
@@ -1396,7 +1183,7 @@ public partial class MainWindow : Window, IComponentConnector
 			if (!cancellationToken.IsCancellationRequested)
 			{
 				CameraModeComboBox.ItemsSource = readOnlyList;
-				SelectRecommendedCameraModeForFidelity(replaceAutoOnly: false);
+				CameraModeComboBox.SelectedIndex = readOnlyList.Count > 0 ? 0 : -1;
 				CameraVideoMode cameraVideoMode = (CameraModeComboBox.SelectedItem as CameraVideoMode) ?? CameraVideoMode.Auto;
 				SetStatus($"Loaded {readOnlyList.Count} mode{((readOnlyList.Count == 1) ? "" : "s")} for {camera.Name}. Selected {cameraVideoMode.Label}.");
 			}
@@ -1610,7 +1397,7 @@ public partial class MainWindow : Window, IComponentConnector
 
 	private async void CameraModeSelectionChanged(object sender, SelectionChangedEventArgs e)
 	{
-		if (!_isChoosingCameraModeForFidelity && _isCameraEnabled)
+		if (_isCameraEnabled)
 		{
 			await RestartPreviewAsync();
 		}
@@ -1622,11 +1409,6 @@ public partial class MainWindow : Window, IComponentConnector
 		{
 			UpdateFaceBoxSystemMenuChecks();
 		}
-		else if (_photoTrainingModeActive && result != FaceBoxSystem.MediaPipe)
-		{
-			UpdateFaceBoxSystemMenuChecks();
-			SetStatus("The Picture Standard Model builder keeps MediaPipe active so every still uses the same landmark pipeline.");
-		}
 		else if (result == _selectedFaceBoxSystem)
 		{
 			UpdateFaceBoxSystemMenuChecks();
@@ -1637,14 +1419,96 @@ public partial class MainWindow : Window, IComponentConnector
 		}
 	}
 
+	private async void MediaPipeProcessorMenuItemClicked(object sender, RoutedEventArgs e)
+	{
+		if (!(sender is MenuItem { Tag: var tag }) || !Enum.TryParse<MediaPipeExecutionBackend>(tag?.ToString(), out var requestedBackend))
+		{
+			UpdateMediaPipeProcessorMenuChecks();
+			return;
+		}
+		if (requestedBackend == _mediaPipeExecutionBackend)
+		{
+			UpdateMediaPipeProcessorMenuChecks();
+			return;
+		}
+
+		MediaPipeCpuProcessorMenuItem.IsEnabled = false;
+		MediaPipeGpuProcessorMenuItem.IsEnabled = false;
+		try
+		{
+			if (requestedBackend == MediaPipeExecutionBackend.Gpu)
+			{
+				SetStatus("Checking the DirectML MediaPipe detector and 478-point landmark models...");
+				MediaPipeDelegateProbeResult probe = await Task.Run(delegate
+				{
+					MediaPipeDirectMlModelEnvironment models =
+						MediaPipeSidecarPythonEnvironment.DetectDirectMlModels();
+					return new MediaPipeDelegateProbeResult(
+						models.IsReady,
+						models.Status);
+				});
+				if (_isClosing)
+				{
+					return;
+				}
+				if (!probe.IsAvailable)
+				{
+					UpdateMediaPipeProcessorMenuChecks();
+					SetStatus(probe.Status + " CPU remains active; landmark behavior was not changed.");
+					return;
+				}
+			}
+
+			ApplyMediaPipeExecutionBackend(requestedBackend);
+		}
+		finally
+		{
+			if (!_isClosing)
+			{
+				MediaPipeCpuProcessorMenuItem.IsEnabled = true;
+				MediaPipeGpuProcessorMenuItem.IsEnabled = true;
+			}
+		}
+	}
+
+	private void ApplyMediaPipeExecutionBackend(MediaPipeExecutionBackend backend)
+	{
+		_mediaPipeExecutionBackend = backend;
+		CompositeFaceLandmarkTracker? previousTracker = null;
+		if (_selectedFaceBoxSystem == FaceBoxSystem.MediaPipe)
+		{
+			lock (_faceLandmarkTrackerLock)
+			{
+				previousTracker = _faceLandmarkTracker;
+				_faceLandmarkTracker = new CompositeFaceLandmarkTracker(backend)
+				{
+					MaxDetectionDimension = GetFaceLandmarkDetectionDimension()
+				};
+			}
+			Interlocked.Increment(ref _faceBoxSystemGeneration);
+			ResetLandmarkTracking();
+			previousTracker?.Dispose();
+		}
+
+		UpdateMediaPipeProcessorMenuChecks();
+		SetStatus(backend == MediaPipeExecutionBackend.Gpu
+			? "MediaPipe processor changed to GPU texture DirectML. Native camera frames now stay on the GPU through crop, resize, normalization, and inference."
+			: "MediaPipe processor changed to CPU (Stable). The official MediaPipe Tasks graph is active; the DirectML sidecar was stopped.");
+	}
+
+	private void UpdateMediaPipeProcessorMenuChecks()
+	{
+		MediaPipeCpuProcessorMenuItem.IsChecked = _mediaPipeExecutionBackend == MediaPipeExecutionBackend.Cpu;
+		MediaPipeGpuProcessorMenuItem.IsChecked = _mediaPipeExecutionBackend == MediaPipeExecutionBackend.Gpu;
+	}
+
 	private void SwitchFaceBoxSystem(FaceBoxSystem selectedSystem)
 	{
 		_selectedFaceBoxSystem = selectedSystem;
 		Interlocked.Increment(ref _faceBoxSystemGeneration);
-		ResetFaceFeatureDetectionFramePump();
 		ResetFaceBoxDiagnostics();
 		_currentFaceFeatureDetection = FaceFeatureDetection.None;
-		_lastFaceFeatureLockAt = DateTime.MinValue;
+		Volatile.Write(ref _lastFaceFeatureLockTimestamp, 0L);
 		_activeFaceCueLayout = null;
 		_threeDdfaTrackingFaceBox = null;
 		_lastThreeDdfaFaceBoxesAtUtc = DateTime.MinValue;
@@ -1652,7 +1516,7 @@ public partial class MainWindow : Window, IComponentConnector
 		lock (_faceLandmarkTrackerLock)
 		{
 			faceLandmarkTracker = _faceLandmarkTracker;
-			_faceLandmarkTracker = ((selectedSystem == FaceBoxSystem.MediaPipe) ? new CompositeFaceLandmarkTracker() : null);
+			_faceLandmarkTracker = ((selectedSystem == FaceBoxSystem.MediaPipe) ? new CompositeFaceLandmarkTracker(_mediaPipeExecutionBackend) : null);
 			if (_faceLandmarkTracker != null)
 			{
 				_faceLandmarkTracker.MaxDetectionDimension = GetFaceLandmarkDetectionDimension();
@@ -1728,113 +1592,28 @@ public partial class MainWindow : Window, IComponentConnector
 
 	private int GetFaceLandmarkDetectionDimension()
 	{
-		TrackingFidelityOption selectedTrackingFidelityOption = GetSelectedTrackingFidelityOption();
-		if (selectedTrackingFidelityOption.MaxOutputWidth < 3840)
+		CameraVideoMode mode = (CameraModeComboBox.SelectedItem as CameraVideoMode) ?? CameraVideoMode.Auto;
+		return Math.Clamp(mode.Width ?? 3840, 320, 3840);
+	}
+
+	private void ApplySelectedCameraMode(CameraVideoMode mode)
+	{
+		int width = Math.Clamp(mode.Width ?? 3840, 320, 3840);
+		double framesPerSecond = Math.Clamp(mode.FramesPerSecond ?? 1000.0, 1.0, 1000.0);
+		_previewService.MaxOutputWidth = width;
+		_previewService.MaxOutputFramesPerSecond = framesPerSecond;
+		lock (_faceLandmarkTrackerLock)
 		{
-			return Math.Clamp(selectedTrackingFidelityOption.MaxOutputWidth, 640, 960);
+			if (_faceLandmarkTracker != null)
+			{
+				_faceLandmarkTracker.MaxDetectionDimension = width;
+			}
 		}
-		return 1920;
 	}
 
 	private void ResetFaceBoxDiagnostics()
 	{
 		_lastFaceBoxBackendStatus = "waiting";
-	}
-
-	private async void TrackingFidelityMenuItemClicked(object sender, RoutedEventArgs e)
-	{
-		if (!(sender is MenuItem { Tag: var tag }) || !int.TryParse(tag?.ToString(), out var result) || result < 0 || result >= TrackingFidelityOptions.Count)
-		{
-			UpdateTrackingFidelityMenuChecks();
-			return;
-		}
-		_selectedTrackingFidelityIndex = result;
-		UpdateTrackingFidelityMenuChecks();
-		ApplyTrackingFidelity();
-		SelectRecommendedCameraModeForFidelity(replaceAutoOnly: true);
-		if (_isCameraEnabled)
-		{
-			await RestartPreviewAsync();
-		}
-	}
-
-	private void UpdateTrackingFidelityMenuChecks()
-	{
-		TrackingFidelitySafeMenuItem.IsChecked = _selectedTrackingFidelityIndex == 0;
-		TrackingFidelityHdMenuItem.IsChecked = _selectedTrackingFidelityIndex == 1;
-		TrackingFidelity4KMenuItem.IsChecked = _selectedTrackingFidelityIndex == 2;
-	}
-
-	private void ApplyTrackingFidelity()
-	{
-		TrackingFidelityOption selectedTrackingFidelityOption = GetSelectedTrackingFidelityOption();
-		int trackingAnalysisOutputWidth = GetTrackingAnalysisOutputWidth(selectedTrackingFidelityOption);
-		_previewService.MaxOutputWidth = trackingAnalysisOutputWidth;
-		_previewService.MaxOutputFramesPerSecond = selectedTrackingFidelityOption.MaxFramesPerSecond;
-		_directX12AnalysisMaxOutputWidth = trackingAnalysisOutputWidth;
-		_directX12AnalysisFrameInterval = TimeSpan.FromSeconds(1.0 / Math.Clamp(selectedTrackingFidelityOption.MaxFramesPerSecond, 1.0, 60.0));
-		lock (_faceLandmarkTrackerLock)
-		{
-			if (_faceLandmarkTracker != null)
-			{
-				_faceLandmarkTracker.MaxDetectionDimension = GetFaceLandmarkDetectionDimension();
-			}
-		}
-	}
-
-	private static int GetTrackingAnalysisOutputWidth(TrackingFidelityOption option)
-	{
-		if (option.MaxOutputWidth >= 3840)
-		{
-			return 1920;
-		}
-		return option.MaxOutputWidth;
-	}
-
-	private TrackingFidelityOption GetSelectedTrackingFidelityOption()
-	{
-		return TrackingFidelityOptions[Math.Clamp(_selectedTrackingFidelityIndex, 0, TrackingFidelityOptions.Count - 1)];
-	}
-
-	private void SelectRecommendedCameraModeForFidelity(bool replaceAutoOnly)
-	{
-		CameraVideoMode cameraVideoMode = CameraModeComboBox.SelectedItem as CameraVideoMode;
-		if (replaceAutoOnly && cameraVideoMode != null && !cameraVideoMode.IsAuto)
-		{
-			return;
-		}
-		CameraVideoMode cameraVideoMode2 = FindRecommendedCameraMode(CameraModeComboBox.Items.OfType<CameraVideoMode>().ToList(), GetSelectedTrackingFidelityOption());
-		if (cameraVideoMode2 == null || IsSameCameraMode(cameraVideoMode, cameraVideoMode2))
-		{
-			if (CameraModeComboBox.SelectedIndex < 0 && CameraModeComboBox.Items.Count > 0)
-			{
-				CameraModeComboBox.SelectedIndex = 0;
-			}
-			return;
-		}
-		_isChoosingCameraModeForFidelity = true;
-		try
-		{
-			CameraModeComboBox.SelectedItem = cameraVideoMode2;
-		}
-		finally
-		{
-			_isChoosingCameraModeForFidelity = false;
-		}
-	}
-
-	private static CameraVideoMode? FindRecommendedCameraMode(IReadOnlyList<CameraVideoMode> modes, TrackingFidelityOption option)
-	{
-		return CameraModeRecommendation.FindRecommendedMode(modes, option.MaxOutputWidth, option.MaxFramesPerSecond);
-	}
-
-	private static bool IsSameCameraMode(CameraVideoMode? left, CameraVideoMode right)
-	{
-		if (left != null && left.IsAuto == right.IsAuto && left.Width == right.Width && left.Height == right.Height && Nullable.Equals(left.FramesPerSecond, right.FramesPerSecond))
-		{
-			return string.Equals(left.InputFormat, right.InputFormat, StringComparison.OrdinalIgnoreCase);
-		}
-		return false;
 	}
 
 	private async void CameraToggleChanged(object sender, RoutedEventArgs e)
@@ -1843,23 +1622,19 @@ public partial class MainWindow : Window, IComponentConnector
 		{
 			return;
 		}
-		if (_photoTrainingModeActive)
-		{
-			SetCameraToggle(enabled: false);
-			SetStatus("Stop the Picture Standard Model builder before starting the webcam.");
-			return;
-		}
 		if (CameraToggle.IsChecked == true)
 		{
-			_automaticCameraRecoveryAttempts = 0;
+			_cameraShouldRun = true;
+			_consecutiveCameraRecoveryAttempts = 0;
+			Volatile.Write(ref _nextCameraRecoveryTimestamp, 0L);
 			await StartPreviewAsync();
 		}
 		else
 		{
-			_currentManualStandardModelCandidate = null;
+			_cameraShouldRun = false;
+			_cameraRecoveryPending = false;
 			await StopPreviewAsync();
 		}
-		UpdateStandardModelUi();
 	}
 
 	private async void DirectX12PreviewMenuItemClicked(object sender, RoutedEventArgs e)
@@ -1880,12 +1655,6 @@ public partial class MainWindow : Window, IComponentConnector
 	private void FaceMeshOverlayMenuItemClicked(object sender, RoutedEventArgs e)
 	{
 		_showFaceMeshOverlay = FaceMeshOverlayMenuItem.IsChecked;
-		UpdateFaceCueGuideOverlay(_latestFrame);
-	}
-
-	private void AvatarModelOverlayMenuItemClicked(object sender, RoutedEventArgs e)
-	{
-		_showAvatarModelOverlay = AvatarModelOverlayMenuItem.IsChecked;
 		UpdateFaceCueGuideOverlay(_latestFrame);
 	}
 
@@ -1914,6 +1683,17 @@ public partial class MainWindow : Window, IComponentConnector
 		catch (OperationCanceledException)
 		{
 		}
+		catch (Exception ex)
+		{
+			_isCameraEnabled = false;
+			SetCameraToggle(_cameraShouldRun);
+			if (!_isClosing)
+			{
+				SetStatus(
+					"Camera start failed without taking down the app; " +
+					"the continuity guard will retry: " + ex.Message);
+			}
+		}
 		finally
 		{
 			if (enteredLifecycleGate)
@@ -1933,17 +1713,36 @@ public partial class MainWindow : Window, IComponentConnector
 		object selectedItem = CameraComboBox.SelectedItem;
 		if (!(selectedItem is CameraDevice camera))
 		{
-			_cameraRecoveryPending = false;
-			SetCameraToggle(enabled: false);
-			SetStatus("Choose a camera first.");
+			_isCameraEnabled = false;
+			SetCameraToggle(_cameraShouldRun);
+			SetStatus(_cameraShouldRun
+				? "No camera is selected. The camera watchdog will keep retrying."
+				: "Choose a camera first.");
 			return;
 		}
 		CameraVideoMode mode = (CameraModeComboBox.SelectedItem as CameraVideoMode) ?? CameraVideoMode.Auto;
-		_cameraStartedAtUtc = DateTime.UtcNow;
-		_lastCameraSourceFrameAtUtc = DateTime.MinValue;
-		ApplyTrackingFidelity();
+		Volatile.Write(ref _cameraStartedTimestamp, Stopwatch.GetTimestamp());
+		Volatile.Write(ref _lastCameraSourceFrameTimestamp, 0L);
+		Volatile.Write(ref _lastCameraPresentedFrameTimestamp, 0L);
+		ApplySelectedCameraMode(mode);
 		SetPreviewState($"Starting {camera.Name} ({mode.Label})", null);
 		SetStatus($"Opening camera: {camera.Name} ({mode.Label})");
+		Task pendingNativeDisposal =
+			Volatile.Read(ref _pendingNativeCameraDisposal);
+		if (!pendingNativeDisposal.IsCompleted)
+		{
+			try
+			{
+				await pendingNativeDisposal.WaitAsync(
+					CameraRecoveryNativeReleaseWait,
+					cancellationToken);
+			}
+			catch (TimeoutException)
+			{
+				// The old instance is isolated on its cleanup thread. Continue
+				// opening; a busy device will be retried by the watchdog.
+			}
+		}
 		if (IsDirectX12PreviewEnabled() && TryStartDirectX12NativeCamera(camera, mode))
 		{
 			if (!IsCurrentCameraStart(operationGeneration, cancellationToken))
@@ -1955,7 +1754,6 @@ public partial class MainWindow : Window, IComponentConnector
 			SetCameraToggle(enabled: true);
 			ScheduleDirectX12PreviewWakeAfterCameraStart();
 			SetStatus($"Camera active through native DX12 texture path: {camera.Name} ({mode.Label})");
-			_cameraRecoveryPending = false;
 			return;
 		}
 		_directX12PreviewMaxRenderFramesPerSecond = (IsDirectX12PreviewEnabled() ? GetDirectX12PreviewRenderFramesPerSecond(mode, nativeTexturePath: false) : 0.0);
@@ -1978,7 +1776,7 @@ public partial class MainWindow : Window, IComponentConnector
 				return;
 			}
 		}
-		SetCameraToggle(_isCameraEnabled);
+		SetCameraToggle(_cameraShouldRun);
 		if (_isCameraEnabled)
 		{
 			SetStatus($"Camera active: {camera.Name} ({mode.Label})");
@@ -1986,9 +1784,10 @@ public partial class MainWindow : Window, IComponentConnector
 		else
 		{
 			SetPreviewState("Camera failed to start", null);
-			SetStatus("Camera failed to open. Close other webcam/AI apps and try Auto or a lower mode.");
+			SetStatus(_cameraShouldRun
+				? "Camera did not open. It remains armed and will retry automatically."
+				: "Camera failed to open.");
 		}
-		_cameraRecoveryPending = false;
 	}
 
 	private bool IsCurrentCameraStart(int operationGeneration, CancellationToken cancellationToken)
@@ -2009,7 +1808,10 @@ public partial class MainWindow : Window, IComponentConnector
 		}
 	}
 
-	private async Task StopPreviewAsync(bool keepToggleChecked = false, TimeSpan? gateTimeout = null)
+	private async Task StopPreviewAsync(
+		bool keepToggleChecked = false,
+		TimeSpan? gateTimeout = null,
+		bool releaseNativeCameraInBackground = false)
 	{
 		Interlocked.Increment(ref _cameraLifecycleGeneration);
 		CancellationTokenSource startCancellation = Interlocked.Exchange(ref _cameraStartCancellation, null);
@@ -2031,7 +1833,9 @@ public partial class MainWindow : Window, IComponentConnector
 			{
 				WriteShutdownTrace("Camera lifecycle gate timed out; forcing final camera release.");
 			}
-			StopPreviewCore(keepToggleChecked);
+			StopPreviewCore(
+				keepToggleChecked,
+				releaseNativeCameraInBackground);
 		}
 		finally
 		{
@@ -2049,16 +1853,17 @@ public partial class MainWindow : Window, IComponentConnector
 		return true;
 	}
 
-	private void StopPreviewCore(bool keepToggleChecked = false)
+	private void StopPreviewCore(
+		bool keepToggleChecked = false,
+		bool releaseNativeCameraInBackground = false)
 	{
-		DisposeDirectX12NativeCamera();
+		DisposeDirectX12NativeCamera(releaseNativeCameraInBackground);
 		_previewService.Stop();
 		DisposeDirectX12PreviewHost();
-		ResetDirectX12AnalysisFramePump();
-		ResetPreviewFramePump();
 		_isCameraEnabled = false;
-		_cameraStartedAtUtc = DateTime.MinValue;
-		_lastCameraSourceFrameAtUtc = DateTime.MinValue;
+		Volatile.Write(ref _cameraStartedTimestamp, 0L);
+		Volatile.Write(ref _lastCameraSourceFrameTimestamp, 0L);
+		Volatile.Write(ref _lastCameraPresentedFrameTimestamp, 0L);
 		_currentFaceFeatureDetection = FaceFeatureDetection.None;
 		ResetLandmarkTracking();
 		if (!keepToggleChecked)
@@ -2078,54 +1883,186 @@ public partial class MainWindow : Window, IComponentConnector
 
 	private async void CameraHealthTimerTick(object? sender, EventArgs e)
 	{
-		if (_isClosing || !_isCameraEnabled || _cameraRecoveryPending)
+		if (_isClosing || !_cameraShouldRun || _cameraRecoveryPending)
 		{
 			return;
 		}
-		DateTime utcNow = DateTime.UtcNow;
-		DateTime dateTime = ((_lastCameraSourceFrameAtUtc == DateTime.MinValue) ? _cameraStartedAtUtc : _lastCameraSourceFrameAtUtc);
-		if (dateTime == DateTime.MinValue || utcNow - dateTime < CameraStallTimeout)
+		long now = Stopwatch.GetTimestamp();
+		long nextRecoveryTimestamp =
+			Volatile.Read(ref _nextCameraRecoveryTimestamp);
+		if (nextRecoveryTimestamp != 0L && now < nextRecoveryTimestamp)
 		{
 			return;
 		}
-		if (_automaticCameraRecoveryAttempts >= 1)
+		if (!_isCameraEnabled)
 		{
-			_cameraRecoveryPending = true;
-			await StopPreviewAsync();
-			SetPreviewState("Camera stream stopped", null);
-			SetStatus("The camera stopped delivering frames after one recovery attempt. The camera was turned off; close other camera apps, then turn it on again.");
-			_cameraRecoveryPending = false;
+			await RecoverCameraAsync(
+				"camera is armed but no capture path is active",
+				rememberNativeFailure: false);
 			return;
 		}
-		_automaticCameraRecoveryAttempts++;
+		long nativeSourceTimestamp = _directX12NativeCamera?.LastSourceFrameTimestamp ?? 0L;
+		long lastSourceTimestamp = nativeSourceTimestamp != 0L
+			? nativeSourceTimestamp
+			: Volatile.Read(ref _lastCameraSourceFrameTimestamp);
+		long referenceTimestamp = lastSourceTimestamp == 0L
+			? Volatile.Read(ref _cameraStartedTimestamp)
+			: lastSourceTimestamp;
+		if (referenceTimestamp != 0L
+			&& Stopwatch.GetElapsedTime(referenceTimestamp, now) >=
+				CameraStallTimeout)
+		{
+			await RecoverCameraAsync(
+				"source capture stopped producing current frames",
+				rememberNativeFailure: _directX12NativeCamera != null);
+			return;
+		}
+
+		long nativePresentationTimestamp =
+			_directX12NativeCamera?.LastPresentedFrameTimestamp ?? 0L;
+		long lastPresentationTimestamp =
+			nativePresentationTimestamp != 0L
+				? nativePresentationTimestamp
+				: Volatile.Read(ref _lastCameraPresentedFrameTimestamp);
+		long presentationReferenceTimestamp =
+			lastPresentationTimestamp == 0L
+				? Volatile.Read(ref _cameraStartedTimestamp)
+				: lastPresentationTimestamp;
+		if (presentationReferenceTimestamp != 0L
+			&& Stopwatch.GetElapsedTime(
+				presentationReferenceTimestamp,
+				now) >= CameraPresentationStallTimeout)
+		{
+			await RecoverCameraAsync(
+				"display stopped presenting current camera frames",
+				rememberNativeFailure: _directX12NativeCamera != null);
+		}
+	}
+
+	private async Task RecoverCameraAsync(
+		string reason,
+		bool rememberNativeFailure)
+	{
+		if (_isClosing
+			|| !_cameraShouldRun
+			|| _cameraRecoveryPending)
+		{
+			return;
+		}
 		_cameraRecoveryPending = true;
-		if (_directX12NativeCamera != null && CameraComboBox.SelectedItem is CameraDevice camera)
+		int attempt = Interlocked.Increment(
+			ref _consecutiveCameraRecoveryAttempts);
+		double backoffSeconds = Math.Min(
+			CameraRecoveryMaximumBackoff.TotalSeconds,
+			Math.Pow(2.0, Math.Min(4, Math.Max(0, attempt - 1))) * 0.5);
+		long nextRecoveryTimestamp = Stopwatch.GetTimestamp()
+			+ (long)(Stopwatch.Frequency * backoffSeconds);
+		Volatile.Write(
+			ref _nextCameraRecoveryTimestamp,
+			nextRecoveryTimestamp);
+		if (rememberNativeFailure
+			&& _directX12NativeCamera != null
+			&& CameraComboBox.SelectedItem is CameraDevice camera)
 		{
 			CameraVideoMode mode = (CameraModeComboBox.SelectedItem as CameraVideoMode) ?? CameraVideoMode.Auto;
-			TextureNativePreviewPolicy.RememberPreviewFailure(camera, mode, "native texture stream stopped delivering frames");
+			TextureNativePreviewPolicy.RememberPreviewFailure(
+				camera,
+				mode,
+				reason);
 		}
-		SetStatus("Camera stream stalled. Retrying once through the safe camera path...");
-		await StopPreviewAsync(keepToggleChecked: true);
-		await base.Dispatcher.InvokeAsync((Func<Task>)StartPreviewAsync, DispatcherPriority.ApplicationIdle).Task.Unwrap();
+		SetStatus(
+			$"Camera continuity guard isolated a failed lane ({reason}). " +
+			$"Reopening now; recovery {attempt}.");
+		try
+		{
+			await StopPreviewAsync(
+				keepToggleChecked: true,
+				releaseNativeCameraInBackground: true);
+			if (_cameraShouldRun && !_isClosing)
+			{
+				if (attempt == 2
+					|| attempt % 3 == 0
+					|| CameraComboBox.SelectedItem == null)
+				{
+					await RefreshCamerasAsync();
+				}
+				await StartPreviewAsync();
+			}
+		}
+		catch (Exception ex)
+		{
+			_isCameraEnabled = false;
+			SetCameraToggle(_cameraShouldRun);
+			SetStatus(
+				"Camera recovery was isolated after an error and will retry: " +
+				ex.Message);
+		}
+		finally
+		{
+			_cameraRecoveryPending = false;
+		}
+	}
+
+	private void RecordCameraPresentationHeartbeat()
+	{
+		Volatile.Write(
+			ref _lastCameraPresentedFrameTimestamp,
+			Stopwatch.GetTimestamp());
+		Interlocked.Exchange(
+			ref _consecutiveCameraRecoveryAttempts,
+			0);
+		Volatile.Write(ref _nextCameraRecoveryTimestamp, 0L);
 	}
 
 	private void PreviewFrameAvailable(object? sender, BitmapSource frame)
 	{
-		if (_isClosing || Interlocked.CompareExchange(ref _uiFramePending, 1, 0) != 0)
+		if (_isClosing || Interlocked.CompareExchange(ref _uiFrameInFlight, 1, 0) != 0)
 		{
-			TrackPreviewFrameReplacement();
 			return;
 		}
-		base.Dispatcher.InvokeAsync(delegate
+		ProcessReservedPreviewFrame(frame);
+	}
+
+	private void ProcessReservedPreviewFrame(BitmapSource frame)
+	{
+		try
 		{
-			ProcessPreviewFrame(frame);
-		}, DispatcherPriority.Background);
+			if (base.Dispatcher.CheckAccess())
+			{
+				ProcessPreviewFrame(frame);
+			}
+			else
+			{
+				base.Dispatcher.BeginInvoke((Action)delegate
+				{
+					try
+					{
+						ProcessPreviewFrame(frame);
+					}
+					catch (Exception ex)
+					{
+						Interlocked.Exchange(ref _uiFrameInFlight, 0);
+						if (!_isClosing)
+						{
+							ReportRecoverableVisionError("Camera preview skipped one frame and recovered: " + ex.Message);
+						}
+					}
+				}, DispatcherPriority.Background);
+			}
+		}
+		catch (Exception ex)
+		{
+			Interlocked.Exchange(ref _uiFrameInFlight, 0);
+			if (!_isClosing)
+			{
+				ReportRecoverableVisionError("Camera preview skipped one frame and recovered: " + ex.Message);
+			}
+		}
 	}
 
 	private void PreviewCameraFrameAvailable(object? sender, CameraFrame frame)
 	{
-		_lastCameraSourceFrameAtUtc = DateTime.UtcNow;
-		_cameraRecoveryPending = false;
+		Volatile.Write(ref _lastCameraSourceFrameTimestamp, Stopwatch.GetTimestamp());
 		if (!IsDirectX12PreviewEnabled())
 		{
 			return;
@@ -2179,9 +2116,9 @@ public partial class MainWindow : Window, IComponentConnector
 				StatusChanged = DirectX12NativeStatusChanged
 			};
 			_directX12NativeCamera = WebcamModule.StartDx12Camera(target, options);
+			ResetPipelineDiagnostics();
 			ApplyDirectX12PreviewPresentationState();
 			TextureNativePreviewPolicy.ForgetPreviewFailure(camera, mode);
-			_lastDirectX12AnalysisFrameAtUtc = DateTime.MinValue;
 			PreviewImage.Visibility = Visibility.Collapsed;
 			PreviewPlaceholder.Visibility = Visibility.Collapsed;
 			UpdateFaceCueGuideOverlay(_latestFrame);
@@ -2212,15 +2149,10 @@ public partial class MainWindow : Window, IComponentConnector
 
 	private void DirectX12NativeFrameAvailable(object? sender, TextureNativeFrameInfo frame)
 	{
-		_lastCameraSourceFrameAtUtc = DateTime.UtcNow;
-		_cameraRecoveryPending = false;
-		if (frame.FrameNumber % 120 == 0L && !((DateTime.UtcNow - _lastDirectX12DiagnosticsAtUtc).TotalSeconds < 6.0))
-		{
-			base.Dispatcher.InvokeAsync(delegate
-			{
-				SetStatus($"Native DX12 camera: {frame.Width}x{frame.Height}@{frame.FramesPerSecond:0.###} {frame.MediaSubtype} via {frame.DeviceMode}; preview cap {FormatPreviewRenderLimit()}.");
-			}, DispatcherPriority.Background);
-		}
+		long sourceTimestamp = _directX12NativeCamera?.LastSourceFrameTimestamp ?? 0L;
+		Volatile.Write(
+			ref _lastCameraSourceFrameTimestamp,
+			sourceTimestamp != 0L ? sourceTimestamp : Stopwatch.GetTimestamp());
 	}
 
 	private void DirectX12NativeTextureFrameAvailable(object? sender, TextureNativeFrameLease frame)
@@ -2229,21 +2161,10 @@ public partial class MainWindow : Window, IComponentConnector
 		{
 			return;
 		}
-		TextureNativeFrameLease textureNativeFrameLease = null;
-		bool flag = false;
+		bool handedOff = false;
 		try
 		{
-			textureNativeFrameLease = frame.DuplicatePreviewData();
-			if (textureNativeFrameLease != null)
-			{
-				TextureNativeFrameLease ownedFrame = textureNativeFrameLease;
-				textureNativeFrameLease = null;
-				flag = true;
-				Task.Run(delegate
-				{
-					ProcessDirectX12AnalysisFrame(ownedFrame);
-				});
-			}
+			handedOff = _directX12AnalysisWorker.TryAcceptTexture(frame);
 		}
 		catch (Exception ex)
 		{
@@ -2251,21 +2172,46 @@ public partial class MainWindow : Window, IComponentConnector
 		}
 		finally
 		{
-			textureNativeFrameLease?.Dispose();
-			if (!flag)
+			if (!handedOff)
 			{
-				Interlocked.Exchange(ref _directX12AnalysisWorkerQueued, 0);
+				Interlocked.Exchange(ref _faceFeatureDetectionInFlight, 0);
+				Interlocked.Exchange(ref _directX12AnalysisInFlight, 0);
 			}
 		}
 	}
 
 	private void ProcessDirectX12AnalysisFrame(TextureNativeFrameLease frame)
 	{
+		bool bitmapDetectionOwnsGate = false;
+		bool completed = false;
 		try
 		{
+			FaceBoxSystem faceBoxSystem = _selectedFaceBoxSystem;
+			int faceBoxSystemGeneration = _faceBoxSystemGeneration;
+			int faceAnalysisGeneration =
+				Volatile.Read(ref _faceAnalysisGeneration);
+			if (TryProcessDirectMlTextureFrame(
+				frame,
+				faceBoxSystem,
+				faceBoxSystemGeneration,
+				faceAnalysisGeneration))
+			{
+				completed = true;
+				return;
+			}
+
 			if (TryCreateBitmapFromDirectX12TextureFrame(frame, out BitmapSource bitmap))
 			{
-				PreviewFrameAvailable(this, bitmap);
+				Volatile.Write(ref _latestFrame, bitmap);
+				bitmapDetectionOwnsGate = true;
+				ProcessFaceFeatureDetectionFrame(
+					bitmap,
+					frame.CapturedAtTimestamp,
+					frame.CapturedAtUtc,
+					faceBoxSystem,
+					faceBoxSystemGeneration,
+					faceAnalysisGeneration);
+				completed = true;
 			}
 		}
 		catch (Exception ex)
@@ -2274,58 +2220,176 @@ public partial class MainWindow : Window, IComponentConnector
 		}
 		finally
 		{
-			frame.Dispose();
-			Interlocked.Exchange(ref _directX12AnalysisWorkerQueued, 0);
+			if (completed)
+			{
+				Interlocked.Increment(ref _directX12AnalysisCompletedFrames);
+			}
+			if (!bitmapDetectionOwnsGate)
+			{
+				Interlocked.Exchange(ref _faceFeatureDetectionInFlight, 0);
+			}
+			Interlocked.Exchange(ref _directX12AnalysisInFlight, 0);
 		}
+	}
+
+	private bool TryProcessDirectMlTextureFrame(
+		TextureNativeFrameLease frame,
+		FaceBoxSystem faceBoxSystem,
+		int faceBoxSystemGeneration,
+		int faceAnalysisGeneration)
+	{
+		if (faceBoxSystem != FaceBoxSystem.MediaPipe
+			|| _mediaPipeExecutionBackend != MediaPipeExecutionBackend.Gpu
+			|| !frame.MediaSubtype.Contains(
+				"NV12",
+				StringComparison.OrdinalIgnoreCase)
+			|| (frame.Resource == IntPtr.Zero
+				&& frame.D3D12SharedTextureHandle == IntPtr.Zero))
+		{
+			DisposeDirectMlTextureTracker();
+			return false;
+		}
+		if (IsLiveAwarenessFrameExpired(frame.CapturedAtTimestamp))
+		{
+			ExpireLiveAwarenessState(frame.CapturedAtTimestamp);
+			return true;
+		}
+
+		try
+		{
+			int cameraGeneration =
+				Volatile.Read(ref _cameraLifecycleGeneration);
+			if (_directMlTextureTracker == null
+				|| _directMlTextureTrackerCameraGeneration != cameraGeneration
+				|| !_directMlTextureTracker.CanProcess(frame))
+			{
+				DisposeDirectMlTextureTracker();
+				MediaPipeDirectMlModelEnvironment models =
+					MediaPipeSidecarPythonEnvironment.DetectDirectMlModels();
+				if (!models.IsReady)
+				{
+					throw new InvalidOperationException(models.Status);
+				}
+				_directMlTextureTracker =
+					new MediaPipeDirectMlTextureTracker(
+						frame,
+						models.DetectorModelPath,
+						models.LandmarkerModelPath);
+				_directMlTextureTrackerCameraGeneration = cameraGeneration;
+			}
+
+			DateTime capturedAtUtc = frame.CapturedAtUtc == DateTime.MinValue
+				? DateTime.UtcNow
+				: frame.CapturedAtUtc;
+			FaceLandmarkTrackingResult faceTracking =
+				_directMlTextureTracker.Detect(frame, capturedAtUtc);
+			FaceBoxTrackingFrameResult trackingResult = new(
+				faceBoxSystem,
+				faceBoxSystemGeneration,
+				faceTracking,
+				null,
+				frame.CapturedAtTimestamp,
+				capturedAtUtc,
+				frame.Width,
+				frame.Height,
+				null);
+			ProcessFaceTrackingFrameResult(
+				trackingResult,
+				faceAnalysisGeneration);
+			return true;
+		}
+		catch (Exception ex)
+		{
+			DisposeDirectMlTextureTracker();
+			ReportRecoverableVisionError(
+				"GPU texture tracking skipped one frame and recovered: " +
+				ex.Message);
+			return false;
+		}
+	}
+
+	private void DisposeDirectMlTextureTracker()
+	{
+		MediaPipeDirectMlTextureTracker? tracker =
+			_directMlTextureTracker;
+		_directMlTextureTracker = null;
+		_directMlTextureTrackerCameraGeneration = -1;
+		tracker?.Dispose();
 	}
 
 	private bool TryBeginDirectX12Analysis()
 	{
-		if (_isClosing || Interlocked.CompareExchange(ref _directX12AnalysisWorkerQueued, 1, 0) != 0)
+		if (_isClosing
+			|| Volatile.Read(ref _faceTrackingEnabled) == 0
+			|| !IsSelectedFaceBoxSystemAvailable()
+			|| Volatile.Read(ref _faceFeatureDetectionInFlight) != 0
+			|| Interlocked.CompareExchange(ref _directX12AnalysisInFlight, 1, 0) != 0)
 		{
 			return false;
 		}
-		DateTime utcNow = DateTime.UtcNow;
-		if (utcNow - _lastDirectX12AnalysisFrameAtUtc < _directX12AnalysisFrameInterval)
+		if (Interlocked.CompareExchange(ref _faceFeatureDetectionInFlight, 1, 0) != 0)
 		{
-			Interlocked.Exchange(ref _directX12AnalysisWorkerQueued, 0);
+			Interlocked.Exchange(ref _directX12AnalysisInFlight, 0);
 			return false;
 		}
-		_lastDirectX12AnalysisFrameAtUtc = utcNow;
 		return true;
 	}
 
 	private bool TryCreateBitmapFromDirectX12TextureFrame(TextureNativeFrameLease frame, out BitmapSource bitmap)
 	{
-		bitmap = BitmapSource.Create(1, 1, 96.0, 96.0, PixelFormats.Bgra32, null, new byte[4] { 0, 0, 0, 255 }, 4);
-		int maximumWidth = Math.Clamp(_directX12AnalysisMaxOutputWidth, 320, 3840);
-		byte[] array = null;
-		int bgraStride = 0;
-		int outputWidth = frame.Width;
-		int outputHeight = frame.Height;
+		bitmap = EmptyBgraBitmap;
+		int maximumWidth = Math.Clamp(frame.Width, 320, 3840);
 		byte[] nv12PreviewBytes = frame.Nv12PreviewBytes;
-		if (nv12PreviewBytes != null && nv12PreviewBytes.Length > 0 && frame.Nv12PreviewStride > 0)
-		{
-			array = Nv12FrameConverter.ConvertToBgra(nv12PreviewBytes, frame.Nv12PreviewStride, frame.Width, frame.Height, maximumWidth, out outputWidth, out outputHeight, out bgraStride);
-		}
-		if (array == null || array.Length == 0 || bgraStride <= 0)
+		if (nv12PreviewBytes == null
+			|| !Nv12FrameConverter.TryGetOutputLayout(
+				nv12PreviewBytes,
+				frame.Nv12PreviewStride,
+				frame.Width,
+				frame.Height,
+				maximumWidth,
+				out int outputWidth,
+				out int outputHeight,
+				out int bgraStride,
+				out int requiredLength))
 		{
 			return false;
 		}
-		CameraFrame frame2 = new CameraFrame(array, outputWidth, outputHeight, bgraStride, null, 0, frame.MediaSubtype + "-analysis");
-		return TryCreateBitmapFromBgraCameraFrame(frame2, out bitmap);
+		byte[] bgra = ArrayPool<byte>.Shared.Rent(requiredLength);
+		try
+		{
+			if (!Nv12FrameConverter.TryConvertToBgra(
+				nv12PreviewBytes,
+				frame.Nv12PreviewStride,
+				frame.Width,
+				frame.Height,
+				outputWidth,
+				outputHeight,
+				bgraStride,
+				bgra.AsSpan(0, requiredLength)))
+			{
+				return false;
+			}
+			BitmapSource bitmapSource = BitmapSource.Create(outputWidth, outputHeight, 96.0, 96.0, PixelFormats.Bgra32, null, bgra, bgraStride);
+			bitmapSource.Freeze();
+			bitmap = bitmapSource;
+			return true;
+		}
+		finally
+		{
+			ArrayPool<byte>.Shared.Return(bgra);
+		}
 	}
 
 	private bool TryCreateBitmapFromBgraCameraFrame(CameraFrame frame, out BitmapSource bitmap)
 	{
-		bitmap = BitmapSource.Create(1, 1, 96.0, 96.0, PixelFormats.Bgra32, null, new byte[4] { 0, 0, 0, 255 }, 4);
+		bitmap = EmptyBgraBitmap;
 		if (!frame.HasBgra || frame.Width <= 0 || frame.Height <= 0)
 		{
 			return false;
 		}
 		BitmapSource bitmapSource = BitmapSource.Create(frame.Width, frame.Height, 96.0, 96.0, PixelFormats.Bgra32, null, frame.BgraBytes, frame.Stride);
 		bitmapSource.Freeze();
-		int num = Math.Clamp(_directX12AnalysisMaxOutputWidth, 320, 3840);
+		int num = Math.Clamp(frame.Width, 320, 3840);
 		if (frame.Width <= num)
 		{
 			bitmap = bitmapSource;
@@ -2434,7 +2498,8 @@ public partial class MainWindow : Window, IComponentConnector
 		}
 	}
 
-	private void DisposeDirectX12NativeCamera()
+	private void DisposeDirectX12NativeCamera(
+		bool disposeInBackground = false)
 	{
 		Dx12Camera directX12NativeCamera = _directX12NativeCamera;
 		if (directX12NativeCamera != null)
@@ -2444,8 +2509,36 @@ public partial class MainWindow : Window, IComponentConnector
 			directX12NativeCamera.TextureFrameAvailable -= DirectX12NativeTextureFrameAvailable;
 			directX12NativeCamera.DiagnosticsChanged -= DirectX12NativeDiagnosticsChanged;
 			directX12NativeCamera.StatusChanged -= DirectX12NativeStatusChanged;
-			directX12NativeCamera.Dispose();
-			ResetDirectX12AnalysisFramePump();
+			if (disposeInBackground)
+			{
+				try
+				{
+					directX12NativeCamera.DetachPreviewHost();
+				}
+				catch
+				{
+				}
+				Task disposal = Task.Run(() =>
+				{
+					try
+					{
+						directX12NativeCamera.Dispose();
+					}
+					catch
+					{
+					}
+				});
+				Volatile.Write(
+					ref _pendingNativeCameraDisposal,
+					disposal);
+			}
+			else
+			{
+				directX12NativeCamera.Dispose();
+				Volatile.Write(
+					ref _pendingNativeCameraDisposal,
+					Task.CompletedTask);
+			}
 			DirectX12PreviewLayer.Children.Clear();
 			_directX12PreviewMaxRenderFramesPerSecond = 0.0;
 		}
@@ -2461,20 +2554,48 @@ public partial class MainWindow : Window, IComponentConnector
 
 	private void DirectX12PreviewDiagnosticsChanged(object? sender, Direct3D12PreviewDiagnostics diagnostics)
 	{
-		DateTime utcNow = DateTime.UtcNow;
-		if (!((utcNow - _lastDirectX12DiagnosticsAtUtc).TotalSeconds < 2.0))
+		if (diagnostics.RenderedFrames > 0L)
 		{
-			_lastDirectX12DiagnosticsAtUtc = utcNow;
-			base.Dispatcher.InvokeAsync(delegate
-			{
-				SetStatus(FormatDirectX12DiagnosticsStatus(diagnostics));
-			}, DispatcherPriority.Background);
+			RecordCameraPresentationHeartbeat();
 		}
+		base.Dispatcher.InvokeAsync(delegate
+		{
+			SetStatus(FormatDirectX12DiagnosticsStatus(diagnostics));
+		}, DispatcherPriority.Background);
 	}
 
 	private string FormatDirectX12DiagnosticsStatus(Direct3D12PreviewDiagnostics diagnostics)
 	{
 		string text = diagnostics.FormatStatusLine();
+		Dx12Camera? camera = _directX12NativeCamera;
+		if (camera != null)
+		{
+			long timestamp = Stopwatch.GetTimestamp();
+			long sourceFrames = camera.FramesRead;
+			long analysisFrames = Interlocked.Read(ref _directX12AnalysisCompletedFrames);
+			long previousTimestamp = Interlocked.Exchange(ref _lastPipelineDiagnosticsTimestamp, timestamp);
+			long previousSourceFrames = Interlocked.Exchange(ref _lastPipelineDiagnosticsSourceFrames, sourceFrames);
+			long previousAnalysisFrames = Interlocked.Exchange(ref _lastPipelineDiagnosticsAnalysisFrames, analysisFrames);
+			if (previousTimestamp != 0L)
+			{
+				double elapsedSeconds = Math.Max(0.001, Stopwatch.GetElapsedTime(previousTimestamp, timestamp).TotalSeconds);
+				_measuredCameraIngestionFramesPerSecond = Math.Max(0L, sourceFrames - previousSourceFrames) / elapsedSeconds;
+				_measuredAnalysisFramesPerSecond = Math.Max(0L, analysisFrames - previousAnalysisFrames) / elapsedSeconds;
+			}
+			long sourceTimestamp = camera.LastSourceFrameTimestamp;
+			string sourceAge = sourceTimestamp == 0L
+				? "unknown"
+				: $"{Stopwatch.GetElapsedTime(sourceTimestamp, timestamp).TotalMilliseconds:0} ms";
+			long awarenessTimestamp = Volatile.Read(ref _lastFaceFeatureLockTimestamp);
+			string awarenessAge = awarenessTimestamp == 0L || IsLiveAwarenessFrameExpired(awarenessTimestamp)
+				? "unknown"
+				: $"{Stopwatch.GetElapsedTime(awarenessTimestamp, timestamp).TotalMilliseconds:0} ms";
+			text += $"; measured capture {_measuredCameraIngestionFramesPerSecond:0.#} fps"
+				+ $"; measured analysis {_measuredAnalysisFramesPerSecond:0.#} fps"
+				+ $"; newest source {sourceAge}"
+				+ $"; awareness {awarenessAge}"
+				+ $"; pre-display busy drops {camera.FramesDroppedWhileProcessingBusy}";
+		}
 		if (_directX12PreviewMaxRenderFramesPerSecond <= 0.0)
 		{
 			return text;
@@ -2488,7 +2609,6 @@ public partial class MainWindow : Window, IComponentConnector
 		{
 			if (!_isClosing)
 			{
-				_lastPreviewFrameAcceptedAt = DateTime.UtcNow;
 				_latestFrame = frame;
 				if (!_showLiveWireframePreview && !IsDirectX12PreviewSurfaceActive())
 				{
@@ -2497,6 +2617,10 @@ public partial class MainWindow : Window, IComponentConnector
 				else if (!string.Equals(PreviewStateText.Text, "Camera active", StringComparison.Ordinal))
 				{
 					PreviewStateText.Text = "Camera active";
+				}
+				if (!IsDirectX12PreviewSurfaceActive())
+				{
+					RecordCameraPresentationHeartbeat();
 				}
 				ProcessFrame(frame);
 				if (FaceAutoFollowCheckBox.IsChecked != true || !IsSelectedFaceBoxSystemAvailable())
@@ -2507,58 +2631,21 @@ public partial class MainWindow : Window, IComponentConnector
 		}
 		finally
 		{
-			Interlocked.Exchange(ref _uiFramePending, 0);
+			Interlocked.Exchange(ref _uiFrameInFlight, 0);
 		}
 	}
 
-	private void ResetPreviewFramePump()
+	private void ResetPipelineDiagnostics()
 	{
-		_previewFramesReplacedSinceWarning = 0;
-		_previewReplacementWindowStartedAtUtc = DateTime.MinValue;
-		Interlocked.Exchange(ref _previewWarningPending, 0);
-		ResetFaceFeatureDetectionFramePump();
-	}
-
-	private void ResetDirectX12AnalysisFramePump()
-	{
-		_lastDirectX12AnalysisFrameAtUtc = DateTime.MinValue;
-	}
-
-	private void ResetFaceFeatureDetectionFramePump()
-	{
-		_lastFaceFeatureDetectionAt = DateTime.MinValue;
-	}
-
-	private void TrackPreviewFrameReplacement()
-	{
-		DateTime utcNow = DateTime.UtcNow;
-		if (_previewReplacementWindowStartedAtUtc == DateTime.MinValue)
-		{
-			_previewReplacementWindowStartedAtUtc = utcNow;
-		}
-		_previewFramesReplacedSinceWarning++;
-		if (_previewFramesReplacedSinceWarning >= 50)
-		{
-			TimeSpan timeSpan = utcNow - _previewReplacementWindowStartedAtUtc;
-			_previewFramesReplacedSinceWarning = 0;
-			_previewReplacementWindowStartedAtUtc = utcNow;
-			if (timeSpan <= TimeSpan.FromSeconds(2L))
-			{
-				QueuePreviewPumpWarning($"Camera preview dropped 50 incoming analysis frames while its current frame was still in flight ({timeSpan.TotalSeconds:0.0}s).");
-			}
-		}
-	}
-
-	private void QueuePreviewPumpWarning(string warning)
-	{
-		if (Interlocked.Exchange(ref _previewWarningPending, 1) == 0)
-		{
-			base.Dispatcher.InvokeAsync(delegate
-			{
-				Interlocked.Exchange(ref _previewWarningPending, 0);
-				SetStatus(warning);
-			}, DispatcherPriority.Background);
-		}
+		Volatile.Write(ref _lastPipelineDiagnosticsTimestamp, 0L);
+		Interlocked.Exchange(
+			ref _lastPipelineDiagnosticsSourceFrames,
+			_directX12NativeCamera?.FramesRead ?? 0L);
+		Interlocked.Exchange(
+			ref _lastPipelineDiagnosticsAnalysisFrames,
+			Interlocked.Read(ref _directX12AnalysisCompletedFrames));
+		_measuredCameraIngestionFramesPerSecond = 0.0;
+		_measuredAnalysisFramesPerSecond = 0.0;
 	}
 
 	private void PreviewStatusChanged(object? sender, string status)
@@ -2586,7 +2673,7 @@ public partial class MainWindow : Window, IComponentConnector
 		}
 		LiveWireframeCanvas.Visibility = Visibility.Collapsed;
 		FaceCueGuideCanvas.Visibility = Visibility.Visible;
-		bool flag = !_photoTrainingModeActive && IsDirectX12PreviewEnabled();
+		bool flag = IsDirectX12PreviewEnabled();
 		if (frame == null)
 		{
 			PreviewImage.Source = null;
@@ -2668,7 +2755,7 @@ public partial class MainWindow : Window, IComponentConnector
 				_currentFaceFeatureDetection = FaceFeatureDetection.None;
 				ResetLandmarkTracking();
 				_activeFaceCueLayout = null;
-				_lastFaceFeatureLockAt = DateTime.MinValue;
+				Volatile.Write(ref _lastFaceFeatureLockTimestamp, 0L);
 				UpdateFaceCueGuideOverlay(_latestFrame);
 			}
 		}
@@ -2707,12 +2794,14 @@ public partial class MainWindow : Window, IComponentConnector
 
 	private void FaceTrackingFieldChanged(object sender, RoutedEventArgs e)
 	{
+		Volatile.Write(ref _faceTrackingEnabled, FaceAutoFollowCheckBox.IsChecked == true ? 1 : 0);
 		if (base.IsLoaded)
 		{
 			_currentFaceFeatureDetection = FaceFeatureDetection.None;
 			ResetLandmarkTracking();
 			_activeFaceCueLayout = null;
-			_lastFaceFeatureLockAt = DateTime.MinValue;
+			Volatile.Write(ref _lastFaceFeatureLockTimestamp, 0L);
+			Volatile.Write(ref _lastFaceAutoFollowTimestamp, 0L);
 			MonitorStatusText.Text = "Face tracking field reset. Waiting for a fresh landmark lock.";
 		}
 	}
@@ -2762,270 +2851,122 @@ public partial class MainWindow : Window, IComponentConnector
 			SetStatus("Please wait for the stored avatar model to finish calculating before starting capture.");
 			return;
 		}
-		if (!_avatarLearningRequested && !HasRequiredCaptureFoundation)
-		{
-			UpdateAvatarLearningStatusUi();
-			SetStatus("Avatar Capture is disabled until all 9 human-approved Standard Model directions are complete. Use Live, Pictures, or Pictures + MediaPipe Assist.");
-			return;
-		}
-		if (!_avatarLearningRequested && IsStandardModelBuildModeActive)
-		{
-			SetStatus("Stop the active Standard Model builder before starting normal Avatar Capture.");
-			return;
-		}
 		_avatarLearningRequested = !_avatarLearningRequested;
-		if (_avatarLearningRequested)
-		{
-			_showAvatarModelOverlay = true;
-			AvatarModelOverlayMenuItem.IsChecked = true;
-			UpdateFaceCueGuideOverlay(_latestFrame);
-		}
-		else
-		{
-			_currentManualStandardModelCandidate = null;
-		}
-		int num = ((!_avatarLearningRequested) ? _avatarObservationStorageService.DiscardPendingCandidates() : 0);
 		UpdateAvatarLearningStatusUi();
-		SetStatus((!_avatarLearningRequested) ? ((num > 0) ? $"Avatar capture stopped. {num} incomplete-batch candidate(s) were discarded." : "Avatar capture stopped.") : (IsMediaPipeOnlyGeometryMode ? ("Avatar capture started. MediaPipe visible-evidence geometry keeps one frame in flight and drops new analysis inputs while busy; " + GetFaceBoxSystemDisplayName() + " preview remains independent and full speed.") : ("Avatar capture started. Recurrent DECA runs single-flight at full speed, skips frames while busy, and stores the lowest-delta result from each five-result window; " + GetFaceBoxSystemDisplayName() + " face tracking stays live.")));
-		if (!_avatarLearningRequested)
-		{
-			QueueAvatarSessionStatusReport();
-		}
+		SetStatus((!_avatarLearningRequested)
+			? "Avatar capture stopped."
+			: $"Avatar capture started. MediaPipe visible-evidence geometry accepts one frame only when its processing slot is empty; {GetFaceBoxSystemDisplayName()} preview remains independent and full speed.");
 	}
 
 	private void UpdateAvatarLearningStatusUi()
 	{
 		if (base.IsLoaded)
 		{
+			_lastAvatarStatusUiRefreshTimestamp = Stopwatch.GetTimestamp();
+			_currentAvatarCaptureQuality = AnalyzeAvatarCaptureQuality();
 			UpdateAvatarSessionUi();
 			AvatarLearningState avatarLearningState = GetAvatarLearningState();
 			ApplyStartStopButtonState(AvatarLearningToggleButton, _avatarLearningRequested, "Start Avatar Capture", "Stop Avatar Capture", "Starts " + ActiveAvatarReconstructionName + " avatar capture.", "Stops " + ActiveAvatarReconstructionName + " avatar capture.");
-			if (!_avatarLearningRequested && !HasRequiredCaptureFoundation)
-			{
-				AvatarLearningToggleButton.ToolTip = "Disabled until the logged-in user has a human-approved 9-view Standard Model. Use either Standard Model builder below.";
-			}
-			AvatarLearningStateText.Text = avatarLearningState.Title;
-			AvatarLearningStatusText.Text = avatarLearningState.Detail;
-			AvatarLearningIndicator.Background = new SolidColorBrush(avatarLearningState.Accent);
-			AvatarTrackingSanityState avatarTrackingSanityState = GetAvatarTrackingSanityState();
-			AvatarTrackingSanityText.Text = avatarTrackingSanityState.Detail;
-			AvatarTrackingSanityText.Foreground = new SolidColorBrush(avatarTrackingSanityState.Accent);
-			FaceReconstructionLaneStatus faceReconstructionLaneStatus = CreateFaceReconstructionLaneStatus();
-			AvatarReconstructionLaneText.Text = faceReconstructionLaneStatus.TrustDecision;
-			AvatarReconstructionLaneText.Foreground = new SolidColorBrush(ColorForReconstructionLane(faceReconstructionLaneStatus));
+			SetTextIfChanged(AvatarLearningStateText, avatarLearningState.Title);
+			SetTextIfChanged(AvatarLearningStatusText, FormatAvatarCaptureStatus());
+			SetIfChanged(AvatarLearningIndicator, Panel.BackgroundProperty, avatarLearningState.Accent);
+			MediaPipeNormalizedFaceModel model = _currentMediaPipeGeometryModel;
+			SetTextIfChanged(AvatarProcessorValueText, $"{GetFaceBoxSystemDisplayName()} {_mediaPipeExecutionBackend.ToDisplayName()}");
+			SetTextIfChanged(AvatarAcceptedFramesValueText, $"{model.AcceptedFrameCount:n0}");
+			SetTextIfChanged(AvatarConstrainedVerticesValueText, $"{model.ConfidentVertexPercent:0.#}%");
+			SetTextIfChanged(AvatarObservationsValueText, $"{model.DirectLandmarkObservationCount:n0}");
+			SetTextIfChanged(AvatarDiscardedPredictionsValueText, $"{model.HiddenLandmarkRejectionCount:n0}");
+			SetTextIfChanged(AvatarSilhouetteSlicesValueText, $"{model.VisualHullSlices.Count:n0}");
+			SetTextIfChanged(AvatarGeometryUpdateValueText, _lastMediaPipeGeometryProcessingDuration is TimeSpan duration
+				? $"{duration.TotalMilliseconds:0.#} ms"
+				: "--");
 			UpdateAvatarCaptureGuidanceUi();
 		}
 	}
 
-	private FaceReconstructionLaneStatus CreateFaceReconstructionLaneStatus()
+	private string FormatAvatarCaptureStatus()
 	{
-		AvatarReconstructionSnapshot currentAvatarReconstructionSnapshot = _currentAvatarReconstructionSnapshot;
-		MediaPipeNormalizedFaceModel currentMediaPipeGeometryModel = _currentMediaPipeGeometryModel;
-		string activeAvatarReconstructionName = ActiveAvatarReconstructionName;
-		bool isMediaPipeOnlyGeometryMode = IsMediaPipeOnlyGeometryMode;
-		bool flag = Interlocked.CompareExchange(ref _avatarReconstructionPending, 0, 0) == 1;
-		bool isAvatarReconstructionReady = IsAvatarReconstructionReady;
-		string text = ((!IsAvatarUserLoggedIn) ? (activeAvatarReconstructionName + " paused until avatar user login") : ((!isMediaPipeOnlyGeometryMode) ? ((!isAvatarReconstructionReady) ? ActiveAvatarReconstructionReadinessStatus : (flag ? (activeAvatarReconstructionName + " reconstructing latest avatar frame") : ((currentAvatarReconstructionSnapshot != null) ? currentAvatarReconstructionSnapshot.TrustDecision : (activeAvatarReconstructionName + " ready; waiting for avatar frame")))) : ((currentMediaPipeGeometryModel.AcceptedFrameCount > 0) ? $"MediaPipe measured geometry has {currentMediaPipeGeometryModel.AcceptedFrameCount:n0} accepted frames" : "MediaPipe measured geometry ready; waiting for capture frames")));
-		bool flag2 = IsSelectedFaceBoxSystemAvailable();
-		string text2 = (flag2 ? _lastFaceBoxBackendStatus : (GetFaceBoxSystemDisplayName() + " tracking unavailable"));
-		string trustLevel = ((!IsAvatarUserLoggedIn) ? "logged-out" : ((isMediaPipeOnlyGeometryMode && currentMediaPipeGeometryModel.ConfidentVertexPercent >= 35.0) ? "directly-constrained" : ((currentAvatarReconstructionSnapshot != null) ? "cross-checked" : (isAvatarReconstructionReady ? "reconstruction-ready" : "measurement-only"))));
-		string text3 = (IsDecaFallbackActive ? (" DECA is selected but unavailable: " + _decaEnvironment.Status) : "");
-		string trustDecision = ((!IsAvatarUserLoggedIn) ? ("Avatar reconstruction: logged out; capture stopped. " + GetFaceBoxSystemDisplayName() + " preview tracking remains live." + text3) : ((currentAvatarReconstructionSnapshot == null) ? (isMediaPipeOnlyGeometryMode ? $"Avatar geometry: MediaPipe visible-evidence model has {currentMediaPipeGeometryModel.AcceptedFrameCount:n0} accepted frame(s), {currentMediaPipeGeometryModel.ConfidentVertexPercent:0.#}% directly constrained vertices, {currentMediaPipeGeometryModel.HiddenLandmarkRejectionCount:n0} hidden-side predictions discarded, and {currentMediaPipeGeometryModel.VisualHullSlices.Count:n0} silhouette slices." : (isAvatarReconstructionReady ? $"Avatar reconstruction: {text}. {GetFaceBoxSystemDisplayName()} remains live tracking.{text3}" : $"Avatar reconstruction: {ActiveAvatarReconstructionReadinessStatus} {GetFaceBoxSystemDisplayName()} remains live tracking.")) : (IsDecaAvatarReconstructionActive ? $"Avatar reconstruction: recurrent model {currentAvatarReconstructionSnapshot.CurrentModelSequenceNumber:n0} | coefficient delta RMS {currentAvatarReconstructionSnapshot.CurrentModelCoefficientDeltaRms:0.000000} | measured fit {currentAvatarReconstructionSnapshot.ReconstructionConfidencePercent:0}% | A/B/C {currentAvatarReconstructionSnapshot.ARotationAroundXDegrees:0.#}/{currentAvatarReconstructionSnapshot.BRotationAroundYDegrees:0.#}/{currentAvatarReconstructionSnapshot.CRotationAroundZDegrees:0.#} deg | dense {currentAvatarReconstructionSnapshot.DenseVertexCount:n0} vertices.{text3}" : $"Avatar reconstruction: {currentAvatarReconstructionSnapshot.Source} measured fit {currentAvatarReconstructionSnapshot.ReconstructionConfidencePercent:0}% | A/B/C {currentAvatarReconstructionSnapshot.ARotationAroundXDegrees:0.#}/{currentAvatarReconstructionSnapshot.BRotationAroundYDegrees:0.#}/{currentAvatarReconstructionSnapshot.CRotationAroundZDegrees:0.#} deg | dense {currentAvatarReconstructionSnapshot.DenseVertexCount:n0} vertices.{text3}")));
-		List<string> list = new List<string>();
-		if (!isAvatarReconstructionReady && !isMediaPipeOnlyGeometryMode)
+		if (!IsAvatarUserLoggedIn)
 		{
-			list.Add(activeAvatarReconstructionName + " avatar reconstruction is not active yet; avatar output remains measurement-only.");
+			return "Login required";
 		}
-		if (currentAvatarReconstructionSnapshot != null)
+		if (!_avatarLearningRequested)
 		{
-			list.AddRange(currentAvatarReconstructionSnapshot.Warnings);
+			return "Stopped";
 		}
-		bool isDecaAvatarReconstructionActive = IsDecaAvatarReconstructionActive;
-		FaceReconstructionLaneStatus faceReconstructionLaneStatus = new FaceReconstructionLaneStatus
+		if (!_isCameraEnabled || _latestFrame == null)
 		{
-			CreatedAtUtc = DateTime.UtcNow,
-			FastTrackingLaneName = GetFaceBoxSystemDisplayName() + " face-box tracking lane",
-			FastTrackingAvailable = flag2,
-			FastTrackingHasDenseFace = _currentFaceLandmarkFrame.HasDenseMesh,
-			FastTrackingStatus = (string.IsNullOrWhiteSpace(text2) ? "fast tracking waiting" : text2),
-			AvatarReconstructionLaneName = (isMediaPipeOnlyGeometryMode ? "MediaPipe geometry measurement lane" : (activeAvatarReconstructionName + " avatar reconstruction lane")),
-			AvatarReconstructionBackendId = ActiveAvatarReconstructionBackendId,
-			AvatarReconstructionManifestPresent = (isMediaPipeOnlyGeometryMode || (isDecaAvatarReconstructionActive ? Directory.Exists(_decaEnvironment.RepositoryPath) : _threeDdfaOnnxModelInfo.ManifestExists)),
-			AvatarReconstructionModelPresent = (isMediaPipeOnlyGeometryMode ? currentMediaPipeGeometryModel.HasGeometry : (isDecaAvatarReconstructionActive ? File.Exists(_decaEnvironment.ModelPath) : _threeDdfaOnnxModelInfo.IsReady)),
-			AvatarReconstructionCanRunInference = isAvatarReconstructionReady,
-			AvatarReconstructionStatus = text,
-			AvatarReconstructionRuntime = (isMediaPipeOnlyGeometryMode ? "MediaPipe 478-point tracking" : (isDecaAvatarReconstructionActive ? "Python Torch DECA/FLAME" : _threeDdfaOnnxModelInfo.Runtime)),
-			AvatarReconstructionModelDirectory = (isMediaPipeOnlyGeometryMode ? MediaPipeNormalizedFaceStore.GetFolder(GetAvatarDataFolder()) : (isDecaAvatarReconstructionActive ? _decaEnvironment.RepositoryPath : _threeDdfaOnnxModelInfo.ModelDirectory)),
-			AvatarReconstructionManifestPath = (isMediaPipeOnlyGeometryMode ? MediaPipeNormalizedFaceStore.GetStatePath(GetAvatarDataFolder()) : (isDecaAvatarReconstructionActive ? _decaEnvironment.ModelPath : _threeDdfaOnnxModelInfo.ManifestPath))
-		};
-		IReadOnlyList<string> avatarReconstructionModelFiles;
-		if (!isMediaPipeOnlyGeometryMode)
-		{
-			if (!isDecaAvatarReconstructionActive)
-			{
-				avatarReconstructionModelFiles = _threeDdfaOnnxModelInfo.ModelFiles;
-			}
-			else
-			{
-				IReadOnlyList<string> readOnlyList = new global::_003C_003Ez__ReadOnlySingleElementList<string>(_decaEnvironment.ModelPath);
-				avatarReconstructionModelFiles = readOnlyList;
-			}
+			return "Waiting for camera";
 		}
-		else
+		if (!_currentFaceLandmarkFrame.HasFace || !_currentFaceLandmarkMetrics.HasFace)
 		{
-			IReadOnlyList<string> readOnlyList = new global::_003C_003Ez__ReadOnlyArray<string>(new string[3]
-			{
-				MediaPipeNormalizedFaceStore.GetStatePath(GetAvatarDataFolder()),
-				MediaPipeNormalizedFaceStore.GetModelPath(GetAvatarDataFolder()),
-				MediaPipeNormalizedFaceStore.GetViewerPath(GetAvatarDataFolder())
-			});
-			avatarReconstructionModelFiles = readOnlyList;
+			return "Waiting for face lock";
 		}
-		faceReconstructionLaneStatus.AvatarReconstructionModelFiles = avatarReconstructionModelFiles;
-		IReadOnlyList<string> avatarReconstructionExpectedOutputs;
-		if (!isMediaPipeOnlyGeometryMode)
+		return _currentAvatarCaptureQuality.CanCollectMeasurements
+			? "Active"
+			: "Waiting";
+	}
+
+	private void UpdateAvatarLearningStatusUiIfDue()
+	{
+		long timestamp = Stopwatch.GetTimestamp();
+		if (timestamp - Volatile.Read(ref _lastAvatarStatusUiRefreshTimestamp) < AvatarStatusUiRefreshIntervalTicks)
 		{
-			if (!isDecaAvatarReconstructionActive)
-			{
-				avatarReconstructionExpectedOutputs = _threeDdfaOnnxModelInfo.ExpectedOutputs;
-			}
-			else
-			{
-				IReadOnlyList<string> readOnlyList = new global::_003C_003Ez__ReadOnlyArray<string>(new string[5] { "projected FLAME vertices", "canonical identity vertices", "FLAME topology", "shape/expression coefficients", "A/B/C pose" });
-				avatarReconstructionExpectedOutputs = readOnlyList;
-			}
+			return;
 		}
-		else
-		{
-			IReadOnlyList<string> readOnlyList = new global::_003C_003Ez__ReadOnlyArray<string>(new string[5] { "normalized canonical XYZ", "direct visibility evidence", "five-degree silhouette profiles", "visual-hull cross sections", "eye/jaw/brow animation measurements" });
-			avatarReconstructionExpectedOutputs = readOnlyList;
-		}
-		faceReconstructionLaneStatus.AvatarReconstructionExpectedOutputs = avatarReconstructionExpectedOutputs;
-		faceReconstructionLaneStatus.TrustLevel = trustLevel;
-		faceReconstructionLaneStatus.TrustDecision = trustDecision;
-		faceReconstructionLaneStatus.LearningImpact = ((!IsAvatarUserLoggedIn) ? "No avatar observations are accepted until a user logs in and starts capture." : (isMediaPipeOnlyGeometryMode ? "Live MediaPipe tracking supplies visible multiview equations asynchronously. Hidden-side projections have zero reconstruction weight." : ((!isAvatarReconstructionReady) ? $"Live {GetFaceBoxSystemDisplayName()} tracking remains available while avatar reconstruction waits for {activeAvatarReconstructionName}." : ((!isDecaAvatarReconstructionActive && _selectedFaceBoxSystem == FaceBoxSystem.ThreeDdfaV2) ? "The selected 3DDFA-V2 pass owns both live face-box tracking and avatar reconstruction evidence." : (activeAvatarReconstructionName + " runs asynchronously for avatar reconstruction trust and does not block live " + GetFaceBoxSystemDisplayName() + " tracking.")))));
-		faceReconstructionLaneStatus.Warnings = list;
-		return faceReconstructionLaneStatus;
+
+		UpdateAvatarLearningStatusUi();
 	}
 
 	private bool HasStrongAvatarPoseLock()
 	{
-		if (IsMediaPipeOnlyGeometryMode)
-		{
-			MediaPipeNormalizedFaceModel currentMediaPipeGeometryModel = _currentMediaPipeGeometryModel;
-			if (currentMediaPipeGeometryModel.AcceptedFrameCount >= 20 && currentMediaPipeGeometryModel.MaximumBRotationDegrees - currentMediaPipeGeometryModel.MinimumBRotationDegrees >= 20.0)
-			{
-				return currentMediaPipeGeometryModel.ConfidentVertexPercent >= 25.0;
-			}
-			return false;
-		}
-		AvatarReconstructionSnapshot currentAvatarReconstructionSnapshot = _currentAvatarReconstructionSnapshot;
-		if (currentAvatarReconstructionSnapshot != null && currentAvatarReconstructionSnapshot.DenseVertexCount >= 1000)
-		{
-			return currentAvatarReconstructionSnapshot.ReconstructionConfidencePercent >= 70.0;
-		}
-		return false;
+		MediaPipeNormalizedFaceModel model = _currentMediaPipeGeometryModel;
+		return model.AcceptedFrameCount >= 20
+			&& model.MaximumBRotationDegrees - model.MinimumBRotationDegrees >= 20.0
+			&& model.ConfidentVertexPercent >= 25.0;
 	}
 
 	private string FormatAvatarPoseCrossCheck()
 	{
-		if (IsMediaPipeOnlyGeometryMode)
-		{
-			MediaPipeNormalizedFaceModel currentMediaPipeGeometryModel = _currentMediaPipeGeometryModel;
-			return $"MediaPipe geometry coverage: A {currentMediaPipeGeometryModel.MinimumARotationDegrees:0.#}..{currentMediaPipeGeometryModel.MaximumARotationDegrees:0.#}, B {currentMediaPipeGeometryModel.MinimumBRotationDegrees:0.#}..{currentMediaPipeGeometryModel.MaximumBRotationDegrees:0.#}, C {currentMediaPipeGeometryModel.MinimumCRotationDegrees:0.#}..{currentMediaPipeGeometryModel.MaximumCRotationDegrees:0.#} deg; {currentMediaPipeGeometryModel.ConfidentVertexPercent:0.#}% directly constrained.";
-		}
-		AvatarReconstructionSnapshot currentAvatarReconstructionSnapshot = _currentAvatarReconstructionSnapshot;
-		if (currentAvatarReconstructionSnapshot != null)
-		{
-			return $"{currentAvatarReconstructionSnapshot.Source} pose lock: A/B/C {currentAvatarReconstructionSnapshot.ARotationAroundXDegrees:0.#}/{currentAvatarReconstructionSnapshot.BRotationAroundYDegrees:0.#}/{currentAvatarReconstructionSnapshot.CRotationAroundZDegrees:0.#} deg, dense {currentAvatarReconstructionSnapshot.DenseVertexCount:n0} vertices.";
-		}
-		return ActiveAvatarReconstructionName + " pose waiting.";
-	}
-
-	private static Color ColorForReconstructionLane(FaceReconstructionLaneStatus lane)
-	{
-		if (lane.AvatarReconstructionCanRunInference && lane.TrustLevel == "cross-checked")
-		{
-			return Color.FromRgb(128, 224, 164);
-		}
-		if (!lane.AvatarReconstructionCanRunInference)
-		{
-			return Color.FromRgb(185, 215, 239);
-		}
-		return Color.FromRgb(byte.MaxValue, 210, 122);
+		MediaPipeNormalizedFaceModel model = _currentMediaPipeGeometryModel;
+		return $"MediaPipe geometry coverage: A {model.MinimumARotationDegrees:0.#}..{model.MaximumARotationDegrees:0.#}, B {model.MinimumBRotationDegrees:0.#}..{model.MaximumBRotationDegrees:0.#}, C {model.MinimumCRotationDegrees:0.#}..{model.MaximumCRotationDegrees:0.#} deg; {model.ConfidentVertexPercent:0.#}% directly constrained.";
 	}
 
 	private static void ApplyStartStopButtonState(Button button, bool isActive, string startText, string stopText, string startToolTip, string stopToolTip)
 	{
-		button.Content = (isActive ? stopText : startText);
-		button.Background = (isActive ? StopActionButtonBackground : StartActionButtonBackground);
-		button.BorderBrush = (isActive ? StopActionButtonBorder : StartActionButtonBorder);
-		button.Foreground = Brushes.White;
-		button.ToolTip = (isActive ? stopToolTip : startToolTip);
+		SetContentIfChanged(button, isActive ? stopText : startText);
+		SetIfChanged(button, Control.BackgroundProperty, isActive ? StopActionButtonBackground : StartActionButtonBackground);
+		SetIfChanged(button, Control.BorderBrushProperty, isActive ? StopActionButtonBorder : StartActionButtonBorder);
+		SetIfChanged(button, Control.ForegroundProperty, Brushes.White);
+		SetIfChanged(button, FrameworkElement.ToolTipProperty, isActive ? stopToolTip : startToolTip);
 	}
 
 	private AvatarLearningState GetAvatarLearningState()
 	{
 		if (!IsAvatarUserLoggedIn)
 		{
-			return new AvatarLearningState(Active: false, "Avatar capture stopped", "Not capturing: use File > Login to identify the person in front of the camera.", Color.FromRgb(89, 97, 107));
+			return new AvatarLearningState("Avatar capture stopped", "Not capturing: use File > Login to identify the person in front of the camera.", AvatarStoppedBrush);
 		}
 		if (!_avatarLearningRequested)
 		{
-			return new AvatarLearningState(Active: false, HasRequiredCaptureFoundation ? "Avatar capture stopped" : "Standard Model required", HasRequiredCaptureFoundation ? $"Not capturing: click Start Avatar Capture when {CurrentAvatarProfileDisplayName} is present and you want {ActiveAvatarReconstructionName} measurements." : "Start Avatar Capture remains disabled until a human accepts all 9 A/B directions in either Standard Model builder.", HasRequiredCaptureFoundation ? Color.FromRgb(89, 97, 107) : Color.FromRgb(215, 165, 58));
+			return new AvatarLearningState("Avatar capture stopped", $"Not capturing: click Start Avatar Capture when {CurrentAvatarProfileDisplayName} is present and you want MediaPipe geometry measurements.", AvatarStoppedBrush);
 		}
-		if ((!_isCameraEnabled && !_photoTrainingModeActive) || _latestFrame == null)
+		if (!_isCameraEnabled || _latestFrame == null)
 		{
-			return new AvatarLearningState(Active: false, "Avatar capture waiting", _photoTrainingModeActive ? "Photo training: waiting for MediaPipe to lock onto the selected still image." : "Not capturing yet: turn the camera on and wait for the face tracker to lock.", Color.FromRgb(215, 165, 58));
+			return new AvatarLearningState("Avatar capture waiting", "Not capturing yet: turn the camera on and wait for the face tracker to lock.", AvatarWaitingBrush);
 		}
 		if (!_currentFaceLandmarkFrame.HasFace || !_currentFaceLandmarkMetrics.HasFace)
 		{
-			return new AvatarLearningState(Active: false, "Avatar capture waiting", "Not capturing yet: keep your full face visible until the eye and mouth overlay locks on.", Color.FromRgb(215, 165, 58));
+			return new AvatarLearningState("Avatar capture waiting", "Not capturing yet: keep your full face visible until the eye and mouth overlay locks on.", AvatarWaitingBrush);
 		}
 		if (_currentAvatarCaptureQuality.CanCollectMeasurements)
 		{
-			bool flag = Interlocked.CompareExchange(ref _avatarReconstructionPending, 0, 0) == 1;
-			AvatarReconstructionSnapshot currentAvatarReconstructionSnapshot = _currentAvatarReconstructionSnapshot;
-			string text = (IsMediaPipeOnlyGeometryMode ? $"MediaPipe visible-evidence geometry has {_currentMediaPipeGeometryModel.AcceptedFrameCount:n0} frames; {_currentMediaPipeGeometryModel.ConfidentVertexPercent:0.#}% directly constrained; {_currentMediaPipeGeometryModel.HiddenLandmarkRejectionCount:n0} hidden predictions discarded." : ((currentAvatarReconstructionSnapshot != null) ? $"{currentAvatarReconstructionSnapshot.Source} measured fit {currentAvatarReconstructionSnapshot.ReconstructionConfidencePercent:0}% with {currentAvatarReconstructionSnapshot.DenseVertexCount:n0} dense vertices; A/B/C {currentAvatarReconstructionSnapshot.ARotationAroundXDegrees:0.#}/{currentAvatarReconstructionSnapshot.BRotationAroundYDegrees:0.#}/{currentAvatarReconstructionSnapshot.CRotationAroundZDegrees:0.#} deg." : (flag ? (ActiveAvatarReconstructionName + " is reconstructing an accepted frame.") : (IsAvatarReconstructionReady ? (ActiveAvatarReconstructionName + " is ready and waiting for the next capture frame.") : ActiveAvatarReconstructionReadinessStatus))));
-			return new AvatarLearningState(IsAvatarReconstructionReady, IsAvatarReconstructionReady ? "Capturing 3D avatar data" : "Avatar capture waiting", text + " " + GetFaceBoxSystemDisplayName() + " eye/jaw/brow tracking stays live for overlays and capture measurements.", IsAvatarReconstructionReady ? Color.FromRgb(74, 163, 107) : Color.FromRgb(215, 165, 58));
+			MediaPipeNormalizedFaceModel model = _currentMediaPipeGeometryModel;
+			string detail = $"MediaPipe visible-evidence geometry has {model.AcceptedFrameCount:n0} frames; {model.ConfidentVertexPercent:0.#}% directly constrained; {model.HiddenLandmarkRejectionCount:n0} hidden predictions discarded. {_mediaPipeExecutionBackend.ToDisplayName()} tracking keeps eye, jaw, and brow measurements live.";
+			return new AvatarLearningState(IsAvatarReconstructionReady ? "Capturing 3D avatar data" : "Avatar capture waiting", detail, IsAvatarReconstructionReady ? AvatarActiveBrush : AvatarWaitingBrush);
 		}
-		string text2 = _currentAvatarCaptureQuality.Suggestions.FirstOrDefault() ?? _currentAvatarCaptureQuality.PrimaryReason ?? "Improve face lock, eye visibility, mouth visibility, lighting, or camera mode.";
-		return new AvatarLearningState(Active: false, "Avatar capture waiting", "Not capturing: " + _currentAvatarCaptureQuality.PrimaryReason + ". Fix: " + text2, Color.FromRgb(215, 165, 58));
-	}
-
-	private AvatarTrackingSanityState GetAvatarTrackingSanityState()
-	{
-		if (!IsAvatarUserLoggedIn)
-		{
-			return new AvatarTrackingSanityState($"Tracking sanity: avatar capture is logged out. {GetFaceBoxSystemDisplayName()} preview tracking remains live, but {ActiveAvatarReconstructionName} observations are not being collected.", Color.FromRgb(185, 215, 239));
-		}
-		if (IsMediaPipeOnlyGeometryMode)
-		{
-			MediaPipeNormalizedFaceModel currentMediaPipeGeometryModel = _currentMediaPipeGeometryModel;
-			TimeSpan? lastMediaPipeGeometryProcessingDuration = _lastMediaPipeGeometryProcessingDuration;
-			object obj;
-			if (lastMediaPipeGeometryProcessingDuration.HasValue)
-			{
-				TimeSpan valueOrDefault = lastMediaPipeGeometryProcessingDuration.GetValueOrDefault();
-				obj = $" Last geometry update {valueOrDefault.TotalMilliseconds:0.#} ms.";
-			}
-			else
-			{
-				obj = "";
-			}
-			string value = (string)obj;
-			return new AvatarTrackingSanityState($"Tracking sanity: MediaPipe owns live feature tracking and visible-evidence geometry. {currentMediaPipeGeometryModel.AcceptedFrameCount:n0} frame(s) accepted; {currentMediaPipeGeometryModel.ConfidentVertexPercent:0.#}% directly constrained; {currentMediaPipeGeometryModel.HiddenLandmarkRejectionCount:n0} compressed hidden-side predictions discarded.{value}", (currentMediaPipeGeometryModel.AcceptedFrameCount > 0) ? Color.FromRgb(128, 224, 164) : Color.FromRgb(185, 215, 239));
-		}
-		PoseAlignmentSummary currentSummary = _poseAlignmentAuditor.CurrentSummary;
-		if (!IsDecaAvatarReconstructionActive && !currentSummary.ReadyForComparison)
-		{
-			return new AvatarTrackingSanityState($"Tracking sanity: 3DDFA_V2 ONNX owns avatar A/B/C pose and depth. Pose comparison audit v{currentSummary.PoseConventionVersion} is gathering diagnostic evidence from {currentSummary.SampleCount} exact-frame pair(s); it does not block avatar capture. {currentSummary.Guidance}", Color.FromRgb(185, 215, 239));
-		}
-		if (HasStrongAvatarPoseLock())
-		{
-			return new AvatarTrackingSanityState($"Tracking sanity: {ActiveAvatarReconstructionName} owns avatar pose/depth. {GetFaceBoxSystemDisplayName()} eye/jaw/brow tracking remains active for overlays and capture measurements. {FormatAvatarPoseCrossCheck()}", Color.FromRgb(128, 224, 164));
-		}
-		return new AvatarTrackingSanityState(IsAvatarReconstructionReady ? $"Tracking sanity: {GetFaceBoxSystemDisplayName()} eye/jaw/brow tracking is live; waiting for a strong {ActiveAvatarReconstructionName} pose lock before trusting avatar pose/depth." : ("Tracking sanity: " + GetFaceBoxSystemDisplayName() + " face tracking is selected; avatar reconstruction is waiting. " + ActiveAvatarReconstructionReadinessStatus), Color.FromRgb(185, 215, 239));
+		string text2 = _currentAvatarCaptureQuality.Suggestions.Count > 0 ? _currentAvatarCaptureQuality.Suggestions[0] : _currentAvatarCaptureQuality.PrimaryReason ?? "Improve face lock, eye visibility, mouth visibility, lighting, or camera mode.";
+		return new AvatarLearningState("Avatar capture waiting", "Not capturing: " + _currentAvatarCaptureQuality.PrimaryReason + ". Fix: " + text2, AvatarWaitingBrush);
 	}
 
 	private void UpdateAvatarCaptureGuidanceUi()
@@ -3033,9 +2974,9 @@ public partial class MainWindow : Window, IComponentConnector
 		if (base.IsLoaded)
 		{
 			AvatarCaptureGuidanceState avatarCaptureGuidanceState = GetAvatarCaptureGuidanceState();
-			AvatarCaptureGuidanceTitleText.Text = avatarCaptureGuidanceState.Title;
-			AvatarCaptureGuidanceDetailText.Text = avatarCaptureGuidanceState.Detail;
-			AvatarCaptureGuidanceTitleText.Foreground = new SolidColorBrush(ColorForAvatarCaptureGuidanceSeverity(avatarCaptureGuidanceState.Severity));
+			SetTextIfChanged(AvatarCaptureGuidanceTitleText, avatarCaptureGuidanceState.Title);
+			SetTextIfChanged(AvatarCaptureGuidanceDetailText, avatarCaptureGuidanceState.Detail);
+			SetIfChanged(AvatarCaptureGuidanceTitleText, TextBlock.ForegroundProperty, BrushForAvatarCaptureGuidanceSeverity(avatarCaptureGuidanceState.Severity));
 		}
 	}
 
@@ -3051,798 +2992,15 @@ public partial class MainWindow : Window, IComponentConnector
 		});
 	}
 
-	private static Color ColorForAvatarCaptureGuidanceSeverity(string severity)
+	private static Brush BrushForAvatarCaptureGuidanceSeverity(string severity)
 	{
 		return severity switch
 		{
-			"good" => Color.FromRgb(128, 224, 164), 
-			"warning" => Color.FromRgb(byte.MaxValue, 210, 122), 
-			"blocked" => Color.FromRgb(byte.MaxValue, 154, 154), 
-			_ => Color.FromRgb(185, 215, 239), 
+			"good" => GuidanceGoodBrush,
+			"warning" => GuidanceWarningBrush,
+			"blocked" => GuidanceBlockedBrush,
+			_ => GuidanceIdleBrush,
 		};
-	}
-
-	private void OpenAvatarSystemClicked(object sender, RoutedEventArgs e)
-	{
-		try
-		{
-			string avatarDataFolder = GetAvatarDataFolder();
-			Directory.CreateDirectory(avatarDataFolder);
-			AvatarReportSnapshot snapshot = CreateAvatarReportSnapshot(avatarDataFolder);
-			QueueAvatarReportSave(snapshot);
-			_avatarModelHtmlPath = AvatarModelStore.GetHtmlPath(avatarDataFolder);
-			_avatarSystemDashboardPath = GetAvatarSystemDashboardHtmlPath(avatarDataFolder);
-			EnsureAvatarSystemPlaceholder(_avatarSystemDashboardPath);
-			OpenLocalFile(_avatarSystemDashboardPath);
-			string text = ((_currentAvatarReconstructionSnapshot != null) ? ("Opened live Avatar System: " + _avatarSystemDashboardPath) : "Opened live waiting Avatar System. Log in the person at the camera and start avatar capture.");
-			MonitorStatusText.Text = text;
-			SetStatus(text);
-		}
-		catch (Exception ex)
-		{
-			string text2 = "Could not open Avatar System: " + ex.Message;
-			MonitorStatusText.Text = text2;
-			SetStatus(text2);
-		}
-	}
-
-	private void OpenAvatarDataReviewClicked(object sender, RoutedEventArgs e)
-	{
-		try
-		{
-			string avatarDataFolder = GetAvatarDataFolder();
-			Directory.CreateDirectory(avatarDataFolder);
-			OpenWebAddress(_avatarDataReviewServer.StartOrUpdate(avatarDataFolder, CurrentAvatarProfileId, CurrentAvatarProfileDisplayName));
-			string text = "Opened Avatar Data Review for " + CurrentAvatarProfileDisplayName + ".";
-			SetStatus(text);
-			MonitorStatusText.Text = text;
-		}
-		catch (Exception ex)
-		{
-			string text2 = "Could not open Avatar Data Review: " + ex.Message;
-			SetStatus(text2);
-			MonitorStatusText.Text = text2;
-		}
-	}
-
-	private void OpenFlameAvatarDataClicked(object sender, RoutedEventArgs e)
-	{
-		try
-		{
-			string avatarDataFolder = GetAvatarDataFolder();
-			Directory.CreateDirectory(avatarDataFolder);
-			OpenWebAddress(_avatarDataReviewServer.StartOrUpdate(avatarDataFolder, CurrentAvatarProfileId, CurrentAvatarProfileDisplayName, "deca-flame-recurrent-v4"));
-			int count = _avatarObservationRepository.ReadDataset(avatarDataFolder, CurrentAvatarProfileId, CurrentAvatarProfileDisplayName, includeDenseTopology: false, "deca-flame-recurrent-v4").Observations.Count;
-			string text = ((count == 0) ? ("Opened FLAME reconstruction data for " + CurrentAvatarProfileDisplayName + ". No FLAME scans are stored yet; start Avatar Capture to collect one.") : $"Opened {count:n0} FLAME reconstruction scans for {CurrentAvatarProfileDisplayName}.");
-			SetStatus(text);
-			MonitorStatusText.Text = text;
-		}
-		catch (Exception ex)
-		{
-			string text2 = "Could not open FLAME reconstruction data: " + ex.Message;
-			SetStatus(text2);
-			MonitorStatusText.Text = text2;
-		}
-	}
-
-	private async void MainWindowPreviewKeyDown(object sender, KeyEventArgs e)
-	{
-		if (e.Key == Key.NumPad0)
-		{
-			e.Handled = true;
-			await CaptureCurrentStandardModelAsync();
-			return;
-		}
-		bool flag = !_photoTrainingModeActive;
-		if (!flag)
-		{
-			Key key = e.Key;
-			bool flag2 = ((key == Key.Left || key == Key.Right) ? true : false);
-			flag = !flag2;
-		}
-		if (!flag)
-		{
-			e.Handled = true;
-			await ShowRelativePhotoTrainingImageAsync((e.Key != Key.Left) ? 1 : (-1));
-		}
-	}
-
-	private async void CaptureStandardModelClicked(object sender, RoutedEventArgs e)
-	{
-		await CaptureCurrentStandardModelAsync();
-	}
-
-	private async void BuildStandardModelLiveClicked(object sender, RoutedEventArgs e)
-	{
-		if (_liveStandardModelModeActive)
-		{
-			StopLiveStandardModelMode(announce: true);
-			return;
-		}
-		if (!IsAvatarUserLoggedIn)
-		{
-			SetStatus("Log in the person whose Standard Model you want to build.");
-			return;
-		}
-		if (!_avatarModelReadyForCapture || _avatarModelInitializationPending)
-		{
-			SetStatus("Please wait for the stored model and Standard Model atlas to finish loading.");
-			return;
-		}
-		if (!IsDecaAvatarReconstructionActive)
-		{
-			SetStatus("The Standard Model builder requires the DECA/FLAME runtime. " + ActiveAvatarReconstructionReadinessStatus);
-			return;
-		}
-		if (_photoTrainingModeActive)
-		{
-			StopPhotoTrainingMode(announce: false);
-		}
-		if (_avatarLearningRequested)
-		{
-			_avatarLearningRequested = false;
-			_avatarObservationStorageService.DiscardPendingCandidates();
-		}
-		if (_selectedFaceBoxSystem != FaceBoxSystem.MediaPipe)
-		{
-			SwitchFaceBoxSystem(FaceBoxSystem.MediaPipe);
-		}
-		_liveStandardModelModeActive = true;
-		_showAvatarModelOverlay = true;
-		AvatarModelOverlayMenuItem.IsChecked = true;
-		FaceAutoFollowCheckBox.IsChecked = true;
-		_currentManualStandardModelCandidate = null;
-		if (!_isCameraEnabled)
-		{
-			SetCameraToggle(enabled: true);
-			await StartPreviewAsync();
-		}
-		if (!_isCameraEnabled)
-		{
-			_liveStandardModelModeActive = false;
-			SetCameraToggle(enabled: false);
-			UpdateStandardModelUi();
-			UpdateAvatarLearningStatusUi();
-			SetStatus("The live Standard Model builder could not start because the camera did not open.");
-		}
-		else
-		{
-			UpdateAvatarLearningStatusUi();
-			UpdateStandardModelUi();
-			SetStatus("Live Standard Model builder started. Point toward " + GetNextStandardPoseTarget() + " and press NumPad 0 only when the overlay has a good lock.");
-		}
-	}
-
-	private void StopLiveStandardModelMode(bool announce)
-	{
-		if (_liveStandardModelModeActive)
-		{
-			_liveStandardModelModeActive = false;
-			_currentManualStandardModelCandidate = null;
-			UpdateAvatarLearningStatusUi();
-			UpdateStandardModelUi();
-			if (announce)
-			{
-				SetStatus("Live Standard Model builder stopped. The camera remains available; no frame was saved unless NumPad 0 was pressed.");
-			}
-		}
-	}
-
-	private async Task CaptureCurrentStandardModelAsync()
-	{
-		if (!IsAvatarUserLoggedIn)
-		{
-			UpdateStandardModelUi("Standard model: log in before accepting a model snapshot.");
-			SetStatus("Log in the person in front of the camera before using NumPad 0.");
-			return;
-		}
-		if ((!_isCameraEnabled && !_photoTrainingModeActive) || !IsStandardModelBuildModeActive)
-		{
-			UpdateStandardModelUi("Standard model: start Live, Pictures, or Pictures + MediaPipe Assist, then press NumPad 0 when the overlay has a great lock.");
-			SetStatus("Start one of the Standard Model builders before using NumPad 0.");
-			return;
-		}
-		AvatarObservationCapture candidate = _currentManualStandardModelCandidate;
-		if ((object)candidate == null || !string.Equals(candidate.SubjectId, CurrentAvatarProfileId, StringComparison.Ordinal) || DateTime.UtcNow - candidate.Reconstruction.CapturedAtUtc > TimeSpan.FromSeconds(5L))
-		{
-			UpdateStandardModelUi(_photoTrainingModeActive ? "Standard model: waiting for a fresh DECA/FLAME result for the selected photo. Let it settle, then press NumPad 0." : "Standard model: waiting for a fresh DECA/FLAME model and matching camera frame. Keep your face visible, then press NumPad 0.");
-			SetStatus("No fresh Standard Model snapshot is ready yet.");
-			return;
-		}
-		if (Interlocked.CompareExchange(ref _manualStandardModelSavePending, 1, 0) != 0)
-		{
-			SetStatus("The previous NumPad 0 capture is still being saved.");
-			return;
-		}
-		UpdateStandardModelUi("Standard model: saving the exact accepted model and matching camera frame...");
-		try
-		{
-			ManualStandardModelCaptureResult manualStandardModelCaptureResult = await Task.Run(() => _manualStandardModelCaptureService.Save(candidate.ProfileFolder, candidate.SubjectId, candidate.SubjectDisplayName, candidate.Reconstruction, candidate.SourceFrame, candidate.CaptureQuality, candidate.FaceGeometry));
-			if (_isClosing)
-			{
-				return;
-			}
-			if (!manualStandardModelCaptureResult.WriteResult.Accepted || (object)manualStandardModelCaptureResult.Model == null)
-			{
-				string status = "Standard model: capture was not saved. " + manualStandardModelCaptureResult.WriteResult.Detail;
-				UpdateStandardModelUi(status);
-				SetStatus(status);
-				return;
-			}
-			_standardPoseAtlas.Clear();
-			foreach (KeyValuePair<string, AvatarStandardPoseSample> poseAtla in manualStandardModelCaptureResult.Model.PoseAtlas)
-			{
-				_standardPoseAtlas[poseAtla.Key] = poseAtla.Value;
-			}
-			lock (_decaClientLock)
-			{
-				_decaAvatarClient?.SetCurrentModelShapeCoefficients(manualStandardModelCaptureResult.Model.ShapeCoefficients);
-			}
-			string value = manualStandardModelCaptureResult.PoseSample?.DisplayName ?? "unclassified view";
-			string status2 = $"Standard model: accepted {value} | {CountStandardPoseIdentityEvidence():n0}/9 directions | fused identity evidence {manualStandardModelCaptureResult.Model.IdentityEvidencePoseCount:n0}/9 | fit {manualStandardModelCaptureResult.Model.LastMeasuredFitPercent:0.#}% | delta {manualStandardModelCaptureResult.Model.CoefficientDeltaRms:0.000000}. " + (HasCompleteHumanStandardModel ? "All 9 directions are complete; additional accepted captures replace their matching direction for refinement." : ("Next: point toward " + GetNextStandardPoseTarget() + " and press NumPad 0 again."));
-			UpdateStandardModelUi(status2);
-			UpdatePhotoTrainingUi();
-			UpdateAvatarLearningStatusUi();
-			SetStatus(status2);
-		}
-		catch (Exception ex)
-		{
-			string status3 = "Standard model: NumPad 0 capture failed. " + ex.Message;
-			UpdateStandardModelUi(status3);
-			SetStatus(status3);
-		}
-		finally
-		{
-			Interlocked.Exchange(ref _manualStandardModelSavePending, 0);
-			if (!_isClosing)
-			{
-				UpdateStandardModelUi(_standardModelStatus);
-			}
-		}
-	}
-
-	private async void PhotoTrainingToggleClicked(object sender, RoutedEventArgs e)
-	{
-		if (_photoTrainingModeActive)
-		{
-			StopPhotoTrainingMode(announce: true);
-		}
-		else
-		{
-			await StartPhotoTrainingModeAsync(DecaIdentityFitProfile.Flame68);
-		}
-	}
-
-	private async void AssistedPhotoTrainingToggleClicked(object sender, RoutedEventArgs e)
-	{
-		if (_photoTrainingModeActive)
-		{
-			StopPhotoTrainingMode(announce: true);
-		}
-		else
-		{
-			await StartPhotoTrainingModeAsync(DecaIdentityFitProfile.MediaPipeSurfaceAssisted);
-		}
-	}
-
-	private async void PreviousTrainingPhotoClicked(object sender, RoutedEventArgs e)
-	{
-		await ShowRelativePhotoTrainingImageAsync(-1);
-	}
-
-	private async void NextTrainingPhotoClicked(object sender, RoutedEventArgs e)
-	{
-		await ShowRelativePhotoTrainingImageAsync(1);
-	}
-
-	private async Task StartPhotoTrainingModeAsync(DecaIdentityFitProfile identityFitProfile)
-	{
-		if (!IsAvatarUserLoggedIn)
-		{
-			SetStatus("Log in the person whose Standard Model you want to build before choosing pictures.");
-			return;
-		}
-		if (!_avatarModelReadyForCapture || _avatarModelInitializationPending)
-		{
-			SetStatus("Please wait for the stored avatar model to finish loading before starting the Picture Standard Model builder.");
-			return;
-		}
-		if (!IsDecaAvatarReconstructionActive)
-		{
-			SetStatus("The picture Standard Model builder requires the DECA/FLAME runtime. " + ActiveAvatarReconstructionReadinessStatus);
-			return;
-		}
-		if (_liveStandardModelModeActive)
-		{
-			SetStatus("Stop Build Standard Model Live before starting the picture builder.");
-			return;
-		}
-		string text = PromptForStandardModelPictureFolder(identityFitProfile);
-		if (string.IsNullOrWhiteSpace(text))
-		{
-			SetStatus("Picture Standard Model builder was not started.");
-			return;
-		}
-		IReadOnlyList<string> imagePaths;
-		try
-		{
-			imagePaths = (from path in Directory.EnumerateFiles(text, "*", SearchOption.TopDirectoryOnly)
-				where PhotoTrainingImageExtensions.Contains(System.IO.Path.GetExtension(path))
-				select path).OrderBy<string, string>((string path) => System.IO.Path.GetFileName(path), StringComparer.OrdinalIgnoreCase).ToArray();
-		}
-		catch (Exception ex)
-		{
-			SetStatus("Could not read the selected photo folder: " + ex.Message);
-			return;
-		}
-		if (imagePaths.Count == 0)
-		{
-			SetStatus("The selected folder contains no JPG, JPEG, PNG, or BMP images.");
-			return;
-		}
-		if (_isCameraEnabled)
-		{
-			await StopPreviewAsync();
-		}
-		if (_selectedFaceBoxSystem != FaceBoxSystem.MediaPipe)
-		{
-			SwitchFaceBoxSystem(FaceBoxSystem.MediaPipe);
-		}
-		_avatarObservationStorageService.DiscardPendingCandidates();
-		_photoTrainingImagePaths = imagePaths;
-		_photoTrainingImageIndex = -1;
-		_photoTrainingFrame = null;
-		_photoTrainingIdentityFitProfile = identityFitProfile;
-		_photoTrainingModeActive = true;
-		_avatarLearningRequested = false;
-		_showLiveWireframePreview = false;
-		LiveWireframeMenuItem.IsChecked = false;
-		_showAvatarModelOverlay = true;
-		AvatarModelOverlayMenuItem.IsChecked = true;
-		FaceAutoFollowCheckBox.IsChecked = true;
-		CameraToggle.IsEnabled = false;
-		SetCameraToggle(enabled: false);
-		ResetFaceFeatureDetectionFramePump();
-		_currentFaceFeatureDetection = FaceFeatureDetection.None;
-		_currentManualStandardModelCandidate = null;
-		_activeFaceCueLayout = null;
-		ResetLandmarkTracking();
-		await ShowPhotoTrainingImageAsync(0);
-		if (!_photoTrainingModeActive || _photoTrainingFrame == null)
-		{
-			StopPhotoTrainingMode(announce: false);
-			return;
-		}
-		_photoTrainingTimer.Start();
-		UpdateAvatarLearningStatusUi();
-		UpdatePhotoTrainingUi();
-		string value = ((identityFitProfile == DecaIdentityFitProfile.MediaPipeSurfaceAssisted) ? "MediaPipe-assisted picture builder using 105 embedded surface points plus the jaw contour" : "68-landmark picture builder");
-		SetStatus($"{value} started with {imagePaths.Count:n0} image(s). Let each image settle, use Left/Right to navigate, and press NumPad 0 only when you judge the lock worth keeping.");
-	}
-
-	private string PromptForStandardModelPictureFolder(DecaIdentityFitProfile identityFitProfile)
-	{
-		Window window = new Window
-		{
-			Title = ((identityFitProfile == DecaIdentityFitProfile.MediaPipeSurfaceAssisted) ? "Build From Pictures + MediaPipe Assist" : "Build Standard Model From Pictures"),
-			Owner = this,
-			Width = 620.0,
-			SizeToContent = SizeToContent.Height,
-			WindowStartupLocation = WindowStartupLocation.CenterOwner,
-			ResizeMode = ResizeMode.NoResize,
-			ShowInTaskbar = false,
-			Background = new SolidColorBrush(Color.FromRgb(8, 13, 18)),
-			Foreground = Brushes.White
-		};
-		StackPanel stackPanel = new StackPanel
-		{
-			Margin = new Thickness(18.0)
-		};
-		stackPanel.Children.Add(new TextBlock
-		{
-			Text = "Choose the folder containing this user's pictures",
-			FontSize = 18.0,
-			FontWeight = FontWeights.SemiBold,
-			TextWrapping = TextWrapping.Wrap
-		});
-		stackPanel.Children.Add(new TextBlock
-		{
-			Text = "After you click OK, use Previous/Next and press NumPad 0 only when the current face direction has a good lock. All 9 A/B directions are required before the Standard Model is accepted.",
-			Foreground = new SolidColorBrush(Color.FromRgb(185, 215, 239)),
-			TextWrapping = TextWrapping.Wrap,
-			Margin = new Thickness(0.0, 8.0, 0.0, 14.0)
-		});
-		stackPanel.Children.Add(new TextBlock
-		{
-			Text = "Picture folder",
-			FontWeight = FontWeights.SemiBold,
-			Margin = new Thickness(0.0, 0.0, 0.0, 6.0)
-		});
-		Grid grid = new Grid();
-		grid.ColumnDefinitions.Add(new ColumnDefinition
-		{
-			Width = new GridLength(1.0, GridUnitType.Star)
-		});
-		grid.ColumnDefinitions.Add(new ColumnDefinition
-		{
-			Width = GridLength.Auto
-		});
-		TextBox folderBox = new TextBox
-		{
-			Text = Environment.GetFolderPath(Environment.SpecialFolder.MyPictures),
-			MinHeight = 34.0,
-			VerticalContentAlignment = VerticalAlignment.Center,
-			Style = (TryFindResource(typeof(TextBox)) as Style)
-		};
-		Button button = new Button
-		{
-			Content = "Choose Folder",
-			MinWidth = 120.0,
-			Margin = new Thickness(10.0, 0.0, 0.0, 0.0),
-			Style = (TryFindResource(typeof(Button)) as Style)
-		};
-		Grid.SetColumn(folderBox, 0);
-		Grid.SetColumn(button, 1);
-		grid.Children.Add(folderBox);
-		grid.Children.Add(button);
-		stackPanel.Children.Add(grid);
-		TextBlock status = new TextBlock
-		{
-			Foreground = new SolidColorBrush(Color.FromRgb(byte.MaxValue, 154, 154)),
-			TextWrapping = TextWrapping.Wrap,
-			Margin = new Thickness(0.0, 8.0, 0.0, 0.0)
-		};
-		stackPanel.Children.Add(status);
-		StackPanel stackPanel2 = new StackPanel
-		{
-			Orientation = Orientation.Horizontal,
-			HorizontalAlignment = HorizontalAlignment.Right,
-			Margin = new Thickness(0.0, 16.0, 0.0, 0.0)
-		};
-		Button button2 = new Button
-		{
-			Content = "Cancel",
-			MinWidth = 110.0,
-			IsCancel = true,
-			Style = (TryFindResource(typeof(Button)) as Style)
-		};
-		Button button3 = new Button
-		{
-			Content = "OK",
-			MinWidth = 110.0,
-			IsDefault = true,
-			Margin = new Thickness(8.0, 0.0, 0.0, 0.0),
-			Style = (TryFindResource(typeof(Button)) as Style)
-		};
-		stackPanel2.Children.Add(button2);
-		stackPanel2.Children.Add(button3);
-		stackPanel.Children.Add(stackPanel2);
-		window.Content = stackPanel;
-		button.Click += delegate
-		{
-			string text = folderBox.Text.Trim().Trim('"');
-			string initialDirectory = (Directory.Exists(text) ? text : Environment.GetFolderPath(Environment.SpecialFolder.MyPictures));
-			OpenFolderDialog openFolderDialog = new OpenFolderDialog
-			{
-				Title = "Choose Standard Model picture folder",
-				InitialDirectory = initialDirectory,
-				Multiselect = false
-			};
-			if (openFolderDialog.ShowDialog(window) == true)
-			{
-				folderBox.Text = openFolderDialog.FolderName;
-				status.Text = "";
-			}
-		};
-		string selectedFolder = "";
-		button3.Click += delegate
-		{
-			string path = folderBox.Text.Trim().Trim('"');
-			if (!Directory.Exists(path))
-			{
-				status.Text = "Choose an existing folder before continuing.";
-			}
-			else
-			{
-				selectedFolder = System.IO.Path.GetFullPath(path);
-				window.DialogResult = true;
-			}
-		};
-		button2.Click += delegate
-		{
-			window.DialogResult = false;
-		};
-		if (window.ShowDialog() != true)
-		{
-			return "";
-		}
-		return selectedFolder;
-	}
-
-	private void StopPhotoTrainingMode(bool announce)
-	{
-		if (_photoTrainingModeActive)
-		{
-			_photoTrainingTimer.Stop();
-			Interlocked.Increment(ref _photoTrainingLoadGeneration);
-			_photoTrainingModeActive = false;
-			_photoTrainingImagePaths = Array.Empty<string>();
-			_photoTrainingImageIndex = -1;
-			_photoTrainingFrame = null;
-			_photoTrainingIdentityFitProfile = DecaIdentityFitProfile.Flame68;
-			_latestFrame = null;
-			_avatarLearningRequested = false;
-			_currentAvatarReconstructionSnapshot = null;
-			_currentManualStandardModelCandidate = null;
-			_currentFaceFeatureDetection = FaceFeatureDetection.None;
-			_activeFaceCueLayout = null;
-			_avatarObservationStorageService.DiscardPendingCandidates();
-			ResetFaceFeatureDetectionFramePump();
-			ResetLandmarkTracking();
-			FaceCueGuideCanvas.Children.Clear();
-			CameraToggle.IsEnabled = true;
-			SetCameraToggle(enabled: false);
-			SetPreviewState("Camera disabled", null);
-			UpdateAvatarLearningStatusUi();
-			UpdatePhotoTrainingUi();
-			UpdateStandardModelUi();
-			if (announce)
-			{
-				SetStatus("Picture Standard Model builder stopped. No additional image or model was saved unless NumPad 0 was pressed.");
-			}
-		}
-	}
-
-	private async Task ShowRelativePhotoTrainingImageAsync(int offset)
-	{
-		if (_photoTrainingModeActive && _photoTrainingImagePaths.Count != 0)
-		{
-			int num = (_photoTrainingImageIndex + offset) % _photoTrainingImagePaths.Count;
-			if (num < 0)
-			{
-				num += _photoTrainingImagePaths.Count;
-			}
-			await ShowPhotoTrainingImageAsync(num);
-		}
-	}
-
-	private async Task ShowPhotoTrainingImageAsync(int index)
-	{
-		if (!_photoTrainingModeActive || index < 0 || index >= _photoTrainingImagePaths.Count)
-		{
-			return;
-		}
-		int loadGeneration = Interlocked.Increment(ref _photoTrainingLoadGeneration);
-		string imagePath = _photoTrainingImagePaths[index];
-		BitmapSource bitmapSource;
-		try
-		{
-			bitmapSource = await Task.Run(() => LoadPhotoTrainingBitmap(imagePath));
-		}
-		catch (Exception ex)
-		{
-			if (_photoTrainingModeActive)
-			{
-				SetStatus("Could not load " + System.IO.Path.GetFileName(imagePath) + ": " + ex.Message);
-			}
-			return;
-		}
-		if (!_isClosing && _photoTrainingModeActive && loadGeneration == Volatile.Read(in _photoTrainingLoadGeneration))
-		{
-			_photoTrainingImageIndex = index;
-			_photoTrainingFrame = bitmapSource;
-			_latestFrame = bitmapSource;
-			_currentAvatarReconstructionSnapshot = null;
-			_currentManualStandardModelCandidate = null;
-			_currentFaceFeatureDetection = FaceFeatureDetection.None;
-			_activeFaceCueLayout = null;
-			ResetFaceFeatureDetectionFramePump();
-			ResetLandmarkTracking();
-			lock (_decaClientLock)
-			{
-				_decaAvatarClient?.ResetCurrentModelToIdentityAnchor();
-			}
-			SetPreviewState($"Photo training {index + 1:n0} of {_photoTrainingImagePaths.Count:n0}", bitmapSource);
-			ProcessFrame(bitmapSource);
-			UpdatePhotoTrainingUi();
-			UpdateStandardModelUi();
-		}
-	}
-
-	private void PhotoTrainingTimerTick(object? sender, EventArgs e)
-	{
-		if (!_isClosing && _photoTrainingModeActive)
-		{
-			BitmapSource photoTrainingFrame = _photoTrainingFrame;
-			if (photoTrainingFrame != null)
-			{
-				_latestFrame = photoTrainingFrame;
-				ProcessFrame(photoTrainingFrame);
-			}
-		}
-	}
-
-	private void UpdatePhotoTrainingUi()
-	{
-		if (base.IsLoaded)
-		{
-			ApplyStartStopButtonState(PhotoTrainingToggleButton, _photoTrainingModeActive && _photoTrainingIdentityFitProfile == DecaIdentityFitProfile.Flame68, "Build Standard Model From Pictures", "Stop Picture Standard Model", "Choose a folder and run each selected photo continuously through MediaPipe and recurrent DECA.", "Stops still-image processing without saving anything else.");
-			bool flag = IsAvatarUserLoggedIn && _avatarModelReadyForCapture && !_avatarModelInitializationPending && IsDecaAvatarReconstructionActive && !_liveStandardModelModeActive;
-			PhotoTrainingToggleButton.IsEnabled = !_isClosing && ((_photoTrainingModeActive && _photoTrainingIdentityFitProfile == DecaIdentityFitProfile.Flame68) || (!_photoTrainingModeActive && flag));
-			ApplyStartStopButtonState(AssistedPhotoTrainingToggleButton, _photoTrainingModeActive && _photoTrainingIdentityFitProfile == DecaIdentityFitProfile.MediaPipeSurfaceAssisted, "Build From Pictures + MediaPipe Assist", "Stop MediaPipe-Assisted Pictures", "Uses all bundled MediaPipe-to-FLAME surface correspondences plus the jaw contour during recurrent DECA fitting.", "Stops assisted still-image processing without saving anything else.");
-			AssistedPhotoTrainingToggleButton.IsEnabled = !_isClosing && ((_photoTrainingModeActive && _photoTrainingIdentityFitProfile == DecaIdentityFitProfile.MediaPipeSurfaceAssisted) || (!_photoTrainingModeActive && flag));
-			PreviousTrainingPhotoButton.IsEnabled = _photoTrainingModeActive && _photoTrainingImagePaths.Count > 1;
-			NextTrainingPhotoButton.IsEnabled = _photoTrainingModeActive && _photoTrainingImagePaths.Count > 1;
-			CameraToggle.IsEnabled = !_photoTrainingModeActive;
-			FaceAutoFollowCheckBox.IsEnabled = !_photoTrainingModeActive;
-			ThreeDdfaFaceBoxSystemMenuItem.IsEnabled = !_photoTrainingModeActive;
-			if (!_photoTrainingModeActive || _photoTrainingImageIndex < 0)
-			{
-				PhotoTrainingStatusText.Text = "Picture Standard Model builder: off.";
-				return;
-			}
-			string fileName = System.IO.Path.GetFileName(_photoTrainingImagePaths[_photoTrainingImageIndex]);
-			AvatarReconstructionSnapshot avatarReconstructionSnapshot = _currentManualStandardModelCandidate?.Reconstruction;
-			string value = ((avatarReconstructionSnapshot == null) ? "waiting for MediaPipe and DECA" : $"current {GetStandardPoseDisplayName(avatarReconstructionSnapshot.ARotationAroundXDegrees, avatarReconstructionSnapshot.BRotationAroundYDegrees)} | fit {avatarReconstructionSnapshot.ReconstructionConfidencePercent:0.#}% | delta {avatarReconstructionSnapshot.CurrentModelCoefficientDeltaRms:0.000000}");
-			string value2 = ((_photoTrainingIdentityFitProfile == DecaIdentityFitProfile.MediaPipeSurfaceAssisted) ? "MediaPipe 105-point surface assist" : "FLAME 68-point control");
-			PhotoTrainingStatusText.Text = $"{value2} | photo {_photoTrainingImageIndex + 1:n0}/{_photoTrainingImagePaths.Count:n0}: {fileName} | {value} | NumPad 0 accepts";
-		}
-	}
-
-	private static BitmapSource LoadPhotoTrainingBitmap(string path)
-	{
-		BitmapImage bitmapImage = new BitmapImage();
-		bitmapImage.BeginInit();
-		bitmapImage.CacheOption = BitmapCacheOption.OnLoad;
-		bitmapImage.CreateOptions = BitmapCreateOptions.PreservePixelFormat | BitmapCreateOptions.IgnoreImageCache;
-		bitmapImage.UriSource = new Uri(System.IO.Path.GetFullPath(path), UriKind.Absolute);
-		bitmapImage.EndInit();
-		bitmapImage.Freeze();
-		return bitmapImage;
-	}
-
-	private void ReviewStandardModelClicked(object sender, RoutedEventArgs e)
-	{
-		if (!IsAvatarUserLoggedIn)
-		{
-			UpdateStandardModelUi("Standard model: log in before opening checkpoint review.");
-			SetStatus("Log in an avatar user before reviewing a standard model.");
-			return;
-		}
-		try
-		{
-			string avatarDataFolder = GetAvatarDataFolder();
-			Directory.CreateDirectory(avatarDataFolder);
-			OpenWebAddress(_avatarDataReviewServer.StartOrUpdate(avatarDataFolder, CurrentAvatarProfileId, CurrentAvatarProfileDisplayName, "deca-flame-standard-model-checkpoint-v1"));
-			int count = _avatarObservationRepository.ReadDataset(avatarDataFolder, CurrentAvatarProfileId, CurrentAvatarProfileDisplayName, includeDenseTopology: false, "deca-flame-standard-model-checkpoint-v1").Observations.Count;
-			string status = ((count == 0) ? ("Opened standard-model review for " + CurrentAvatarProfileDisplayName + "; no checkpoints are stored yet.") : $"Opened {count:n0} standard-model checkpoint(s) for {CurrentAvatarProfileDisplayName}.");
-			UpdateStandardModelUi(status);
-			SetStatus(status);
-		}
-		catch (Exception ex)
-		{
-			UpdateStandardModelUi("Standard model: review failed. " + ex.Message);
-			SetStatus("Could not open standard-model review: " + ex.Message);
-		}
-	}
-
-	private void UpdateStandardModelUi(string? status = null)
-	{
-		if (status != null)
-		{
-			_standardModelStatus = status;
-		}
-		bool flag = Interlocked.CompareExchange(ref _manualStandardModelSavePending, 0, 0) != 0;
-		ApplyStartStopButtonState(BuildStandardModelLiveButton, _liveStandardModelModeActive, "Build Standard Model Live", "Stop Live Standard Model", "Runs MediaPipe and recurrent DECA continuously from the webcam for human-approved nine-direction capture.", "Stops Standard Model reconstruction while leaving the camera available.");
-		BuildStandardModelLiveButton.IsEnabled = !_isClosing && (_liveStandardModelModeActive || (IsAvatarUserLoggedIn && _avatarModelReadyForCapture && !_avatarModelInitializationPending && IsDecaAvatarReconstructionActive && !_photoTrainingModeActive));
-		UpdateStandardPoseGridUi();
-		CaptureStandardModelButton.IsEnabled = !_isClosing && !flag && IsAvatarUserLoggedIn && (_isCameraEnabled || _photoTrainingModeActive) && IsStandardModelBuildModeActive && (object)_currentManualStandardModelCandidate != null;
-		ReviewStandardModelButton.IsEnabled = !_isClosing && IsAvatarUserLoggedIn && !flag;
-		if (flag)
-		{
-			StandardModelStatusText.Text = _standardModelStatus;
-			return;
-		}
-		if (status != null)
-		{
-			StandardModelStatusText.Text = status;
-			return;
-		}
-		if (!IsAvatarUserLoggedIn)
-		{
-			_standardModelStatus = "Standard model: log in to capture or review.";
-		}
-		else if ((!_isCameraEnabled && !_photoTrainingModeActive) || !IsStandardModelBuildModeActive)
-		{
-			_standardModelStatus = "Standard model: choose Live, Pictures, or Pictures + MediaPipe Assist. Press NumPad 0 when the aligned overlay has a great lock.";
-		}
-		else
-		{
-			AvatarObservationCapture currentManualStandardModelCandidate = _currentManualStandardModelCandidate;
-			if ((object)currentManualStandardModelCandidate != null)
-			{
-				_standardModelStatus = $"Standard model ready: fit {currentManualStandardModelCandidate.Reconstruction.ReconstructionConfidencePercent:0.#}% | delta {currentManualStandardModelCandidate.Reconstruction.CurrentModelCoefficientDeltaRms:0.000000} | current {GetStandardPoseDisplayName(currentManualStandardModelCandidate.Reconstruction.ARotationAroundXDegrees, currentManualStandardModelCandidate.Reconstruction.BRotationAroundYDegrees)} | " + "press NumPad 0 to accept this exact model and frame.";
-			}
-			else
-			{
-				AvatarStandardModel avatarStandardModel = _avatarStandardModelStore.Read(GetAvatarDataFolder());
-				_standardModelStatus = (((object)avatarStandardModel == null) ? ("Standard model: waiting for the first live DECA/FLAME result for " + CurrentAvatarProfileDisplayName + ".") : $"Standard model: {avatarStandardModel.CompletedImageCount:n0} accepted snapshot(s) stored | waiting for a fresh live result.");
-			}
-		}
-		StandardModelStatusText.Text = _standardModelStatus;
-	}
-
-	private void UpdateStandardPoseGridUi()
-	{
-		if (base.IsLoaded)
-		{
-			IReadOnlyList<string> directionKeys = AvatarStandardPoseGrid.DirectionKeys;
-			StandardPoseGridText.Text = $"Human standard views: {CountStandardPoseIdentityEvidence():n0}/9\n{Mark(HasEvidence(directionKeys[0]), "TL")}  {Mark(HasEvidence(directionKeys[1]), "TM")}  {Mark(HasEvidence(directionKeys[2]), "TR")}\n{Mark(HasEvidence(directionKeys[3]), "LC")}  {Mark(HasEvidence(directionKeys[4]), "C ")}  {Mark(HasEvidence(directionKeys[5]), "MR")}\n{Mark(HasEvidence(directionKeys[6]), "BL")}  {Mark(HasEvidence(directionKeys[7]), "BC")}  {Mark(HasEvidence(directionKeys[8]), "BR")}\n" + (HasCompleteHumanStandardModel ? "Complete. Extra captures refine the matching direction." : ("Next: " + GetNextStandardPoseTarget() + ". Automatic capture remains locked."));
-			StandardPoseGridText.Foreground = (HasCompleteHumanStandardModel ? CreateFrozenBrush(128, 224, 164) : CreateFrozenBrush(185, 215, 239));
-		}
-		bool HasEvidence(string key)
-		{
-			if (_standardPoseAtlas.TryGetValue(key, out AvatarStandardPoseSample value) && AvatarStandardPoseGrid.IsStructurallyComplete(value))
-			{
-				return AvatarStandardPoseGrid.HasCompleteIdentityEvidence(value);
-			}
-			return false;
-		}
-		static string Mark(bool accepted, string label)
-		{
-			if (!accepted)
-			{
-				return "[ ] " + label;
-			}
-			return "[X] " + label;
-		}
-	}
-
-	private int CountStandardPoseIdentityEvidence()
-	{
-		return _standardPoseAtlas.Values.Count((AvatarStandardPoseSample sample) => AvatarStandardPoseGrid.IsStructurallyComplete(sample) && AvatarStandardPoseGrid.HasCompleteIdentityEvidence(sample));
-	}
-
-	private string GetNextStandardPoseTarget()
-	{
-		string nextMissingDirectionKey = AvatarStandardPoseGrid.GetNextMissingDirectionKey(_standardPoseAtlas);
-		if (nextMissingDirectionKey != null)
-		{
-			return AvatarStandardPoseGrid.GetDisplayName(nextMissingDirectionKey);
-		}
-		return "any direction you want to refine";
-	}
-
-	private static string GetStandardPoseDisplayName(double aRotationAroundXDegrees, double bRotationAroundYDegrees)
-	{
-		string text = AvatarStandardPoseGrid.Classify(aRotationAroundXDegrees, bRotationAroundYDegrees);
-		return AvatarStandardPoseGrid.GetDisplayName(text) + " (" + text + ")";
-	}
-
-	private async void OpenAvatarModelProgressClicked(object sender, RoutedEventArgs e)
-	{
-		try
-		{
-			string avatarDataFolder = GetAvatarDataFolder();
-			Directory.CreateDirectory(avatarDataFolder);
-			AvatarReportSnapshot snapshot = CreateAvatarReportSnapshot(avatarDataFolder);
-			SetStatus("Writing Avatar Model Progress...");
-			AvatarReportSaveResult avatarReportSaveResult = await Task.Run(() => WriteAvatarReports(snapshot));
-			if (!_isClosing)
-			{
-				ApplyAvatarReportSaveResult(avatarReportSaveResult);
-				OpenLocalFile(avatarReportSaveResult.AvatarModelHtmlPath);
-				string text = "Opened Avatar Model Progress: " + avatarReportSaveResult.AvatarModelHtmlPath;
-				SetStatus(text);
-				MonitorStatusText.Text = text;
-			}
-		}
-		catch (Exception ex)
-		{
-			string text2 = "Could not open Avatar Model Progress: " + ex.Message;
-			MonitorStatusText.Text = text2;
-			SetStatus(text2);
-		}
 	}
 
 	private async void OpenMediaPipeGeometryClicked(object sender, RoutedEventArgs e)
@@ -3855,6 +3013,7 @@ public partial class MainWindow : Window, IComponentConnector
 				return;
 			}
 			_currentMediaPipeGeometryModel = await _mediaPipeGeometryPipeline.FlushAsync();
+			MediaPipeNormalizedFaceStore.WriteViewer(GetAvatarDataFolder(), _currentMediaPipeGeometryModel);
 			string viewerPath = MediaPipeNormalizedFaceStore.GetViewerPath(GetAvatarDataFolder());
 			OpenLocalFile(viewerPath);
 			SetStatus("Opened measured MediaPipe face geometry: " + viewerPath);
@@ -3873,30 +3032,18 @@ public partial class MainWindow : Window, IComponentConnector
 			MessageBox.Show(this, "Log in an avatar user before building a dense MediaPipe warp.", "Dense MediaPipe Warp", MessageBoxButton.OK, MessageBoxImage.Asterisk);
 			return;
 		}
-		if (_latestFrame == null || !_currentFaceFeatureDetection.HasFace)
-		{
-			SetStatus("Turn the camera on and keep the face visible before building a dense MediaPipe warp.");
-			MessageBox.Show(this, "Turn the camera on and keep the face visible before building a dense MediaPipe warp.", "Dense MediaPipe Warp", MessageBoxButton.OK, MessageBoxImage.Asterisk);
-			return;
-		}
-		BitmapSource frame = (_latestFrame.IsFrozen ? _latestFrame : _latestFrame.Clone());
-		if (!frame.IsFrozen && frame.CanFreeze)
-		{
-			frame.Freeze();
-		}
-		ThreeDdfaOnnxSidecarFaceBox faceBox = CreateThreeDdfaFaceBox(_currentFaceFeatureDetection);
 		string profileFolder = GetAvatarDataFolder();
 		BuildDenseWarpButton.IsEnabled = false;
 		BuildDenseWarpButton.Content = "Building Dense Warp...";
-		SetStatus("Running one full 3DDFA identity fit, then applying trusted MediaPipe geometry off the camera thread...");
+		SetStatus("Checking the saved MediaPipe model, then building its dense warp...");
 		try
 		{
 			_currentMediaPipeGeometryModel = await _mediaPipeGeometryPipeline.FlushAsync();
 			MediaPipeNormalizedFaceModel mediaPipeModel = _currentMediaPipeGeometryModel;
 			if (!mediaPipeModel.HasGeometry)
 			{
-				SetStatus("No measured MediaPipe face geometry is ready yet. Leave the camera and tracking overlay running for a short time, then try again.");
-				MessageBox.Show(this, "No measured MediaPipe face geometry is ready yet. Leave the camera and tracking overlay running for a short time, then try again.", "Dense MediaPipe Warp", MessageBoxButton.OK, MessageBoxImage.Asterisk);
+				SetStatus("No saved MediaPipe face model exists for this avatar.");
+				MessageBox.Show(this, "No saved MediaPipe face model exists for this avatar.", "Dense MediaPipe Warp", MessageBoxButton.OK, MessageBoxImage.Asterisk);
 				return;
 			}
 			string subjectId = CurrentAvatarProfileId;
@@ -3904,12 +3051,11 @@ public partial class MainWindow : Window, IComponentConnector
 			(ThreeDdfaOnnxSidecarResponse, DenseFaceWarpResult, DenseFaceWarpSaveResult) tuple = await Task.Run(delegate
 			{
 				using ThreeDdfaOnnxReconstructionClient threeDdfaOnnxReconstructionClient = new ThreeDdfaOnnxReconstructionClient(_threeDdfaOnnxEnvironment);
-				ThreeDdfaOnnxSidecarResponse threeDdfaOnnxSidecarResponse = threeDdfaOnnxReconstructionClient.Reconstruct(frame, DateTime.UtcNow, faceBox, ThreeDdfaOnnxRequestMode.Full, 1);
+				ThreeDdfaOnnxSidecarResponse threeDdfaOnnxSidecarResponse = threeDdfaOnnxReconstructionClient.Reconstruct(EmptyBgraBitmap, DateTime.UtcNow, null, ThreeDdfaOnnxRequestMode.CanonicalModel, 1);
 				DenseFaceWarpResult denseFaceWarpResult = EvidenceWeightedDenseFaceWarper.Warp(ThreeDdfaMediaPipeWarpInputFactory.Create(threeDdfaOnnxSidecarResponse, mediaPipeModel, subjectId, displayName, DateTime.UtcNow));
 				DenseFaceWarpSaveResult item = DenseFaceWarpStore.Write(profileFolder, denseFaceWarpResult);
 				return (Response: threeDdfaOnnxSidecarResponse, Warp: denseFaceWarpResult, Saved: item);
 			});
-			_visionBenchmarkRecorder.Record(tuple.Item1.Diagnostics);
 			OpenLocalFile(tuple.Item3.ViewerPath);
 			SetStatus($"Dense MediaPipe warp complete: {tuple.Item2.SourceVertexCount:n0} vertices, {tuple.Item2.AppliedControlPointCount} trusted controls, anchor RMS {tuple.Item2.SourceAnchorRms:0.0000} -> {tuple.Item2.WarpedAnchorRms:0.0000}, movement p95 {tuple.Item2.Percentile95AppliedDisplacement:0.0000}, safety clamp {tuple.Item2.SafetyClampVertexPercent:0.00}%.");
 		}
@@ -3928,49 +3074,22 @@ public partial class MainWindow : Window, IComponentConnector
 
 	private async void DeleteAvatarDataClicked(object sender, RoutedEventArgs e)
 	{
-		if (MessageBox.Show(this, "Are you sure you want to permanently delete all avatar data for " + CurrentAvatarProfileDisplayName + "?\n\nThis deletes retained scans, paired photos, the generated model, the standard model, model history, and review reports. This cannot be undone.", "Delete Avatar Data?", MessageBoxButton.YesNo, MessageBoxImage.Exclamation) != MessageBoxResult.Yes)
+		if (MessageBox.Show(this, "Are you sure you want to permanently delete all avatar data for " + CurrentAvatarProfileDisplayName + "?\n\nThis deletes measured MediaPipe geometry, dense warp proofs, and generated review files. This cannot be undone.", "Delete Avatar Data?", MessageBoxButton.YesNo, MessageBoxImage.Exclamation) != MessageBoxResult.Yes)
 		{
-			return;
-		}
-		Task avatarReportWriterTask = _avatarReportWriterTask;
-		if (avatarReportWriterTask != null && !avatarReportWriterTask.IsCompleted)
-		{
-			SetStatus("Avatar report save is still finishing. Try Delete Avatar Data again in a moment.");
-			return;
-		}
-		_avatarObservationStorageService.DiscardPendingCandidates();
-		if (_avatarObservationStorageService.IsBusy)
-		{
-			SetStatus("Avatar batch storage and model work is still finishing. Try Delete Avatar Data again in a moment.");
 			return;
 		}
 		try
 		{
 			string folder = GetAvatarDataFolder();
 			_avatarLearningRequested = false;
-			_liveStandardModelModeActive = false;
-			int deletedObservationCount = _avatarObservationRepository.ResetProfile(folder, CurrentAvatarProfileId);
-			_avatarStandardModelStore.Delete(folder);
 			DenseFaceWarpStore.Delete(folder);
-			if (IsMediaPipeOnlyGeometryMode)
-			{
-				_currentMediaPipeGeometryModel = await _mediaPipeGeometryPipeline.ResetProfileAsync();
-			}
-			_standardPoseAtlas.Clear();
+			_currentMediaPipeGeometryModel = await _mediaPipeGeometryPipeline.ResetProfileAsync();
 			DeleteDerivedAvatarFiles(folder);
-			lock (_decaClientLock)
-			{
-				_decaAvatarClient?.SetCurrentModelShapeCoefficients(Array.Empty<double>());
-			}
 			Directory.CreateDirectory(folder);
-			ResetAvatarCaptureGate("avatar data deleted; capture resumes when Start Avatar Capture is active");
 			_currentAvatarCaptureQuality = AvatarCaptureQualityAssessment.Waiting;
-			_avatarSystemDashboardPath = "";
-			_avatarModelHtmlPath = "";
 			_avatarModelReadyForCapture = IsAvatarUserLoggedIn;
 			UpdateAvatarLearningStatusUi();
-			UpdateStandardModelUi("Standard model: deleted with avatar data.");
-			SetStatus($"Avatar data deleted. Removed {deletedObservationCount} retained observation(s). Start Avatar Capture when you are ready to begin again.");
+			SetStatus("Avatar data deleted. Start Avatar Capture when you are ready to begin again.");
 		}
 		catch (Exception ex)
 		{
@@ -4005,22 +3124,24 @@ public partial class MainWindow : Window, IComponentConnector
 		try
 		{
 			FaceCueGuideLayout manualFaceCueLayout = GetManualFaceCueLayout();
-			DateTime utcNow = DateTime.UtcNow;
-			QueueFaceFeatureDetection(bitmap, utcNow);
-			if (HasUsableFaceFeatureLock(utcNow) && FaceAutoFollowCheckBox.IsChecked == true)
+			TryStartFaceFeatureDetection(bitmap);
+			bool faceTrackingEnabled = Volatile.Read(ref _faceTrackingEnabled) != 0;
+			if (faceTrackingEnabled && HasUsableFaceFeatureLock())
 			{
 				FaceCueGuideLayout faceCueGuideLayout = _currentFaceFeatureDetection.ToGuideLayout(manualFaceCueLayout);
 				FaceCueGuideLayout faceCueGuideLayout2 = _activeFaceCueLayout ?? faceCueGuideLayout;
 				_activeFaceCueLayout = new FaceCueGuideLayout(faceCueGuideLayout2.CenterXPercent + (faceCueGuideLayout.CenterXPercent - faceCueGuideLayout2.CenterXPercent) * 0.45, faceCueGuideLayout2.CenterYPercent + (faceCueGuideLayout.CenterYPercent - faceCueGuideLayout2.CenterYPercent) * 0.45, faceCueGuideLayout2.HeightPercent + (faceCueGuideLayout.HeightPercent - faceCueGuideLayout2.HeightPercent) * 0.3);
 				manualFaceCueLayout = _activeFaceCueLayout;
 			}
-			else if (FaceAutoFollowCheckBox.IsChecked == true)
+			else if (faceTrackingEnabled)
 			{
 				FaceCueGuideLayout faceCueGuideLayout3 = _activeFaceCueLayout ?? manualFaceCueLayout;
-				if ((utcNow - _lastFaceAutoFollowAt).TotalMilliseconds >= 500.0)
+				long timestamp = Stopwatch.GetTimestamp();
+				long previousTimestamp = Volatile.Read(ref _lastFaceAutoFollowTimestamp);
+				if (previousTimestamp == 0L || Stopwatch.GetElapsedTime(previousTimestamp, timestamp).TotalMilliseconds >= 500.0)
 				{
 					_activeFaceCueLayout = FaceCueAutoLayoutEstimator.Estimate(bitmap, faceCueGuideLayout3);
-					_lastFaceAutoFollowAt = utcNow;
+					Volatile.Write(ref _lastFaceAutoFollowTimestamp, timestamp);
 				}
 				manualFaceCueLayout = _activeFaceCueLayout ?? faceCueGuideLayout3;
 			}
@@ -4031,25 +3152,47 @@ public partial class MainWindow : Window, IComponentConnector
 		}
 	}
 
-	private void QueueFaceFeatureDetection(BitmapSource bitmap, DateTime now)
+	private void TryStartFaceFeatureDetection(BitmapSource bitmap)
 	{
-		if (!_isClosing && IsSelectedFaceBoxSystemAvailable() && FaceAutoFollowCheckBox.IsChecked == true && !(now - _lastFaceFeatureDetectionAt < FaceFeatureDetectionTargetInterval) && Interlocked.CompareExchange(ref _faceFeatureDetectionPending, 1, 0) == 0)
+		if (_isClosing
+			|| Volatile.Read(ref _faceTrackingEnabled) == 0
+			|| !IsSelectedFaceBoxSystemAvailable()
+			|| Volatile.Read(ref _faceFeatureDetectionInFlight) != 0)
 		{
-			_lastFaceFeatureDetectionAt = now;
+			return;
+		}
+
+		long timestamp = Stopwatch.GetTimestamp();
+		if (Interlocked.CompareExchange(ref _faceFeatureDetectionInFlight, 1, 0) == 0)
+		{
 			FaceBoxSystem faceBoxSystem = _selectedFaceBoxSystem;
 			int faceBoxSystemGeneration = _faceBoxSystemGeneration;
-			Task.Run(() => ProcessFaceFeatureDetectionFrameAsync(bitmap, now, faceBoxSystem, faceBoxSystemGeneration));
+			int faceAnalysisGeneration = Volatile.Read(ref _faceAnalysisGeneration);
+			DateTime capturedAtUtc = DateTime.UtcNow;
+			_ = Task.Run(() => ProcessFaceFeatureDetectionFrame(bitmap, timestamp, capturedAtUtc, faceBoxSystem, faceBoxSystemGeneration, faceAnalysisGeneration));
 		}
 	}
 
-	private async Task ProcessFaceFeatureDetectionFrameAsync(BitmapSource bitmap, DateTime capturedAtUtc, FaceBoxSystem faceBoxSystem, int faceBoxSystemGeneration)
+	private void ProcessFaceFeatureDetectionFrame(BitmapSource bitmap, long capturedAtTimestamp, DateTime capturedAtUtc, FaceBoxSystem faceBoxSystem, int faceBoxSystemGeneration, int faceAnalysisGeneration)
 	{
 		try
 		{
 			if (!_isClosing && faceBoxSystemGeneration == _faceBoxSystemGeneration && faceBoxSystem == _selectedFaceBoxSystem)
 			{
-				FaceBoxTrackingFrameResult trackingResult = DetectFaceBox(bitmap, (capturedAtUtc == DateTime.MinValue) ? DateTime.UtcNow : capturedAtUtc, faceBoxSystem, faceBoxSystemGeneration);
-				await ApplyFaceFeatureDetectionResultAsync(trackingResult);
+				if (IsLiveAwarenessFrameExpired(capturedAtTimestamp))
+				{
+					ExpireLiveAwarenessState(capturedAtTimestamp);
+					return;
+				}
+				FaceBoxTrackingFrameResult trackingResult = DetectFaceBox(
+					bitmap,
+					capturedAtTimestamp,
+					(capturedAtUtc == DateTime.MinValue) ? DateTime.UtcNow : capturedAtUtc,
+					faceBoxSystem,
+					faceBoxSystemGeneration);
+				ProcessFaceTrackingFrameResult(
+					trackingResult,
+					faceAnalysisGeneration);
 			}
 		}
 		catch (Exception ex)
@@ -4058,15 +3201,101 @@ public partial class MainWindow : Window, IComponentConnector
 		}
 		finally
 		{
-			Interlocked.Exchange(ref _faceFeatureDetectionPending, 0);
+			Interlocked.Exchange(ref _faceFeatureDetectionInFlight, 0);
 		}
+	}
+
+	private void ProcessFaceTrackingFrameResult(
+		FaceBoxTrackingFrameResult trackingResult,
+		int faceAnalysisGeneration)
+	{
+		if (_isClosing
+			|| trackingResult.FaceBoxSystemGeneration !=
+				_faceBoxSystemGeneration
+			|| trackingResult.FaceBoxSystem != _selectedFaceBoxSystem
+			|| faceAnalysisGeneration !=
+				Volatile.Read(ref _faceAnalysisGeneration))
+		{
+			return;
+		}
+		if (IsLiveAwarenessFrameExpired(
+			trackingResult.CapturedAtTimestamp))
+		{
+			ExpireLiveAwarenessState(
+				trackingResult.CapturedAtTimestamp);
+			return;
+		}
+
+		FaceAnalysisResult? analysisResult =
+			AnalyzeFaceTrackingResult(trackingResult);
+		if (faceAnalysisGeneration !=
+			Volatile.Read(ref _faceAnalysisGeneration))
+		{
+			return;
+		}
+		if (IsLiveAwarenessFrameExpired(
+			trackingResult.CapturedAtTimestamp))
+		{
+			ExpireLiveAwarenessState(
+				trackingResult.CapturedAtTimestamp);
+			return;
+		}
+
+		PreviewTrackingOverlay? nativeOverlay = null;
+		if (analysisResult != null
+			&& trackingResult.TrackingResult.FeatureDetection.HasFace
+			&& !_showLiveWireframePreview
+			&& IsDirectX12PreviewSurfaceActive())
+		{
+			nativeOverlay = CreateNativePreviewTrackingOverlay(
+				trackingResult.TrackingResult.FeatureDetection,
+				analysisResult.ReconstructedLandmarkFrame,
+				_showFaceMeshOverlay) with
+			{
+				SourceTimestamp =
+					trackingResult.CapturedAtTimestamp,
+				MaximumAge = MaximumLiveAwarenessFrameAge
+			};
+		}
+		ApplyFaceFeatureDetectionResult(
+			trackingResult,
+			analysisResult,
+			nativeOverlay,
+			faceAnalysisGeneration);
+	}
+
+	private FaceAnalysisResult? AnalyzeFaceTrackingResult(FaceBoxTrackingFrameResult trackingResult)
+	{
+		FaceLandmarkTrackingResult faceTracking = trackingResult.TrackingResult;
+		FaceFeatureDetection featureDetection = faceTracking.FeatureDetection;
+		if (!featureDetection.HasFace)
+		{
+			return null;
+		}
+
+		FaceLandmarkFrame observedFrame = faceTracking.LandmarkFrame.HasFace
+			? faceTracking.LandmarkFrame
+			: featureDetection.ToLandmarkFrame(trackingResult.CapturedAtUtc);
+		FaceAnalysisResult analysis;
+		lock (_faceAnalysisStateLock)
+		{
+			FaceLandmarkFrame reconstructedFrame = trackingResult.FaceBoxSystem == FaceBoxSystem.MediaPipe && observedFrame.HasDenseMesh
+				? observedFrame
+				: _faceLandmarkReconstructor.Update(observedFrame);
+			FaceLandmarkMetrics metrics = _faceLandmarkMetricCalculator.Update(reconstructedFrame);
+			FaceLockStabilityAnalysis stability = _faceLockStabilityAnalyzer.Update(featureDetection, reconstructedFrame, metrics);
+			analysis = new FaceAnalysisResult(observedFrame, reconstructedFrame, metrics, stability);
+		}
+
+		return analysis;
 	}
 
 	private void ReportRecoverableVisionError(string status)
 	{
-		long ticks = DateTime.UtcNow.Ticks;
-		long num = Interlocked.Read(in _lastRecoverableVisionErrorStatusTicks);
-		if (ticks - num >= RecoverableVisionErrorStatusInterval.Ticks && Interlocked.CompareExchange(ref _lastRecoverableVisionErrorStatusTicks, ticks, num) == num)
+		long timestamp = Stopwatch.GetTimestamp();
+		long previousTimestamp = Volatile.Read(ref _lastRecoverableVisionErrorStatusTimestamp);
+		if ((previousTimestamp == 0L || Stopwatch.GetElapsedTime(previousTimestamp, timestamp) >= RecoverableVisionErrorStatusInterval)
+			&& Interlocked.CompareExchange(ref _lastRecoverableVisionErrorStatusTimestamp, timestamp, previousTimestamp) == previousTimestamp)
 		{
 			base.Dispatcher.InvokeAsync(delegate
 			{
@@ -4075,11 +3304,8 @@ public partial class MainWindow : Window, IComponentConnector
 		}
 	}
 
-	private FaceBoxTrackingFrameResult DetectFaceBox(BitmapSource bitmap, DateTime capturedAtUtc, FaceBoxSystem faceBoxSystem, int faceBoxSystemGeneration)
+	private FaceBoxTrackingFrameResult DetectFaceBox(BitmapSource bitmap, long capturedAtTimestamp, DateTime capturedAtUtc, FaceBoxSystem faceBoxSystem, int faceBoxSystemGeneration)
 	{
-		Stopwatch stopwatch = Stopwatch.StartNew();
-		AvatarCaptureQualityAssessment captureQuality = CloneCaptureQuality(_currentAvatarCaptureQuality);
-		FaceFrameGeometry currentFaceFrameGeometry = _currentFaceFrameGeometry;
 		if (faceBoxSystem == FaceBoxSystem.MediaPipe)
 		{
 			FaceLandmarkTrackingResult trackingResult;
@@ -4087,28 +3313,18 @@ public partial class MainWindow : Window, IComponentConnector
 			{
 				trackingResult = ((_isClosing || _faceLandmarkTracker == null) ? FaceLandmarkTrackingResult.None : _faceLandmarkTracker.Detect(bitmap, capturedAtUtc));
 			}
-			stopwatch.Stop();
-			return new FaceBoxTrackingFrameResult(faceBoxSystem, faceBoxSystemGeneration, trackingResult, null, null, "", 0L, capturedAtUtc, bitmap, captureQuality, currentFaceFrameGeometry, stopwatch.Elapsed.TotalMilliseconds);
+			return new FaceBoxTrackingFrameResult(faceBoxSystem, faceBoxSystemGeneration, trackingResult, null, capturedAtTimestamp, capturedAtUtc, bitmap.PixelWidth, bitmap.PixelHeight, bitmap);
 		}
 		ThreeDdfaOnnxReconstructionClient threeDdfaFaceBoxClient;
 		lock (_threeDdfaClientLock)
 		{
 			threeDdfaFaceBoxClient = _threeDdfaFaceBoxClient;
 		}
-		AvatarReconstructionSnapshot threeDdfaSnapshot = null;
-		string currentAvatarProfileId = CurrentAvatarProfileId;
-		long generation = _avatarUserSession.Generation;
-		bool flag = !IsDecaAvatarReconstructionActive && IsAvatarUserLoggedIn && _avatarLearningRequested && _avatarCaptureGateAccepted && _avatarObservationStorageService.CanAcceptCandidate && (capturedAtUtc - _lastAvatarReconstructionRequestAtUtc).TotalMilliseconds >= 1000.0;
-		if (flag)
-		{
-			_lastAvatarReconstructionRequestAtUtc = capturedAtUtc;
-		}
-		Interlocked.Exchange(ref _avatarReconstructionPending, 1);
 		ThreeDdfaOnnxSidecarResponse threeDdfaOnnxSidecarResponse;
 		try
 		{
 			bool flag2 = _threeDdfaTrackingFaceBox == null || (capturedAtUtc - _lastThreeDdfaFaceBoxesAtUtc).TotalMilliseconds >= 1000.0;
-			ThreeDdfaOnnxSidecarFaceBox threeDdfaOnnxSidecarFaceBox = ((flag || !flag2) ? _threeDdfaTrackingFaceBox : null);
+			ThreeDdfaOnnxSidecarFaceBox threeDdfaOnnxSidecarFaceBox = flag2 ? null : _threeDdfaTrackingFaceBox;
 			if (threeDdfaOnnxSidecarFaceBox == null)
 			{
 				_lastThreeDdfaFaceBoxesAtUtc = capturedAtUtc;
@@ -4118,24 +3334,19 @@ public partial class MainWindow : Window, IComponentConnector
 				Ok = false,
 				Status = "3DDFA-V2 face-box client stopped",
 				TrustDecision = "The selected 3DDFA-V2 tracking session is no longer active."
-			} : threeDdfaFaceBoxClient.Reconstruct(bitmap, capturedAtUtc, threeDdfaOnnxSidecarFaceBox, (!flag) ? ThreeDdfaOnnxRequestMode.Tracking : ThreeDdfaOnnxRequestMode.Full, flag ? 1 : 200));
+			} : threeDdfaFaceBoxClient.Reconstruct(bitmap, capturedAtUtc, threeDdfaOnnxSidecarFaceBox, ThreeDdfaOnnxRequestMode.Tracking, 200));
 			if (threeDdfaOnnxSidecarResponse.Ok && threeDdfaOnnxSidecarResponse.HasFace)
 			{
 				_threeDdfaTrackingFaceBox = CreateThreeDdfaTrackingFaceBox(threeDdfaOnnxSidecarResponse, bitmap.PixelWidth, bitmap.PixelHeight);
 			}
 			else if (threeDdfaFaceBoxClient != null && threeDdfaOnnxSidecarFaceBox != null)
 			{
-				_visionBenchmarkRecorder.Record(threeDdfaOnnxSidecarResponse.Diagnostics);
 				_lastThreeDdfaFaceBoxesAtUtc = capturedAtUtc;
 				threeDdfaOnnxSidecarResponse = threeDdfaFaceBoxClient.Reconstruct(bitmap, capturedAtUtc, null, ThreeDdfaOnnxRequestMode.Tracking, 200);
 				if (threeDdfaOnnxSidecarResponse.Ok && threeDdfaOnnxSidecarResponse.HasFace)
 				{
 					_threeDdfaTrackingFaceBox = CreateThreeDdfaTrackingFaceBox(threeDdfaOnnxSidecarResponse, bitmap.PixelWidth, bitmap.PixelHeight);
 				}
-			}
-			if (flag)
-			{
-				threeDdfaSnapshot = CreateThreeDdfaLastGoodSnapshot(threeDdfaOnnxSidecarResponse, capturedAtUtc);
 			}
 		}
 		catch (Exception ex)
@@ -4149,247 +3360,118 @@ public partial class MainWindow : Window, IComponentConnector
 		}
 		finally
 		{
-			Interlocked.Exchange(ref _avatarReconstructionPending, 0);
 			if (faceBoxSystemGeneration != _faceBoxSystemGeneration || faceBoxSystem != _selectedFaceBoxSystem)
 			{
 				threeDdfaFaceBoxClient?.Dispose();
 			}
 		}
-		stopwatch.Stop();
 		FaceLandmarkTrackingResult trackingResult2 = ThreeDdfaOnnxFaceTrackingMapper.ToTrackingResult(threeDdfaOnnxSidecarResponse, bitmap.PixelWidth, bitmap.PixelHeight, capturedAtUtc);
-		return new FaceBoxTrackingFrameResult(faceBoxSystem, faceBoxSystemGeneration, trackingResult2, threeDdfaOnnxSidecarResponse, threeDdfaSnapshot, currentAvatarProfileId, generation, capturedAtUtc, bitmap, captureQuality, currentFaceFrameGeometry, stopwatch.Elapsed.TotalMilliseconds);
+		return new FaceBoxTrackingFrameResult(faceBoxSystem, faceBoxSystemGeneration, trackingResult2, threeDdfaOnnxSidecarResponse, capturedAtTimestamp, capturedAtUtc, bitmap.PixelWidth, bitmap.PixelHeight, bitmap);
 	}
 
-	private Task ApplyFaceFeatureDetectionResultAsync(FaceBoxTrackingFrameResult trackingResult)
+	private void ApplyFaceFeatureDetectionResult(
+		FaceBoxTrackingFrameResult trackingResult,
+		FaceAnalysisResult? analysisResult,
+		PreviewTrackingOverlay? nativeOverlay,
+		int faceAnalysisGeneration)
 	{
-		return base.Dispatcher.InvokeAsync(delegate
+		if (_isClosing
+			|| trackingResult.FaceBoxSystemGeneration != _faceBoxSystemGeneration
+			|| trackingResult.FaceBoxSystem != _selectedFaceBoxSystem
+			|| faceAnalysisGeneration != Volatile.Read(ref _faceAnalysisGeneration)
+			|| IsLiveAwarenessFrameExpired(trackingResult.CapturedAtTimestamp))
 		{
-			if (!_isClosing && trackingResult.FaceBoxSystemGeneration == _faceBoxSystemGeneration && trackingResult.FaceBoxSystem == _selectedFaceBoxSystem && (!_photoTrainingModeActive || trackingResult.SourceFrame == _photoTrainingFrame))
-			{
-				DateTime utcNow = DateTime.UtcNow;
-				RecordFaceBoxDiagnostics(trackingResult);
-				if (trackingResult.ThreeDdfaResponse != null)
-				{
-					_currentThreeDdfaOnnxResponse = trackingResult.ThreeDdfaResponse;
-					if (trackingResult.ThreeDdfaSnapshot != null && _avatarUserSession.Matches(trackingResult.ProfileId, trackingResult.SessionGeneration))
-					{
-						_currentAvatarReconstructionSnapshot = trackingResult.ThreeDdfaSnapshot;
-						TrackAvatarObservationSnapshot(trackingResult.ThreeDdfaSnapshot, trackingResult.SourceFrame, trackingResult.CaptureQuality, trackingResult.FaceGeometry);
-					}
-				}
-				FaceLandmarkTrackingResult trackingResult2 = trackingResult.TrackingResult;
-				FaceFeatureDetection featureDetection = trackingResult2.FeatureDetection;
-				if (featureDetection.HasFace)
-				{
-					_currentFaceFeatureDetection = featureDetection;
-					_lastFaceFeatureLockAt = utcNow;
-					FaceLandmarkFrame faceLandmarkFrame = (trackingResult2.LandmarkFrame.HasFace ? trackingResult2.LandmarkFrame : featureDetection.ToLandmarkFrame(utcNow));
-					_currentFaceLandmarkFrame = _faceLandmarkReconstructor.Update(faceLandmarkFrame);
-					if (_selectedFaceBoxSystem == FaceBoxSystem.MediaPipe)
-					{
-						_mediaPipeConvergenceAuditor.Record(faceLandmarkFrame, _currentFaceLandmarkFrame, trackingResult.SourceFrame.PixelWidth, trackingResult.SourceFrame.PixelHeight);
-					}
-					_currentFaceLandmarkMetrics = _faceLandmarkMetricCalculator.Update(_currentFaceLandmarkFrame);
-					_currentFaceFrameGeometry = _faceFrameGeometryEstimator.Estimate(new FaceFrameGeometryEstimatorInput
-					{
-						Frame = _currentFaceLandmarkFrame,
-						FrameWidthPixels = _latestFrame?.PixelWidth,
-						FrameHeightPixels = _latestFrame?.PixelHeight,
-						Calibration = GetCurrentFaceFrameGeometryCalibration()
-					});
-					_currentFaceLockStabilityAnalysis = _faceLockStabilityAnalyzer.Update(_currentFaceFeatureDetection, _currentFaceLandmarkFrame, _currentFaceLandmarkMetrics);
-					UpdateAvatarCaptureState(utcNow);
-					if (IsMediaPipeOnlyGeometryMode && _selectedFaceBoxSystem == FaceBoxSystem.MediaPipe && IsAvatarUserLoggedIn && _avatarLearningRequested && faceLandmarkFrame.HasDenseMesh)
-					{
-						QueueMediaPipeGeometry(faceLandmarkFrame, trackingResult.SourceFrame.PixelWidth, trackingResult.SourceFrame.PixelHeight);
-					}
-					else if (IsAvatarReconstructionReady && (IsDecaAvatarReconstructionActive || _selectedFaceBoxSystem == FaceBoxSystem.MediaPipe))
-					{
-						QueueAvatarReconstruction(trackingResult.SourceFrame, trackingResult.CapturedAtUtc, featureDetection, faceLandmarkFrame, new PoseAngles(faceLandmarkFrame.HeadPitchDegrees, faceLandmarkFrame.HeadYawDegrees, faceLandmarkFrame.HeadRollDegrees));
-					}
-				}
-				else
-				{
-					if (_selectedFaceBoxSystem == FaceBoxSystem.MediaPipe)
-					{
-						_mediaPipeConvergenceAuditor.RecordMissingFace(trackingResult.CapturedAtUtc);
-					}
-					if (!HasUsableFaceFeatureLock(utcNow))
-					{
-						_currentFaceFeatureDetection = FaceFeatureDetection.None;
-						ResetLandmarkTracking();
-					}
-				}
-				if (_showLiveWireframePreview)
-				{
-					DrawLiveWireframePreview();
-				}
-				UpdateFaceCueGuideOverlay(_latestFrame);
-			}
-		}, DispatcherPriority.Background).Task;
-	}
+			ExpireLiveAwarenessState(trackingResult.CapturedAtTimestamp);
+			return;
+		}
 
-	private void QueueMediaPipeGeometry(FaceLandmarkFrame observedLandmarks, int frameWidthPixels, int frameHeightPixels)
-	{
-		FaceFrameGeometryCalibration currentFaceFrameGeometryCalibration = GetCurrentFaceFrameGeometryCalibration();
-		_mediaPipeGeometryPipeline.Queue(MediaPipeGeometryFrame.Create(observedLandmarks, frameWidthPixels, frameHeightPixels, GetSelectedCameraName(), currentFaceFrameGeometryCalibration.CameraHorizontalFovDegrees ?? 70.0));
-	}
+		FaceFeatureDetection featureDetection = trackingResult.TrackingResult.FeatureDetection;
+		if (featureDetection.HasFace && analysisResult != null)
+		{
+			_currentFaceFeatureDetection = featureDetection;
+			_currentFaceLandmarkFrame = analysisResult.ReconstructedLandmarkFrame;
+			_currentFaceLandmarkMetrics = analysisResult.Metrics;
+			_currentFaceLockStabilityAnalysis = analysisResult.Stability;
+			Volatile.Write(ref _lastFaceFeatureLockTimestamp, trackingResult.CapturedAtTimestamp);
+		}
+		else
+		{
+			ClearLiveFaceState();
+		}
 
-	private void RecordFaceBoxDiagnostics(FaceBoxTrackingFrameResult trackingResult)
-	{
-		_visionBenchmarkRecorder.Record(trackingResult.TrackingResult.Diagnostics);
-		_lastFaceBoxBackendStatus = trackingResult.TrackingResult.BackendStatus;
-	}
-
-	private void QueueAvatarReconstruction(BitmapSource? bitmap, DateTime capturedAtUtc, FaceFeatureDetection detection, FaceLandmarkFrame observedLandmarks, PoseAngles mediaPipePose)
-	{
-		if (_isClosing || (!IsDecaAvatarReconstructionActive && _selectedFaceBoxSystem != FaceBoxSystem.MediaPipe) || bitmap == null || !IsAvatarReconstructionReady || !IsAvatarUserLoggedIn || (!_avatarLearningRequested && !IsStandardModelBuildModeActive) || (!IsDecaAvatarReconstructionActive && !_avatarCaptureGateAccepted) || !detection.HasFace || !observedLandmarks.HasDenseMesh || (!IsDecaAvatarReconstructionActive && (capturedAtUtc - _lastAvatarReconstructionRequestAtUtc).TotalMilliseconds < 1000.0) || Interlocked.CompareExchange(ref _avatarReconstructionPending, 1, 0) != 0)
+		UpdateDirectX12TrackingOverlay(nativeOverlay ?? PreviewTrackingOverlay.Empty);
+		if (Interlocked.CompareExchange(ref _faceResultUiUpdateInFlight, 1, 0) != 0)
 		{
 			return;
 		}
-		_lastAvatarReconstructionRequestAtUtc = capturedAtUtc;
-		BitmapSource frame = (bitmap.IsFrozen ? bitmap : bitmap.Clone());
-		if (!frame.IsFrozen && frame.CanFreeze)
-		{
-			frame.Freeze();
-		}
-		ThreeDdfaOnnxSidecarFaceBox faceBox = CreateThreeDdfaFaceBox(detection);
-		string profileId = CurrentAvatarProfileId;
-		long sessionGeneration = _avatarUserSession.Generation;
-		FaceBoxSystem faceBoxSystem = _selectedFaceBoxSystem;
-		int faceBoxSystemGeneration = _faceBoxSystemGeneration;
-		AvatarCaptureQualityAssessment captureQuality = CloneCaptureQuality(_currentAvatarCaptureQuality);
-		FaceFrameGeometry faceGeometry = _currentFaceFrameGeometry;
-		DecaIdentityFitProfile identityFitProfile = (_photoTrainingModeActive ? _photoTrainingIdentityFitProfile : DecaIdentityFitProfile.Flame68);
-		if (IsDecaAvatarReconstructionActive)
-		{
-			DecaReconstructionClient decaClient;
-			lock (_decaClientLock)
-			{
-				decaClient = _decaAvatarClient;
-			}
-			if (decaClient == null)
-			{
-				Interlocked.Exchange(ref _avatarReconstructionPending, 0);
-				return;
-			}
-			DecaSidecarFaceBox decaFaceBox = CreateDecaFaceBox(detection);
-			if (decaFaceBox == null)
-			{
-				Interlocked.Exchange(ref _avatarReconstructionPending, 0);
-				return;
-			}
-			Task.Run(() => ProcessDecaReconstructionAsync(decaClient, frame, capturedAtUtc, decaFaceBox, observedLandmarks, captureQuality, faceGeometry, profileId, sessionGeneration, faceBoxSystem, faceBoxSystemGeneration, identityFitProfile));
-			return;
-		}
-		ThreeDdfaOnnxReconstructionClient threeDdfaClient;
-		lock (_threeDdfaClientLock)
-		{
-			threeDdfaClient = _threeDdfaAvatarClient;
-		}
-		if (threeDdfaClient == null)
-		{
-			Interlocked.Exchange(ref _avatarReconstructionPending, 0);
-			return;
-		}
-		Task.Run(() => ProcessThreeDdfaOnnxReconstructionAsync(threeDdfaClient, frame, capturedAtUtc, faceBox, captureQuality, faceGeometry, profileId, sessionGeneration, faceBoxSystem, faceBoxSystemGeneration, mediaPipePose));
-	}
 
-	private async Task ProcessDecaReconstructionAsync(DecaReconstructionClient client, BitmapSource bitmap, DateTime capturedAtUtc, DecaSidecarFaceBox faceBox, FaceLandmarkFrame observedLandmarks, AvatarCaptureQualityAssessment captureQuality, FaceFrameGeometry faceGeometry, string profileId, long sessionGeneration, FaceBoxSystem faceBoxSystem, int faceBoxSystemGeneration, DecaIdentityFitProfile identityFitProfile)
-	{
-		AvatarReconstructionSnapshot snapshot = null;
 		try
 		{
-			snapshot = client.Reconstruct(bitmap, capturedAtUtc, faceBox, observedLandmarks, null, identityFitProfile);
-		}
-		finally
-		{
-			Interlocked.Exchange(ref _avatarReconstructionPending, 0);
-		}
-		await base.Dispatcher.InvokeAsync(delegate
-		{
-			if (!_isClosing && _avatarUserSession.Matches(profileId, sessionGeneration) && faceBoxSystemGeneration == _faceBoxSystemGeneration && faceBoxSystem == _selectedFaceBoxSystem && (!_photoTrainingModeActive || bitmap == _photoTrainingFrame))
+			base.Dispatcher.BeginInvoke((Action)delegate
 			{
-				if (snapshot == null)
+				try
 				{
-					SetStatus(client.Status);
-					UpdateAvatarLearningStatusUi();
-				}
-				else
-				{
-					_currentAvatarReconstructionSnapshot = snapshot;
-					_currentManualStandardModelCandidate = new AvatarObservationCapture(GetAvatarDataFolder(), CurrentAvatarProfileId, CurrentAvatarProfileDisplayName, snapshot, bitmap, captureQuality, faceGeometry);
-					UpdateAvatarLearningStatusUi();
-					UpdateStandardModelUi();
-					UpdatePhotoTrainingUi();
-					if (_avatarLearningRequested && HasCompleteHumanStandardModel)
+					if (_isClosing
+						|| trackingResult.FaceBoxSystemGeneration != _faceBoxSystemGeneration
+						|| trackingResult.FaceBoxSystem != _selectedFaceBoxSystem
+						|| faceAnalysisGeneration != Volatile.Read(ref _faceAnalysisGeneration))
 					{
-						TrackAvatarObservationSnapshot(snapshot, bitmap, captureQuality, faceGeometry);
+						return;
 					}
-					if (_showAvatarModelOverlay)
+					_lastFaceBoxBackendStatus = trackingResult.TrackingResult.BackendStatus;
+					if (trackingResult.ThreeDdfaResponse != null)
 					{
-						UpdateFaceCueGuideOverlay(_latestFrame);
+						_currentThreeDdfaOnnxResponse = trackingResult.ThreeDdfaResponse;
 					}
+					bool resultIsStillCurrent = trackingResult.CapturedAtTimestamp == Volatile.Read(ref _lastFaceFeatureLockTimestamp)
+						&& !IsLiveAwarenessFrameExpired(trackingResult.CapturedAtTimestamp);
+					if (resultIsStillCurrent && featureDetection.HasFace && analysisResult != null)
+					{
+						UpdateAvatarCaptureState();
+						if (_selectedFaceBoxSystem == FaceBoxSystem.MediaPipe && IsAvatarUserLoggedIn && _avatarLearningRequested && analysisResult.RawLandmarkFrame.HasDenseMesh)
+						{
+							TryStartMediaPipeGeometryUpdate(analysisResult.RawLandmarkFrame, trackingResult.SourceWidth, trackingResult.SourceHeight);
+						}
+					}
+
 					if (_showLiveWireframePreview)
 					{
 						DrawLiveWireframePreview();
 					}
+					if (nativeOverlay != null && IsDirectX12PreviewSurfaceActive())
+					{
+						_cachedNativeOverlayFeatureDetection = _currentFaceFeatureDetection;
+						_cachedNativeOverlayLandmarkFrame = _currentFaceLandmarkFrame;
+						_cachedNativeOverlayIncludesFaceMesh = _showFaceMeshOverlay;
+						_cachedNativeTrackingOverlay = nativeOverlay;
+						if (FaceCueGuideCanvas.Visibility != Visibility.Collapsed)
+						{
+							FaceCueGuideCanvas.Children.Clear();
+							FaceCueGuideCanvas.Visibility = Visibility.Collapsed;
+						}
+					}
+					else
+					{
+						UpdateFaceCueGuideOverlay(_latestFrame);
+					}
 				}
-			}
-		}, DispatcherPriority.Background);
+				finally
+				{
+					Volatile.Write(ref _faceResultUiUpdateInFlight, 0);
+				}
+			}, DispatcherPriority.Render);
+		}
+		catch
+		{
+			Volatile.Write(ref _faceResultUiUpdateInFlight, 0);
+			throw;
+		}
 	}
 
-	private async Task ProcessThreeDdfaOnnxReconstructionAsync(ThreeDdfaOnnxReconstructionClient client, BitmapSource bitmap, DateTime capturedAtUtc, ThreeDdfaOnnxSidecarFaceBox? faceBox, AvatarCaptureQualityAssessment captureQuality, FaceFrameGeometry faceGeometry, string profileId, long sessionGeneration, FaceBoxSystem faceBoxSystem, int faceBoxSystemGeneration, PoseAngles mediaPipePose)
+	private void TryStartMediaPipeGeometryUpdate(FaceLandmarkFrame observedLandmarks, int frameWidthPixels, int frameHeightPixels)
 	{
-		AvatarReconstructionSnapshot snapshot = null;
-		ThreeDdfaOnnxSidecarResponse response;
-		try
-		{
-			response = client.Reconstruct(bitmap, capturedAtUtc, faceBox, ThreeDdfaOnnxRequestMode.Full, 1);
-			_visionBenchmarkRecorder.Record(response.Diagnostics);
-			bool flag = faceBoxSystemGeneration == _faceBoxSystemGeneration && faceBoxSystem == _selectedFaceBoxSystem && _avatarUserSession.Matches(profileId, sessionGeneration);
-			if (!(response.Ok && response.HasFace && flag))
-			{
-				_ = _poseAlignmentAuditor.CurrentSummary;
-			}
-			else
-			{
-				_poseAlignmentAuditor.Record(capturedAtUtc, mediaPipePose, response.Pose);
-			}
-			snapshot = CreateThreeDdfaLastGoodSnapshot(response, capturedAtUtc);
-		}
-		catch (Exception ex)
-		{
-			response = new ThreeDdfaOnnxSidecarResponse
-			{
-				Ok = false,
-				Status = "3DDFA/ONNX reconstruction failed: " + ex.Message,
-				TrustDecision = "3DDFA/ONNX failed; do not use this frame for avatar reconstruction trust."
-			};
-		}
-		finally
-		{
-			Interlocked.Exchange(ref _avatarReconstructionPending, 0);
-		}
-		await base.Dispatcher.InvokeAsync(delegate
-		{
-			if (!_isClosing && _avatarUserSession.Matches(profileId, sessionGeneration) && faceBoxSystemGeneration == _faceBoxSystemGeneration && faceBoxSystem == _selectedFaceBoxSystem)
-			{
-				_currentThreeDdfaOnnxResponse = response;
-				if (snapshot != null)
-				{
-					_currentAvatarReconstructionSnapshot = snapshot;
-				}
-				_currentManualStandardModelCandidate = null;
-				UpdateAvatarLearningStatusUi();
-				UpdateStandardModelUi();
-				TrackAvatarObservationSnapshot(snapshot, bitmap, captureQuality, faceGeometry);
-				if (_showLiveWireframePreview)
-				{
-					DrawLiveWireframePreview();
-				}
-			}
-		}, DispatcherPriority.Background);
+		FaceFrameGeometryCalibration currentFaceFrameGeometryCalibration = GetCurrentFaceFrameGeometryCalibration();
+		_mediaPipeGeometryPipeline.TryStart(() => MediaPipeGeometryFrame.Create(observedLandmarks, frameWidthPixels, frameHeightPixels, GetSelectedCameraName(), currentFaceFrameGeometryCalibration.CameraHorizontalFovDegrees ?? 70.0));
 	}
 
 	private static ThreeDdfaOnnxSidecarFaceBox? CreateThreeDdfaFaceBox(FaceFeatureDetection detection)
@@ -4409,153 +3491,48 @@ public partial class MainWindow : Window, IComponentConnector
 		};
 	}
 
-	private void TrackAvatarObservationSnapshot(AvatarReconstructionSnapshot? snapshot, BitmapSource sourceFrame, AvatarCaptureQualityAssessment captureQuality, FaceFrameGeometry faceGeometry)
-	{
-		if (snapshot != null && _avatarLearningRequested && HasCompleteHumanStandardModel && _avatarObservationStorageService.CanAcceptCandidate)
-		{
-			BitmapSource bitmapSource = (sourceFrame.IsFrozen ? sourceFrame : sourceFrame.Clone());
-			if (!bitmapSource.IsFrozen && bitmapSource.CanFreeze)
-			{
-				bitmapSource.Freeze();
-			}
-			AvatarObservationCapture capture = new AvatarObservationCapture(GetAvatarDataFolder(), CurrentAvatarProfileId, CurrentAvatarProfileDisplayName, snapshot, bitmapSource, captureQuality, faceGeometry);
-			switch (_avatarObservationStorageService.AddCandidate(capture))
-			{
-			case AvatarObservationBatchAdmission.HeldWorkerBusy:
-				SetStatus("Five recurrent results are safely held in memory. Reconstruction keeps running at full speed while storage waits for its single worker.");
-				break;
-			case AvatarObservationBatchAdmission.IgnoredWaitingBatch:
-				SetStatus("The bounded five-result storage handoff is full. Reconstruction continues in memory; no storage backlog was created.");
-				break;
-			case AvatarObservationBatchAdmission.Launched:
-				SetStatus("Avatar batch worker started selecting the lowest-delta result from five recurrent updates. File and model work remain off the camera thread.");
-				break;
-			}
-		}
-	}
-
-	private async Task FinalizeAvatarObservationBatchAsync(AvatarObservationBatch batch, CancellationToken cancellationToken)
-	{
-		if (!_isClosing && batch.Candidates.Count != 0)
-		{
-			AvatarReportSnapshot snapshot = await base.Dispatcher.InvokeAsync(() => CreateAvatarReportSnapshotForBatch(batch), DispatcherPriority.Background, cancellationToken).Task.ConfigureAwait(continueOnCapturedContext: false);
-			cancellationToken.ThrowIfCancellationRequested();
-			AvatarReportSaveResult result = WriteAvatarReports(snapshot, batch);
-			lock (_personalFaceReportWriterLock)
-			{
-				_pendingAvatarReportSnapshot = null;
-			}
-			await base.Dispatcher.InvokeAsync(delegate
-			{
-				ApplyAvatarReportSaveResult(result);
-			}, DispatcherPriority.Background, cancellationToken).Task.ConfigureAwait(continueOnCapturedContext: false);
-		}
-	}
-
-	private AvatarReportSnapshot CreateAvatarReportSnapshotForBatch(AvatarObservationBatch batch)
-	{
-		if (string.Equals(batch.SubjectId, CurrentAvatarProfileId, StringComparison.Ordinal))
-		{
-			return CreateAvatarReportSnapshot(batch.ProfileFolder);
-		}
-		IReadOnlyList<AvatarObservationCapture> candidates = batch.Candidates;
-		AvatarObservationCapture avatarObservationCapture = candidates[candidates.Count - 1];
-		return new AvatarReportSnapshot(batch.ProfileFolder, batch.SubjectId, batch.SubjectDisplayName, avatarObservationCapture.CaptureQuality, UserLoggedIn: false, AvatarCaptureRequested: false, AvatarCaptureActive: false, "Avatar capture stopped", "The accepted batch was incorporated after the active user changed.", avatarObservationCapture.FaceGeometry, FaceReconstructionLaneStatus.Waiting);
-	}
-
-	private void AvatarObservationBatchCompleted(object? sender, AvatarObservationBatchEventArgs e)
-	{
-		base.Dispatcher.BeginInvoke((Action)delegate
-		{
-			if (!_isClosing && string.Equals(e.SubjectId, CurrentAvatarProfileId, StringComparison.Ordinal))
-			{
-				AvatarObservationBatch batch = e.Batch;
-				if (e.FinalizationError != null)
-				{
-					SetStatus("Avatar batch storage completed, but its model refresh failed: " + e.FinalizationError.Message);
-				}
-				else
-				{
-					string value = ((batch.Errors.Count > 0) ? $" {batch.Errors.Count} candidate(s) hit storage errors." : "");
-					SetStatus(IsDecaAvatarReconstructionActive ? $"Avatar batch complete: {batch.AcceptedCount}/{batch.Candidates.Count} lowest-delta recurrent DECA/FLAME result retained; {batch.RetainedCount} retained; current model saved.{value}" : $"Avatar batch complete: {batch.AcceptedCount}/{batch.Candidates.Count} improved the retained set; {batch.RetainedCount} retained; model refreshed.{value}");
-					StartPendingAvatarReportWriterIfPossible();
-				}
-			}
-		}, DispatcherPriority.Background);
-	}
-
-	private void AvatarObservationWorkerCompleted(object? sender, AvatarObservationWorkerCompletedEventArgs e)
-	{
-		base.Dispatcher.BeginInvoke((Action)delegate
-		{
-			if (!_isClosing)
-			{
-				_lastAvatarObservationWorkerDuration = e.Duration;
-				UpdateAvatarWorkerTimingUi();
-				StartPendingAvatarReportWriterIfPossible();
-			}
-		}, DispatcherPriority.Background);
-	}
-
-	private void AvatarObservationWorkerStarted(object? sender, AvatarObservationWorkerStartedEventArgs e)
-	{
-		base.Dispatcher.BeginInvoke((Action)delegate
-		{
-			if (!_isClosing)
-			{
-				TimeSpan? waitAfterPreviousWorker = e.WaitAfterPreviousWorker;
-				if (waitAfterPreviousWorker.HasValue)
-				{
-					TimeSpan valueOrDefault = waitAfterPreviousWorker.GetValueOrDefault();
-					_lastAvatarObservationWorkerStartWait = valueOrDefault;
-				}
-				UpdateAvatarWorkerTimingUi();
-			}
-		}, DispatcherPriority.Background);
-	}
-
 	private void MediaPipeGeometryPipelineModelUpdated(object? sender, MediaPipeGeometryModelUpdatedEventArgs e)
 	{
-		base.Dispatcher.BeginInvoke((Action)delegate
+		if (Interlocked.CompareExchange(ref _mediaPipeGeometryUiUpdateInFlight, 1, 0) != 0)
 		{
-			if (!_isClosing && IsAvatarUserLoggedIn && string.Equals(e.Model.SubjectId, CurrentAvatarProfileId, StringComparison.OrdinalIgnoreCase))
+			return;
+		}
+
+		try
+		{
+			base.Dispatcher.BeginInvoke((Action)delegate
 			{
-				_currentMediaPipeGeometryModel = e.Model;
-				_lastMediaPipeGeometryProcessingDuration = e.ProcessingDuration;
-				UpdateAvatarLearningStatusUi();
-			}
-		}, DispatcherPriority.Background);
+				try
+				{
+					if (!_isClosing && IsAvatarUserLoggedIn && string.Equals(e.Model.SubjectId, CurrentAvatarProfileId, StringComparison.OrdinalIgnoreCase))
+					{
+						_currentMediaPipeGeometryModel = e.Model;
+						_lastMediaPipeGeometryProcessingDuration = e.ProcessingDuration;
+						UpdateAvatarWorkerTimingUi();
+						UpdateAvatarLearningStatusUiIfDue();
+					}
+				}
+				finally
+				{
+					Volatile.Write(ref _mediaPipeGeometryUiUpdateInFlight, 0);
+				}
+			}, DispatcherPriority.Background);
+		}
+		catch
+		{
+			Volatile.Write(ref _mediaPipeGeometryUiUpdateInFlight, 0);
+			throw;
+		}
 	}
 
 	private void UpdateAvatarWorkerTimingUi()
 	{
 		if (base.IsLoaded)
 		{
-			TimeSpan? lastAvatarObservationWorkerDuration = _lastAvatarObservationWorkerDuration;
-			object obj;
-			if (lastAvatarObservationWorkerDuration.HasValue)
-			{
-				TimeSpan valueOrDefault = lastAvatarObservationWorkerDuration.GetValueOrDefault();
-				obj = FormatWorkerDuration(valueOrDefault);
-			}
-			else
-			{
-				obj = "--";
-			}
-			string text = (string)obj;
-			lastAvatarObservationWorkerDuration = _lastAvatarObservationWorkerStartWait;
-			object obj2;
-			if (lastAvatarObservationWorkerDuration.HasValue)
-			{
-				TimeSpan valueOrDefault2 = lastAvatarObservationWorkerDuration.GetValueOrDefault();
-				obj2 = FormatWorkerDuration(valueOrDefault2);
-			}
-			else
-			{
-				obj2 = "--";
-			}
-			string text2 = (string)obj2;
-			AvatarWorkerTimingText.Text = "Storage/model worker: last " + text + " | wait to next start " + text2;
+			string duration = _lastMediaPipeGeometryProcessingDuration.HasValue
+				? FormatWorkerDuration(_lastMediaPipeGeometryProcessingDuration.Value)
+				: "--";
+			SetTextIfChanged(AvatarWorkerTimingText, $"Measured geometry worker: last {duration} | accepted {_mediaPipeGeometryPipeline.SubmittedFrameCount:n0} | busy drops {_mediaPipeGeometryPipeline.BusyDropCount:n0}");
 		}
 	}
 
@@ -4574,10 +3551,19 @@ public partial class MainWindow : Window, IComponentConnector
 		{
 			return response.FaceBox;
 		}
-		double num = response.SparseLandmarks.Min((ThreeDdfaOnnxSidecarVertex point) => point.X);
-		double num2 = response.SparseLandmarks.Max((ThreeDdfaOnnxSidecarVertex point) => point.X);
-		double num3 = response.SparseLandmarks.Min((ThreeDdfaOnnxSidecarVertex point) => point.Y);
-		double num4 = response.SparseLandmarks.Max((ThreeDdfaOnnxSidecarVertex point) => point.Y);
+		ThreeDdfaOnnxSidecarVertex first = response.SparseLandmarks[0];
+		double num = first.X;
+		double num2 = first.X;
+		double num3 = first.Y;
+		double num4 = first.Y;
+		for (int i = 1; i < response.SparseLandmarks.Count; i++)
+		{
+			ThreeDdfaOnnxSidecarVertex point = response.SparseLandmarks[i];
+			num = Math.Min(num, point.X);
+			num2 = Math.Max(num2, point.X);
+			num3 = Math.Min(num3, point.Y);
+			num4 = Math.Max(num4, point.Y);
+		}
 		double num5 = num2 - num;
 		double num6 = num4 - num3;
 		if (num5 <= 1.0 || num6 <= 1.0)
@@ -4595,161 +3581,64 @@ public partial class MainWindow : Window, IComponentConnector
 		};
 	}
 
-	private static DecaSidecarFaceBox? CreateDecaFaceBox(FaceFeatureDetection detection)
+	private bool HasUsableFaceFeatureLock()
 	{
-		if (!detection.HasFace || detection.FaceBox.Width <= 0.0 || detection.FaceBox.Height <= 0.0)
-		{
-			return null;
-		}
-		return new DecaSidecarFaceBox
-		{
-			Left = detection.FaceBox.Left,
-			Top = detection.FaceBox.Top,
-			Right = detection.FaceBox.Right,
-			Bottom = detection.FaceBox.Bottom,
-			Normalized = true,
-			Confidence = Math.Clamp(detection.TrackingConfidence, 0.01, 1.0)
-		};
+		long timestamp = Volatile.Read(ref _lastFaceFeatureLockTimestamp);
+		return _currentFaceFeatureDetection.HasFace
+			&& timestamp != 0L
+			&& !IsLiveAwarenessFrameExpired(timestamp);
 	}
 
-	private AvatarReconstructionSnapshot? CreateThreeDdfaLastGoodSnapshot(ThreeDdfaOnnxSidecarResponse response, DateTime sampleCapturedAtUtc)
+	private static bool IsLiveAwarenessFrameExpired(long capturedAtTimestamp)
 	{
-		if (!response.Ok || !response.HasFace || response.DenseVertexCount < 30000 || response.DenseVertices.Count < 30000)
-		{
-			return null;
-		}
-		List<MeshTopologyEdge> orCreateThreeDdfaTopology = GetOrCreateThreeDdfaTopology(response.DenseEdges);
-		if (orCreateThreeDdfaTopology.Count == 0)
-		{
-			return null;
-		}
-		DateTime dateTime = ParseThreeDdfaCapturedAtUtc(response.CapturedAtUtc);
-		if (sampleCapturedAtUtc != default(DateTime) && dateTime != default(DateTime) && Math.Abs((dateTime - sampleCapturedAtUtc).TotalMilliseconds) > 1800.0)
-		{
-			return null;
-		}
-		double reconstructionConfidencePercent = RoundThreeDdfaValue(response.ReconstructionConfidencePercent);
-		return new AvatarReconstructionSnapshot
-		{
-			BackendId = "3ddfa-v2-onnx-reconstruction",
-			RequestId = response.RequestId,
-			CapturedAtUtc = ((dateTime == default(DateTime)) ? sampleCapturedAtUtc : dateTime),
-			Source = response.Backend,
-			DenseVertexCount = response.DenseVertexCount,
-			DenseSampleStride = response.DenseSampleStride,
-			ReconstructionConfidencePercent = reconstructionConfidencePercent,
-			ARotationAroundXDegrees = RoundThreeDdfaValue(response.Pose.ARotationAroundXDegrees),
-			BRotationAroundYDegrees = RoundThreeDdfaValue(response.Pose.BRotationAroundYDegrees),
-			CRotationAroundZDegrees = RoundThreeDdfaValue(response.Pose.CRotationAroundZDegrees),
-			PoseSource = response.Pose.Source,
-			TrustDecision = response.TrustDecision,
-			Vertices = response.DenseVertices.Select((ThreeDdfaOnnxSidecarVertex vertex) => new FaceMeshLandmarkPoint
-			{
-				Index = vertex.Index,
-				X = RoundThreeDdfaValue(vertex.X),
-				Y = RoundThreeDdfaValue(vertex.Y),
-				Z = RoundThreeDdfaValue(vertex.Z)
-			}).ToList(),
-			CanonicalIdentityVertices = response.CanonicalIdentityVertices.Select((ThreeDdfaOnnxSidecarVertex vertex) => new FaceMeshLandmarkPoint
-			{
-				Index = vertex.Index,
-				X = RoundThreeDdfaValue(vertex.X),
-				Y = RoundThreeDdfaValue(vertex.Y),
-				Z = RoundThreeDdfaValue(vertex.Z)
-			}).ToList(),
-			TopologyEdges = orCreateThreeDdfaTopology,
-			SparseLandmarks = response.SparseLandmarks.Select((ThreeDdfaOnnxSidecarVertex vertex) => new FaceMeshLandmarkPoint
-			{
-				Index = vertex.Index,
-				X = RoundThreeDdfaValue(vertex.X),
-				Y = RoundThreeDdfaValue(vertex.Y),
-				Z = RoundThreeDdfaValue(vertex.Z)
-			}).ToList(),
-			CameraMatrixCoefficients = response.CameraMatrixCoefficients.Select(RoundThreeDdfaValue).ToList(),
-			ShapeCoefficients = response.ShapeCoefficients.Select(RoundThreeDdfaValue).ToList(),
-			ExpressionCoefficients = response.ExpressionCoefficients.Select(RoundThreeDdfaValue).ToList(),
-			Warnings = response.Warnings
-		};
+		return capturedAtTimestamp == 0L
+			|| Stopwatch.GetElapsedTime(capturedAtTimestamp) > MaximumLiveAwarenessFrameAge;
 	}
 
-	private static double RoundThreeDdfaValue(double value)
+	private void ExpireLiveAwarenessState(long expiredFrameTimestamp)
 	{
-		if (!double.IsFinite(value))
+		long currentTimestamp = Volatile.Read(ref _lastFaceFeatureLockTimestamp);
+		if (currentTimestamp != 0L
+			&& currentTimestamp != expiredFrameTimestamp
+			&& !IsLiveAwarenessFrameExpired(currentTimestamp))
 		{
-			return 0.0;
+			return;
 		}
-		return Math.Round(value, 6, MidpointRounding.AwayFromZero);
+		ClearLiveFaceState();
+		UpdateDirectX12TrackingOverlay(PreviewTrackingOverlay.Empty);
 	}
 
-	private static DateTime ParseThreeDdfaCapturedAtUtc(string capturedAtUtc)
+	private void ClearLiveFaceState()
 	{
-		if (!DateTime.TryParse(capturedAtUtc, CultureInfo.InvariantCulture, DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal, out var result))
-		{
-			return default(DateTime);
-		}
-		return result;
-	}
-
-	private bool HasUsableFaceFeatureLock(DateTime now)
-	{
-		if (_currentFaceFeatureDetection.HasFace)
-		{
-			return (now - _lastFaceFeatureLockAt).TotalSeconds <= 4.0;
-		}
-		return false;
+		Volatile.Write(ref _lastFaceFeatureLockTimestamp, 0L);
+		_currentFaceFeatureDetection = FaceFeatureDetection.None;
+		_currentFaceLandmarkFrame = FaceLandmarkFrame.None;
+		_currentFaceLandmarkMetrics = FaceLandmarkMetrics.None;
+		_currentFaceLockStabilityAnalysis = FaceLockStabilityAnalysis.Waiting;
 	}
 
 	private void ResetLandmarkTracking()
 	{
+		Interlocked.Increment(ref _faceAnalysisGeneration);
 		_currentFaceLandmarkFrame = FaceLandmarkFrame.None;
 		_currentFaceLandmarkMetrics = FaceLandmarkMetrics.None;
 		_currentFaceLockStabilityAnalysis = FaceLockStabilityAnalysis.Waiting;
-		_currentFaceFrameGeometry = FaceFrameGeometry.None;
 		_currentAvatarCaptureQuality = AvatarCaptureQualityAssessment.Waiting;
 		lock (_faceLandmarkTrackerLock)
 		{
 			_faceLandmarkTracker?.Reset();
 		}
-		_faceLandmarkReconstructor.Reset();
-		_faceLandmarkMetricCalculator.Reset();
-		_faceLockStabilityAnalyzer.Reset();
-	}
-
-	private void UpdateAvatarCaptureState(DateTime utcNow)
-	{
-		if (!IsAvatarUserLoggedIn)
+		lock (_faceAnalysisStateLock)
 		{
-			ResetAvatarCaptureGate("no avatar user logged in; capture stopped");
-			UpdateAvatarCaptureQuality();
-			UpdateAvatarLearningStatusUi();
-			return;
-		}
-		if (!_avatarLearningRequested && !IsStandardModelBuildModeActive)
-		{
-			ResetAvatarCaptureGate("avatar capture stopped by user");
-			UpdateAvatarCaptureQuality();
-			UpdateAvatarLearningStatusUi();
-			return;
-		}
-		ResetAvatarCaptureGate("capture-quality preflight", accepted: true);
-		AvatarCaptureQualityAssessment avatarCaptureQualityAssessment = AnalyzeAvatarCaptureQuality();
-		if (!avatarCaptureQualityAssessment.CanCollectMeasurements)
-		{
-			ResetAvatarCaptureGate("capture quality gate: " + avatarCaptureQualityAssessment.PrimaryReason);
-			_currentAvatarCaptureQuality = avatarCaptureQualityAssessment;
-			UpdateAvatarLearningStatusUi();
-		}
-		else
-		{
-			ResetAvatarCaptureGate(IsStandardModelBuildModeActive ? ("human Standard Model builder active; " + GetFaceBoxSystemDisplayName() + " face tracking remains live") : (ActiveAvatarReconstructionName + " avatar capture active; " + GetFaceBoxSystemDisplayName() + " face tracking remains live"), accepted: true);
-			_currentAvatarCaptureQuality = avatarCaptureQualityAssessment;
-			UpdateAvatarLearningStatusUi();
+			_faceLandmarkReconstructor.Reset();
+			_faceLandmarkMetricCalculator.Reset();
+			_faceLockStabilityAnalyzer.Reset();
 		}
 	}
 
-	private void UpdateAvatarCaptureQuality()
+	private void UpdateAvatarCaptureState()
 	{
-		_currentAvatarCaptureQuality = AnalyzeAvatarCaptureQuality();
+		UpdateAvatarLearningStatusUiIfDue();
 	}
 
 	private AvatarCaptureQualityAssessment AnalyzeAvatarCaptureQuality()
@@ -4766,282 +3655,8 @@ public partial class MainWindow : Window, IComponentConnector
 			Metrics = _currentFaceLandmarkMetrics,
 			Stability = _currentFaceLockStabilityAnalysis,
 			UserLoggedIn = IsAvatarUserLoggedIn,
-			AvatarCaptureRequested = _avatarLearningRequested,
-			CaptureGateAccepted = _avatarCaptureGateAccepted,
-			CaptureGateReason = _avatarCaptureGateReason
+			AvatarCaptureRequested = _avatarLearningRequested
 		});
-	}
-
-	private AvatarReportSnapshot CreateAvatarReportSnapshot(string folder)
-	{
-		AvatarLearningState avatarLearningState = GetAvatarLearningState();
-		bool userLoggedIn = IsAvatarUserLoggedIn && !string.IsNullOrWhiteSpace(CurrentAvatarProfileId);
-		return new AvatarReportSnapshot(folder, CurrentAvatarProfileId, CurrentAvatarProfileDisplayName, CloneCaptureQuality(_currentAvatarCaptureQuality), userLoggedIn, _avatarLearningRequested, avatarLearningState.Active, avatarLearningState.Title, avatarLearningState.Detail, _currentFaceFrameGeometry, CreateFaceReconstructionLaneStatus());
-	}
-
-	private static AvatarCaptureQualityAssessment CloneCaptureQuality(AvatarCaptureQualityAssessment value)
-	{
-		return new AvatarCaptureQualityAssessment
-		{
-			Label = value.Label,
-			ScorePercent = value.ScorePercent,
-			CanCollectMeasurements = value.CanCollectMeasurements,
-			StrongEnoughForAvatarLearning = value.StrongEnoughForAvatarLearning,
-			PrimaryReason = value.PrimaryReason,
-			StatusLine = value.StatusLine,
-			CameraModeScorePercent = value.CameraModeScorePercent,
-			FaceScaleScorePercent = value.FaceScaleScorePercent,
-			EyeEvidenceScorePercent = value.EyeEvidenceScorePercent,
-			MouthEvidenceScorePercent = value.MouthEvidenceScorePercent,
-			StabilityScorePercent = value.StabilityScorePercent,
-			GlassesRiskScorePercent = value.GlassesRiskScorePercent,
-			StorageScorePercent = value.StorageScorePercent,
-			FaceWidthPercent = value.FaceWidthPercent,
-			FaceHeightPercent = value.FaceHeightPercent,
-			Issues = value.Issues.ToList(),
-			Suggestions = value.Suggestions.ToList()
-		};
-	}
-
-	private void QueueAvatarReportSave(AvatarReportSnapshot snapshot)
-	{
-		lock (_personalFaceReportWriterLock)
-		{
-			_pendingAvatarReportSnapshot = snapshot;
-			Task avatarReportWriterTask = _avatarReportWriterTask;
-			if ((avatarReportWriterTask == null || avatarReportWriterTask.IsCompleted) && !_avatarLearningRequested && !IsStandardModelBuildModeActive && !_avatarObservationStorageService.IsBusy)
-			{
-				_avatarReportWriterTask = Task.Run((Action)ProcessAvatarReportWriterQueue);
-			}
-		}
-	}
-
-	private void StartPendingAvatarReportWriterIfPossible()
-	{
-		lock (_personalFaceReportWriterLock)
-		{
-			if ((object)_pendingAvatarReportSnapshot != null)
-			{
-				Task avatarReportWriterTask = _avatarReportWriterTask;
-				if ((avatarReportWriterTask == null || avatarReportWriterTask.IsCompleted) && !_avatarLearningRequested && !IsStandardModelBuildModeActive && !_avatarObservationStorageService.IsBusy)
-				{
-					_avatarReportWriterTask = Task.Run((Action)ProcessAvatarReportWriterQueue);
-				}
-			}
-		}
-	}
-
-	private void ProcessAvatarReportWriterQueue()
-	{
-		while (true)
-		{
-			AvatarReportSnapshot pendingAvatarReportSnapshot;
-			lock (_personalFaceReportWriterLock)
-			{
-				pendingAvatarReportSnapshot = _pendingAvatarReportSnapshot;
-				_pendingAvatarReportSnapshot = null;
-				if ((object)pendingAvatarReportSnapshot == null)
-				{
-					_avatarReportWriterTask = null;
-					break;
-				}
-			}
-			try
-			{
-				AvatarReportSaveResult result = WriteAvatarReports(pendingAvatarReportSnapshot);
-				base.Dispatcher.BeginInvoke((Action)delegate
-				{
-					ApplyAvatarReportSaveResult(result);
-				}, DispatcherPriority.Background);
-			}
-			catch (Exception ex)
-			{
-				Exception ex2 = ex;
-				Exception ex3 = ex2;
-				base.Dispatcher.BeginInvoke((Action)delegate
-				{
-					if (!_isClosing)
-					{
-						SetStatus("Live Avatar System save paused: " + ex3.Message);
-					}
-				}, DispatcherPriority.Background);
-			}
-		}
-	}
-
-	private AvatarReportSaveResult WriteAvatarReports(AvatarReportSnapshot snapshot, AvatarObservationBatch? acceptedBatch = null, bool forceFullModelRebuild = false)
-	{
-		lock (_avatarReportStorageLock)
-		{
-			return WriteAvatarReportsCore(snapshot, acceptedBatch, forceFullModelRebuild);
-		}
-	}
-
-	private AvatarReportSaveResult WriteAvatarReportsCore(AvatarReportSnapshot snapshot, AvatarObservationBatch? acceptedBatch, bool forceFullModelRebuild)
-	{
-		Directory.CreateDirectory(snapshot.Folder);
-		AvatarObservationDataset avatarObservationDataset = _avatarObservationRepository.ReadDataset(snapshot.Folder, snapshot.SubjectId, snapshot.SubjectDisplayName, includeDenseTopology: true, ActiveAvatarReconstructionBackendId);
-		AvatarModel avatarModel = _avatarModelStore.Read(snapshot.Folder);
-		bool flag = avatarModel?.SourceObservationRevision != avatarObservationDataset.Revision;
-		AvatarModel avatarModel2 = avatarModel;
-		bool flag2 = avatarModel2 != null && string.Equals(avatarModel2.SchemaVersion, "avatar-model-v9-multiframe-identity-mapping", StringComparison.Ordinal);
-		AvatarModelHistoryReport avatarModelHistoryReport;
-		if (forceFullModelRebuild)
-		{
-			avatarModel2 = AvatarModelBuilder.Build(avatarObservationDataset, _avatarObservationRepository);
-			if (flag2 && avatarModel.Identity.MappedDenseVertices.Count > 0)
-			{
-				avatarModel2 = AvatarModelBuilder.ApplyIdentityMapping(avatarModel2, CreatePreservedIdentityMapping(avatarModel.Identity));
-			}
-			avatarModel2 = ApplyLatestRecurrentDecaIdentity(avatarModel2, avatarObservationDataset, acceptedBatch);
-			AvatarModel previousModel = (flag2 ? avatarModel : null);
-			avatarModelHistoryReport = _avatarModelHistoryStore.RecordAndWrite(snapshot.Folder, avatarObservationDataset, _avatarObservationRepository, avatarModel2, previousModel);
-			_avatarModelStore.Write(snapshot.Folder, avatarModel2);
-		}
-		else if (flag && (object)acceptedBatch != null)
-		{
-			AvatarModel previousModel2 = (flag2 ? avatarModel : AvatarModelBuilder.CreateWaiting(avatarObservationDataset));
-			avatarModel2 = AvatarModelBuilder.UpdateIncrementally(avatarObservationDataset, _avatarObservationRepository, previousModel2, acceptedBatch.Results);
-			avatarModel2 = ApplyLatestRecurrentDecaIdentity(avatarModel2, avatarObservationDataset, acceptedBatch);
-			List<AvatarObservation> observationsToAudit = (from result in acceptedBatch.Results
-				where (object)result.AcceptedObservation != null
-				select result.AcceptedObservation).ToList();
-			avatarModelHistoryReport = _avatarModelHistoryStore.RecordAndWrite(snapshot.Folder, avatarObservationDataset, _avatarObservationRepository, avatarModel2, flag2 ? avatarModel : null, observationsToAudit);
-			_avatarModelStore.Write(snapshot.Folder, avatarModel2);
-		}
-		else if (!flag2)
-		{
-			avatarModel2 = AvatarModelBuilder.CreateWaiting(avatarObservationDataset);
-			avatarModelHistoryReport = _avatarModelHistoryStore.ReadReport(snapshot.Folder);
-			_avatarModelStore.Write(snapshot.Folder, avatarModel2);
-		}
-		else if ((object)acceptedBatch != null)
-		{
-			avatarModel2 = ApplyLatestRecurrentDecaIdentity(avatarModel, avatarObservationDataset, acceptedBatch);
-			avatarModelHistoryReport = _avatarModelHistoryStore.RecordAndWrite(snapshot.Folder, avatarObservationDataset, _avatarObservationRepository, avatarModel2, avatarModel, Array.Empty<AvatarObservation>());
-			_avatarModelStore.Write(snapshot.Folder, avatarModel2);
-		}
-		else
-		{
-			avatarModel2 = avatarModel;
-			avatarModelHistoryReport = _avatarModelHistoryStore.ReadReport(snapshot.Folder);
-			_avatarModelStore.EnsureViewer(snapshot.Folder, avatarModel2);
-		}
-		AvatarSystemDashboard dashboard = new AvatarSystemDashboard
-		{
-			SubjectId = snapshot.SubjectId,
-			SubjectDisplayName = snapshot.SubjectDisplayName,
-			UserLoggedIn = snapshot.UserLoggedIn,
-			AvatarCaptureRequested = snapshot.AvatarCaptureRequested,
-			AvatarCaptureActive = snapshot.AvatarCaptureActive,
-			AvatarCaptureStatus = snapshot.AvatarCaptureStatus,
-			AvatarCaptureCorrection = snapshot.AvatarCaptureCorrection,
-			CurrentCaptureQuality = snapshot.CaptureQuality,
-			CurrentFaceFrameGeometry = snapshot.FaceFrameGeometry,
-			ReconstructionLane = snapshot.ReconstructionLane,
-			FastTrackingSummary = snapshot.ReconstructionLane.FastTrackingLaneName + " supplies live face, eye, jaw, brow, mouth, overlay, and capture measurements.",
-			AvatarModelStatus = avatarModel2.Status,
-			RetainedAvatarObservationCount = avatarObservationDataset.Observations.Count,
-			StorageRevision = avatarObservationDataset.Revision,
-			LifetimeAcceptedObservationCount = avatarObservationDataset.AcceptedObservationCount,
-			LifetimeRejectedObservationCount = avatarObservationDataset.RejectedObservationCount,
-			AvatarModelConfidencePercent = avatarModel2.Identity.ConfidencePercent,
-			AvatarModelCoveragePercent = avatarModel2.PoseCoverage.CoveragePercent,
-			AvatarModelCoverageSummary = avatarModel2.PoseCoverage.Summary,
-			AvatarModelConvergencePercent = avatarModel2.Convergence.ScorePercent,
-			AvatarModelConvergenceLabel = avatarModel2.Convergence.Label,
-			AvatarIdentityMappingStatus = avatarModel2.Identity.MappingStatus,
-			AvatarIdentityMappingLandmarkRmsePercent = avatarModel2.Identity.MappingFinalLandmarkRmsePercent,
-			AvatarIdentityMappingImprovementPercent = avatarModel2.Identity.MappingImprovementPercent,
-			AvatarModelHtmlPath = AvatarModelStore.GetHtmlPath(snapshot.Folder),
-			AvatarModelAuditStatus = avatarModelHistoryReport.Latest.Status,
-			AvatarModelAuditSummary = avatarModelHistoryReport.Latest.Summary,
-			AvatarModelAuditHtmlPath = AvatarModelHistoryStore.GetHtmlPath(snapshot.Folder)
-		};
-		return new AvatarReportSaveResult(AvatarSystemDashboardStore.GetHtmlPath(_avatarSystemDashboardStore.Write(snapshot.Folder, dashboard)), AvatarModelStore.GetHtmlPath(snapshot.Folder));
-	}
-
-	private AvatarModel ApplyLatestRecurrentDecaIdentity(AvatarModel model, AvatarObservationDataset observationSet, AvatarObservationBatch? acceptedBatch)
-	{
-		if (!IsDecaAvatarReconstructionActive || !string.Equals(ActiveAvatarReconstructionBackendId, "deca-flame-recurrent-v4", StringComparison.Ordinal))
-		{
-			return model;
-		}
-		AvatarReconstructionSnapshot avatarReconstructionSnapshot = (from capture in acceptedBatch?.Candidates
-			where string.Equals(capture.Reconstruction.BackendId, "deca-flame-recurrent-v4", StringComparison.Ordinal)
-			select capture.Reconstruction into reconstruction
-			where reconstruction.ShapeCoefficients.Count > 0 && reconstruction.CanonicalIdentityVertices.Count >= 1000
-			select reconstruction).MaxBy((AvatarReconstructionSnapshot reconstruction) => reconstruction.CapturedAtUtc);
-		IReadOnlyList<double> shapeCoefficients;
-		IReadOnlyList<FaceMeshLandmarkPoint> canonicalIdentityVertices;
-		DateTime capturedAtUtc;
-		if (avatarReconstructionSnapshot != null)
-		{
-			shapeCoefficients = avatarReconstructionSnapshot.ShapeCoefficients;
-			canonicalIdentityVertices = avatarReconstructionSnapshot.CanonicalIdentityVertices;
-			capturedAtUtc = avatarReconstructionSnapshot.CapturedAtUtc;
-		}
-		else
-		{
-			AvatarObservation avatarObservation = observationSet.Observations.Where((AvatarObservation observation) => string.Equals(observation.BackendId, "deca-flame-recurrent-v4", StringComparison.Ordinal)).MaxBy((AvatarObservation observation) => observation.CapturedAtUtc);
-			if ((object)avatarObservation == null)
-			{
-				return model;
-			}
-			try
-			{
-				AvatarObservation avatarObservation2 = _avatarObservationRepository.LoadObservation(observationSet, avatarObservation);
-				shapeCoefficients = avatarObservation2.ShapeCoefficients;
-				canonicalIdentityVertices = avatarObservation2.CanonicalIdentityVertices;
-				capturedAtUtc = avatarObservation2.CapturedAtUtc;
-			}
-			catch (Exception ex) when (((ex is IOException || ex is InvalidDataException) ? 1 : 0) != 0)
-			{
-				return model;
-			}
-		}
-		if (shapeCoefficients.Count == 0 || canonicalIdentityVertices.Count < 1000)
-		{
-			return model;
-		}
-		return AvatarModelBuilder.ApplyIdentityMapping(model, new AvatarIdentityMappingUpdate
-		{
-			Accepted = true,
-			Status = $"Recurrent DECA/FLAME model from {capturedAtUtc.ToLocalTime():g}; model[n-1] was the exact input seed and no coefficient averaging was applied.",
-			UpdatedAtUtc = capturedAtUtc,
-			FrameCount = 1,
-			IterationCount = 0,
-			ShapeCoefficients = shapeCoefficients,
-			CanonicalIdentityVertices = canonicalIdentityVertices
-		});
-	}
-
-	private static AvatarIdentityMappingUpdate CreatePreservedIdentityMapping(AvatarIdentityModel identity)
-	{
-		return new AvatarIdentityMappingUpdate
-		{
-			Accepted = true,
-			Status = identity.MappingStatus,
-			UpdatedAtUtc = (identity.MappingUpdatedAtUtc ?? DateTime.UtcNow),
-			FrameCount = identity.MappingFrameCount,
-			IterationCount = identity.MappingIterationCount,
-			InitialLandmarkRmsePercent = identity.MappingInitialLandmarkRmsePercent,
-			FinalLandmarkRmsePercent = identity.MappingFinalLandmarkRmsePercent,
-			ImprovementPercent = identity.MappingImprovementPercent,
-			GenericIdentityDisplacementPercent = identity.GenericIdentityDisplacementPercent,
-			ShapeCoefficients = identity.MappedShapeCoefficients,
-			CanonicalIdentityVertices = identity.MappedDenseVertices
-		};
-	}
-
-	private void ApplyAvatarReportSaveResult(AvatarReportSaveResult result)
-	{
-		if (!_isClosing)
-		{
-			_avatarSystemDashboardPath = result.AvatarSystemDashboardPath;
-			_avatarModelHtmlPath = result.AvatarModelHtmlPath;
-			UpdateAvatarLearningStatusUi();
-		}
 	}
 
 	private static void OpenLocalFile(string path)
@@ -5055,29 +3670,6 @@ public partial class MainWindow : Window, IComponentConnector
 			FileName = path,
 			UseShellExecute = true
 		});
-	}
-
-	private static void OpenWebAddress(Uri address)
-	{
-		Process.Start(new ProcessStartInfo
-		{
-			FileName = address.AbsoluteUri,
-			UseShellExecute = true
-		});
-	}
-
-	private static string GetAvatarSystemDashboardHtmlPath(string folder)
-	{
-		return AvatarSystemDashboardStore.GetHtmlPath(System.IO.Path.Combine(folder, "avatar_system.json"));
-	}
-
-	private static void EnsureAvatarSystemPlaceholder(string path)
-	{
-		if (!File.Exists(path))
-		{
-			string contents = "<!doctype html>\r\n<html lang=\"en\">\r\n<head>\r\n<meta charset=\"utf-8\">\r\n<meta http-equiv=\"refresh\" content=\"2\">\r\n<title>Avatar System</title>\r\n<style>\r\n:root{color-scheme:dark}body{margin:0;background:#080d12;color:#f5f8fb;font-family:Segoe UI,Arial,sans-serif}main{max-width:860px;margin:0 auto;padding:28px}section{border:1px solid #243545;background:#101820;padding:18px}.muted{color:#b9d7ef}\r\n</style>\r\n</head>\r\n<body>\r\n<main>\r\n<section>\r\n<h1>Avatar System</h1>\r\n<p class=\"muted\">Preparing the live report. This page refreshes automatically while the background writer saves the latest measurement snapshot.</p>\r\n</section>\r\n</main>\r\n</body>\r\n</html>";
-			AtomicTextFileWriter.WriteAllText(path, contents, Encoding.UTF8);
-		}
 	}
 
 	private void OpenDataFolderClicked(object sender, RoutedEventArgs e)
@@ -5102,11 +3694,8 @@ public partial class MainWindow : Window, IComponentConnector
 			LogOutAvatarUser(announce: false);
 		}
 		_outputFolder = fullPath;
-		_visionBenchmarkRecorder.SetOutputRoot(_outputFolder);
 		SaveOutputFolderPointer(_outputFolder);
 		InitializeAvatarProfiles(promptForStartupUser: false);
-		_poseAlignmentAuditor.SetOutputRoot(GetAvatarDataFolder());
-		_mediaPipeConvergenceAuditor.SetOutputRoot(GetAvatarDataFolder());
 		string value = PrepareAvatarCaptureFolder(showStatus: false);
 		string value2 = (isAvatarUserLoggedIn ? " The previous avatar user was logged out." : "");
 		string text = $"Avatar data folder set: {_outputFolder}.{value2} {value}".Trim();
@@ -5137,105 +3726,6 @@ public partial class MainWindow : Window, IComponentConnector
 		{
 			SetStatus("Could not open the dual-camera workspace: " + ex.Message);
 		}
-	}
-
-	private void OpenPoseAlignmentAuditClicked(object sender, RoutedEventArgs e)
-	{
-		try
-		{
-			_poseAlignmentAuditor.EnsureReport();
-			string htmlPath = _poseAlignmentAuditor.GetHtmlPath();
-			if (string.IsNullOrWhiteSpace(htmlPath))
-			{
-				SetStatus("A/B/C alignment audit is waiting for a configured data folder.");
-				return;
-			}
-			OpenLocalFile(htmlPath);
-			SetStatus("Opened A/B/C alignment audit: " + htmlPath);
-		}
-		catch (Exception ex)
-		{
-			SetStatus("Could not open A/B/C alignment audit: " + ex.Message);
-		}
-	}
-
-	private async void OpenMediaPipeConvergenceAuditClicked(object sender, RoutedEventArgs e)
-	{
-		try
-		{
-			await Task.Run((Action)_mediaPipeConvergenceAuditor.EnsureReport);
-			string htmlPath = _mediaPipeConvergenceAuditor.GetHtmlPath();
-			if (string.IsNullOrWhiteSpace(htmlPath))
-			{
-				SetStatus("MediaPipe convergence audit is waiting for a configured data folder.");
-				return;
-			}
-			OpenLocalFile(htmlPath);
-			SetStatus("Opened MediaPipe convergence audit: " + htmlPath);
-		}
-		catch (Exception ex)
-		{
-			SetStatus("Could not open MediaPipe convergence audit: " + ex.Message);
-		}
-	}
-
-	private async void StartNewMediaPipeConvergenceAuditClicked(object sender, RoutedEventArgs e)
-	{
-		try
-		{
-			await Task.Run(delegate
-			{
-				_mediaPipeConvergenceAuditor.StartNewSession("human-started controlled run");
-			});
-			SetStatus("Started a clean MediaPipe convergence audit. Tracker and Avatar Builder temporal state were preserved.");
-		}
-		catch (Exception ex)
-		{
-			SetStatus("Could not start a new MediaPipe convergence audit: " + ex.Message);
-		}
-	}
-
-	private void MarkMediaPipeConvergenceObservationClicked(object sender, RoutedEventArgs e)
-	{
-		_mediaPipeConvergenceAuditor.MarkEvent("Human observation", "User marked visible tracking behavior for later comparison.");
-		SetStatus("Marked the current moment in the MediaPipe convergence audit.");
-	}
-
-	private async void ResetMediaPipeVideoTrackerClicked(object sender, RoutedEventArgs e)
-	{
-		if (_selectedFaceBoxSystem != FaceBoxSystem.MediaPipe)
-		{
-			SetStatus("Select MediaPipe as the Face Box System before resetting its VIDEO tracker.");
-			return;
-		}
-		_mediaPipeConvergenceAuditor.MarkEvent("MediaPipe tracker reset started", "Avatar Builder temporal reconstruction was intentionally preserved.");
-		SetStatus("Resetting only the MediaPipe VIDEO tracker...");
-		try
-		{
-			await Task.Run(delegate
-			{
-				lock (_faceLandmarkTrackerLock)
-				{
-					_faceLandmarkTracker?.Reset();
-				}
-			});
-			_mediaPipeConvergenceAuditor.MarkEvent("MediaPipe tracker reset completed", "The next frame starts a fresh MediaPipe VIDEO tracking session.");
-			SetStatus("MediaPipe VIDEO tracker reset. Avatar Builder temporal reconstruction was preserved.");
-		}
-		catch (Exception ex)
-		{
-			_mediaPipeConvergenceAuditor.MarkEvent("MediaPipe tracker reset failed", ex.Message);
-			SetStatus("Could not reset the MediaPipe VIDEO tracker: " + ex.Message);
-		}
-	}
-
-	private void ResetAvatarTemporalLayerClicked(object sender, RoutedEventArgs e)
-	{
-		_mediaPipeConvergenceAuditor.MarkEvent("Avatar Builder temporal reset", "MediaPipe VIDEO tracker was intentionally preserved.");
-		_faceLandmarkReconstructor.Reset();
-		_faceLandmarkMetricCalculator.Reset();
-		_faceLockStabilityAnalyzer.Reset();
-		SetStatus("Avatar Builder temporal reconstruction and metric history reset. MediaPipe VIDEO tracker was preserved.");
 	}
 
 	private FaceCueGuideLayout GetFaceCueLayout()
@@ -5439,11 +3929,6 @@ public partial class MainWindow : Window, IComponentConnector
 		try
 		{
 			Directory.CreateDirectory(avatarDataFolder);
-			ResetAvatarCaptureGate("avatar capture folder ready; " + ActiveAvatarReconstructionName + " owns avatar reconstruction");
-			_avatarSystemDashboardPath = GetAvatarSystemDashboardHtmlPath(avatarDataFolder);
-			_avatarModelHtmlPath = AvatarModelStore.GetHtmlPath(avatarDataFolder);
-			QueueAvatarReportSave(CreateAvatarReportSnapshot(avatarDataFolder));
-			UpdateAvatarCaptureQuality();
 			UpdateAvatarLearningStatusUi();
 			string text = $"Avatar capture folder ready: {avatarDataFolder}. {ActiveAvatarReconstructionName} stores dense reconstruction review data; {GetFaceBoxSystemDisplayName()} eye/jaw/brow tracking remains live.";
 			if (showStatus)
@@ -5492,8 +3977,21 @@ public partial class MainWindow : Window, IComponentConnector
 
 	private void SetStatus(string status)
 	{
-		TopStatusText.Text = status;
-		FooterText.Text = status;
+		if (!string.Equals(TopStatusText.Text, status, StringComparison.Ordinal))
+		{
+			TopStatusText.Text = status;
+		}
+		if (!string.Equals(FooterText.Text, status, StringComparison.Ordinal))
+		{
+			FooterText.Text = status;
+		}
+	}
+
+	private static BitmapSource CreateEmptyBgraBitmap()
+	{
+		BitmapSource bitmap = BitmapSource.Create(1, 1, 96.0, 96.0, PixelFormats.Bgra32, null, new byte[4] { 0, 0, 0, 255 }, 4);
+		bitmap.Freeze();
+		return bitmap;
 	}
 
 	private void DrawLiveWireframePreview()
@@ -5517,76 +4015,178 @@ public partial class MainWindow : Window, IComponentConnector
 
 	private void DrawMediaPipeLiveWireframeView(FaceLandmarkFrame frame, FaceLandmarkMetrics metrics, Rect rect, string title)
 	{
-		IReadOnlyDictionary<int, LiveWireframeProjectedPoint> readOnlyDictionary = BuildCameraRelativeLiveWireframeProjection(frame.DenseMeshPoints, rect);
-		SolidColorBrush brush = CreateFrozenBrush(47, 108, 143, 88);
-		(int, int)[] tessellationEdges = MediaPipeFaceMeshTopology.TessellationEdges;
-		for (int i = 0; i < tessellationEdges.Length; i++)
-		{
-			var (fromIndex, toIndex) = tessellationEdges[i];
-			DrawWireframeEdge(fromIndex, toIndex, readOnlyDictionary, brush, 0.42);
-		}
-		PreviewOverlayIndexedPath[] array = CreateMediaPipePreviewMeshFeaturePaths(frame.DenseMeshPoints);
-		foreach (PreviewOverlayIndexedPath previewOverlayIndexedPath in array)
-		{
-			DrawWireframePath(previewOverlayIndexedPath.PointIndices, previewOverlayIndexedPath.Closed, readOnlyDictionary, RoleName(previewOverlayIndexedPath.Role));
-		}
-		SolidColorBrush fill = CreateFrozenBrush(220, 239, byte.MaxValue, 184);
-		foreach (FaceMeshLandmarkPoint denseMeshPoint in frame.DenseMeshPoints)
-		{
-			if (readOnlyDictionary.TryGetValue(denseMeshPoint.Index, out var value))
-			{
-				double num = (((uint)denseMeshPoint.Index < (uint)MediaPipePreviewMeshFeaturePointMask.Length && MediaPipePreviewMeshFeaturePointMask[denseMeshPoint.Index]) ? 3.2 : 2.0);
-				Ellipse element = new Ellipse
-				{
-					Width = num,
-					Height = num,
-					Fill = fill,
-					IsHitTestVisible = false
-				};
-				Canvas.SetLeft(element, value.X - num / 2.0);
-				Canvas.SetTop(element, value.Y - num / 2.0);
-				LiveWireframeCanvas.Children.Add(element);
-			}
-		}
-		AvatarReconstructionSnapshot currentAvatarReconstructionSnapshot = _currentAvatarReconstructionSnapshot;
-		string value2 = ((currentAvatarReconstructionSnapshot != null) ? $"{currentAvatarReconstructionSnapshot.Source} A/B/C {currentAvatarReconstructionSnapshot.ARotationAroundXDegrees:0.#}/{currentAvatarReconstructionSnapshot.BRotationAroundYDegrees:0.#}/{currentAvatarReconstructionSnapshot.CRotationAroundZDegrees:0.#} deg" : (ActiveAvatarReconstructionName + " pose waiting"));
+		DrawMediaPipeWireframe(
+			LiveWireframeCanvas,
+			frame.DenseMeshPoints,
+			rect,
+			LiveWireframeMeshBrush,
+			0.42,
+			FaceMeshOverlayPointBrush);
+		string value2 = (_currentThreeDdfaOnnxResponse.Ok && _currentThreeDdfaOnnxResponse.HasFace)
+			? $"{_currentThreeDdfaOnnxResponse.Backend} A/B/C {_currentThreeDdfaOnnxResponse.Pose.ARotationAroundXDegrees:0.#}/{_currentThreeDdfaOnnxResponse.Pose.BRotationAroundYDegrees:0.#}/{_currentThreeDdfaOnnxResponse.Pose.CRotationAroundZDegrees:0.#} deg"
+			: "MediaPipe geometry tracking";
 		AddWireframeText($"{title}: {frame.DenseMeshPoints.Count} points, {MediaPipeFaceMeshTopology.TessellationEdges.Length} surface edges", $"Camera-relative MediaPipe wireframe. Quality {metrics.OverallMeasurementQualityPercent:0}% | eyes {metrics.EyeMeasurementQualityPercent:0}% | brows {metrics.BrowMeasurementQualityPercent:0}% ({FormatRatioPercent(metrics.AverageBrowHeightRatio)}) | mouth {metrics.MouthMeasurementQualityPercent:0}% | {value2}", rect.X + 18.0, rect.Y + 18.0);
 	}
 
-	private void DrawWireframeEdge(int fromIndex, int toIndex, IReadOnlyDictionary<int, LiveWireframeProjectedPoint> points, Brush brush, double thickness)
+	private static void DrawMediaPipeWireframe(
+		Canvas canvas,
+		IReadOnlyList<FaceMeshLandmarkPoint> denseMeshPoints,
+		Rect display,
+		Brush meshBrush,
+		double meshThickness,
+		Brush pointBrush)
 	{
-		if (points.TryGetValue(fromIndex, out LiveWireframeProjectedPoint value) && points.TryGetValue(toIndex, out LiveWireframeProjectedPoint value2))
+		int count = denseMeshPoints.Count;
+		if (count == 0)
 		{
-			Line element = new Line
+			return;
+		}
+		Point[] projectedPoints = ArrayPool<Point>.Shared.Rent(count);
+		bool[] validPoints = ArrayPool<bool>.Shared.Rent(count);
+		Array.Clear(validPoints, 0, count);
+		try
+		{
+			for (int i = 0; i < count; i++)
 			{
-				X1 = value.X,
-				Y1 = value.Y,
-				X2 = value2.X,
-				Y2 = value2.Y,
-				Stroke = brush,
-				StrokeThickness = thickness,
+				FaceMeshLandmarkPoint point = denseMeshPoints[i];
+				if ((uint)point.Index >= (uint)count || !double.IsFinite(point.X) || !double.IsFinite(point.Y))
+				{
+					continue;
+				}
+				projectedPoints[point.Index] = new Point(
+					display.Left + Math.Clamp(point.X, 0.0, 1.0) * display.Width,
+					display.Top + Math.Clamp(point.Y, 0.0, 1.0) * display.Height);
+				validPoints[point.Index] = true;
+			}
+			StreamGeometry meshGeometry = new StreamGeometry();
+			using (StreamGeometryContext context = meshGeometry.Open())
+			{
+				PreviewOverlayEdge[] edges = MediaPipePreviewMeshEdges;
+				for (int i = 0; i < edges.Length; i++)
+				{
+					PreviewOverlayEdge edge = edges[i];
+					if ((uint)edge.FromIndex >= (uint)count ||
+						(uint)edge.ToIndex >= (uint)count ||
+						!validPoints[edge.FromIndex] ||
+						!validPoints[edge.ToIndex])
+					{
+						continue;
+					}
+					context.BeginFigure(projectedPoints[edge.FromIndex], isFilled: false, isClosed: false);
+					context.LineTo(projectedPoints[edge.ToIndex], isStroked: true, isSmoothJoin: false);
+				}
+			}
+			meshGeometry.Freeze();
+			canvas.Children.Add(new System.Windows.Shapes.Path
+			{
+				Data = meshGeometry,
+				Stroke = meshBrush,
+				StrokeThickness = meshThickness,
 				IsHitTestVisible = false
-			};
-			LiveWireframeCanvas.Children.Add(element);
+			});
+			PreviewOverlayIndexedPath[] featurePaths = CreateMediaPipePreviewMeshFeaturePaths(denseMeshPoints);
+			DrawMediaPipeFeatureGeometry(canvas, featurePaths, projectedPoints, validPoints, count, PreviewOverlayMeshFeatureRole.Eye);
+			DrawMediaPipeFeatureGeometry(canvas, featurePaths, projectedPoints, validPoints, count, PreviewOverlayMeshFeatureRole.Brow);
+			DrawMediaPipeFeatureGeometry(canvas, featurePaths, projectedPoints, validPoints, count, PreviewOverlayMeshFeatureRole.Mouth);
+			DrawMediaPipeFeatureGeometry(canvas, featurePaths, projectedPoints, validPoints, count, PreviewOverlayMeshFeatureRole.Jaw);
+			DrawMediaPipeFeatureGeometry(canvas, featurePaths, projectedPoints, validPoints, count, PreviewOverlayMeshFeatureRole.Nose);
+			DrawMediaPipeFeatureGeometry(canvas, featurePaths, projectedPoints, validPoints, count, PreviewOverlayMeshFeatureRole.Face);
+			StreamGeometry pointGeometry = new StreamGeometry();
+			using (StreamGeometryContext context = pointGeometry.Open())
+			{
+				for (int i = 0; i < count; i++)
+				{
+					if (!validPoints[i])
+					{
+						continue;
+					}
+					double radius = i < MediaPipePreviewMeshFeaturePointMask.Length && MediaPipePreviewMeshFeaturePointMask[i] ? 1.6 : 1.0;
+					Point point = projectedPoints[i];
+					context.BeginFigure(new Point(point.X, point.Y - radius), isFilled: true, isClosed: true);
+					context.LineTo(new Point(point.X + radius, point.Y), isStroked: true, isSmoothJoin: false);
+					context.LineTo(new Point(point.X, point.Y + radius), isStroked: true, isSmoothJoin: false);
+					context.LineTo(new Point(point.X - radius, point.Y), isStroked: true, isSmoothJoin: false);
+				}
+			}
+			pointGeometry.Freeze();
+			canvas.Children.Add(new System.Windows.Shapes.Path
+			{
+				Data = pointGeometry,
+				Fill = pointBrush,
+				IsHitTestVisible = false
+			});
+		}
+		finally
+		{
+			ArrayPool<Point>.Shared.Return(projectedPoints);
+			ArrayPool<bool>.Shared.Return(validPoints);
 		}
 	}
 
-	private void DrawWireframePath(IReadOnlyList<int> indices, bool closed, IReadOnlyDictionary<int, LiveWireframeProjectedPoint> points, string role)
+	private static void DrawMediaPipeFeatureGeometry(
+		Canvas canvas,
+		IReadOnlyList<PreviewOverlayIndexedPath> featurePaths,
+		Point[] projectedPoints,
+		bool[] validPoints,
+		int pointCount,
+		PreviewOverlayMeshFeatureRole role)
 	{
-		SolidColorBrush brush = BrushForWireframeRole(role);
-		for (int i = 1; i < indices.Count; i++)
+		StreamGeometry geometry = new StreamGeometry();
+		bool hasSegments = false;
+		using (StreamGeometryContext context = geometry.Open())
 		{
-			DrawWireframeEdge(indices[i - 1], indices[i], points, brush, 1.75);
+			for (int i = 0; i < featurePaths.Count; i++)
+			{
+				PreviewOverlayIndexedPath path = featurePaths[i];
+				if (path.Role != role)
+				{
+					continue;
+				}
+				int previousIndex = -1;
+				for (int j = 0; j < path.PointIndices.Count; j++)
+				{
+					int index = path.PointIndices[j];
+					if ((uint)index >= (uint)pointCount || !validPoints[index])
+					{
+						previousIndex = -1;
+						continue;
+					}
+					if (previousIndex >= 0)
+					{
+						context.BeginFigure(projectedPoints[previousIndex], isFilled: false, isClosed: false);
+						context.LineTo(projectedPoints[index], isStroked: true, isSmoothJoin: false);
+						hasSegments = true;
+					}
+					previousIndex = index;
+				}
+				if (path.Closed && path.PointIndices.Count > 2)
+				{
+					int firstIndex = path.PointIndices[0];
+					int lastIndex = path.PointIndices[path.PointIndices.Count - 1];
+					if ((uint)firstIndex < (uint)pointCount &&
+						(uint)lastIndex < (uint)pointCount &&
+						validPoints[firstIndex] &&
+						validPoints[lastIndex])
+					{
+						context.BeginFigure(projectedPoints[lastIndex], isFilled: false, isClosed: false);
+						context.LineTo(projectedPoints[firstIndex], isStroked: true, isSmoothJoin: false);
+						hasSegments = true;
+					}
+				}
+			}
 		}
-		if (closed && indices.Count > 2)
+		if (!hasSegments)
 		{
-			DrawWireframeEdge(indices[indices.Count - 1], indices[0], points, brush, 1.75);
+			return;
 		}
-	}
-
-	private static IReadOnlyDictionary<int, LiveWireframeProjectedPoint> BuildCameraRelativeLiveWireframeProjection(IReadOnlyList<FaceMeshLandmarkPoint> denseMeshPoints, Rect rect)
-	{
-		return denseMeshPoints.ToDictionary((FaceMeshLandmarkPoint point) => point.Index, (FaceMeshLandmarkPoint point) => new LiveWireframeProjectedPoint(point.Index, rect.X + Math.Clamp(point.X, 0.0, 1.0) * rect.Width, rect.Y + Math.Clamp(point.Y, 0.0, 1.0) * rect.Height, point.Z));
+		geometry.Freeze();
+		canvas.Children.Add(new System.Windows.Shapes.Path
+		{
+			Data = geometry,
+			Stroke = BrushForWireframeRole(role),
+			StrokeThickness = 1.75,
+			IsHitTestVisible = false
+		});
 	}
 
 	private void AddWireframeText(string title, string detail, double left, double top)
@@ -5616,47 +4216,43 @@ public partial class MainWindow : Window, IComponentConnector
 		LiveWireframeCanvas.Children.Add(stackPanel);
 	}
 
-	private static SolidColorBrush BrushForWireframeRole(string role)
+	private static SolidColorBrush BrushForWireframeRole(PreviewOverlayMeshFeatureRole role)
 	{
-		switch (role)
+		return role switch
 		{
-		case "eye":
-			return CreateFrozenBrush(143, 242, 197, 242);
-		case "brow":
-			return CreateFrozenBrush(201, 247, 163, 242);
-		case "mouth":
-		case "mouth-opening":
-			return CreateFrozenBrush(byte.MaxValue, 159, 189, 242);
-		case "jaw":
-			return CreateFrozenBrush(byte.MaxValue, 209, 102, 242);
-		case "nose":
-			return CreateFrozenBrush(217, 232, byte.MaxValue, 242);
-		case "cheek":
-			return CreateFrozenBrush(199, 166, byte.MaxValue, 242);
-		case "forehead":
-			return CreateFrozenBrush(157, 183, 201, 242);
-		case "face":
-			return CreateFrozenBrush(101, 200, byte.MaxValue, 242);
-		default:
-			return CreateFrozenBrush(220, 239, byte.MaxValue, 224);
-		}
+			PreviewOverlayMeshFeatureRole.Eye => WireframeEyeBrush,
+			PreviewOverlayMeshFeatureRole.Brow => WireframeBrowBrush,
+			PreviewOverlayMeshFeatureRole.Mouth => WireframeMouthBrush,
+			PreviewOverlayMeshFeatureRole.Jaw => WireframeJawBrush,
+			PreviewOverlayMeshFeatureRole.Nose => WireframeNoseBrush,
+			PreviewOverlayMeshFeatureRole.Face => WireframeFaceBrush,
+			_ => WireframeDefaultBrush
+		};
 	}
 
 	private void UpdateFaceCueGuideOverlay(BitmapSource? bitmap)
 	{
-		FaceCueGuideCanvas.Children.Clear();
 		if (_showLiveWireframePreview)
 		{
 			UpdateDirectX12TrackingOverlay(PreviewTrackingOverlay.Empty);
-			FaceCueGuideCanvas.Visibility = Visibility.Collapsed;
+			if (FaceCueGuideCanvas.Visibility != Visibility.Collapsed)
+			{
+				FaceCueGuideCanvas.Children.Clear();
+				FaceCueGuideCanvas.Visibility = Visibility.Collapsed;
+			}
 			return;
 		}
 		if (IsDirectX12PreviewSurfaceActive())
 		{
 			UpdateDirectX12TrackingOverlay(CreateNativePreviewTrackingOverlay());
-			FaceCueGuideCanvas.Visibility = Visibility.Collapsed;
+			if (FaceCueGuideCanvas.Visibility != Visibility.Collapsed)
+			{
+				FaceCueGuideCanvas.Children.Clear();
+				FaceCueGuideCanvas.Visibility = Visibility.Collapsed;
+			}
 			return;
 		}
+		FaceCueGuideCanvas.Children.Clear();
 		FaceCueGuideCanvas.Visibility = Visibility.Visible;
 		if (bitmap == null)
 		{
@@ -5675,11 +4271,6 @@ public partial class MainWindow : Window, IComponentConnector
 		FaceCueGuideLayout faceCueLayout = GetFaceCueLayout();
 		Rect faceBox = faceCueLayout.GetFaceBox();
 		Rect frameRegion = faceCueLayout.ToFrameRect(faceCueLayout.Jaw);
-		if (_showAvatarModelOverlay)
-		{
-			AddAvatarModelOverlay(previewDisplayRect, _currentAvatarReconstructionSnapshot);
-			return;
-		}
 		AddFaceMeshOverlay(previewDisplayRect, _currentFaceLandmarkFrame);
 		if (!_showFaceMeshOverlay)
 		{
@@ -5687,7 +4278,7 @@ public partial class MainWindow : Window, IComponentConnector
 			AddGuideRegion(previewDisplayRect, frameRegion, fill, stroke3, 2.0);
 			AddGuideLine(previewDisplayRect, frameRegion.Left + frameRegion.Width * 0.16, frameRegion.Top + frameRegion.Height * 0.38, frameRegion.Right - frameRegion.Width * 0.16, frameRegion.Top + frameRegion.Height * 0.38, stroke, 3.0);
 			AddGuideLine(previewDisplayRect, faceBox.Left + faceBox.Width * 0.5, faceBox.Top, faceBox.Left + faceBox.Width * 0.5, faceBox.Bottom, stroke2, 1.0);
-			if (HasUsableFaceFeatureLock(DateTime.UtcNow))
+			if (HasUsableFaceFeatureLock())
 			{
 				SolidColorBrush stroke4 = new SolidColorBrush(Color.FromArgb(230, 244, 211, 94));
 				AddGuideRegion(previewDisplayRect, _currentFaceFeatureDetection.FaceBox, Brushes.Transparent, stroke4, 2.0);
@@ -5707,90 +4298,104 @@ public partial class MainWindow : Window, IComponentConnector
 
 	private PreviewTrackingOverlay CreateNativePreviewTrackingOverlay()
 	{
-		if (!HasUsableFaceFeatureLock(DateTime.UtcNow))
+		if (!HasUsableFaceFeatureLock())
 		{
 			return PreviewTrackingOverlay.Empty;
 		}
+		long sourceTimestamp = Volatile.Read(ref _lastFaceFeatureLockTimestamp);
 		FaceFeatureDetection currentFaceFeatureDetection = _currentFaceFeatureDetection;
 		FaceLandmarkFrame currentFaceLandmarkFrame = _currentFaceLandmarkFrame;
-		AvatarReconstructionSnapshot currentAvatarReconstructionSnapshot = _currentAvatarReconstructionSnapshot;
-		if (currentFaceFeatureDetection == _cachedNativeOverlayFeatureDetection && currentFaceLandmarkFrame == _cachedNativeOverlayLandmarkFrame && currentAvatarReconstructionSnapshot == _cachedNativeOverlayAvatarSnapshot && _cachedNativeOverlayIncludesFaceMesh == _showFaceMeshOverlay && _cachedNativeOverlayIncludesAvatarModel == _showAvatarModelOverlay)
+		if (currentFaceFeatureDetection == _cachedNativeOverlayFeatureDetection && currentFaceLandmarkFrame == _cachedNativeOverlayLandmarkFrame && _cachedNativeOverlayIncludesFaceMesh == _showFaceMeshOverlay)
 		{
-			return _cachedNativeTrackingOverlay;
-		}
-		PreviewTrackingOverlay previewTrackingOverlay;
-		if (_showAvatarModelOverlay)
-		{
-			PreviewOverlayMesh previewOverlayMesh = CreateAvatarModelPreviewOverlayMesh(currentAvatarReconstructionSnapshot);
-			if ((object)previewOverlayMesh != null)
+			return _cachedNativeTrackingOverlay with
 			{
-				previewTrackingOverlay = new PreviewTrackingOverlay
-				{
-					FaceMesh = previewOverlayMesh
-				};
-				goto IL_0199;
-			}
-		}
-		if (_showFaceMeshOverlay)
-		{
-			previewTrackingOverlay = new PreviewTrackingOverlay
-			{
-				FaceMesh = CreatePreviewOverlayMesh(currentFaceLandmarkFrame.DenseMeshPoints)
+				SourceTimestamp = sourceTimestamp,
+				MaximumAge = MaximumLiveAwarenessFrameAge
 			};
 		}
-		else
+		PreviewTrackingOverlay previewTrackingOverlay = CreateNativePreviewTrackingOverlay(
+			currentFaceFeatureDetection,
+			currentFaceLandmarkFrame,
+			_showFaceMeshOverlay) with
 		{
-			bool eyeArtifactSuppressed = currentFaceLandmarkFrame.EyeArtifactSuppressed;
-			IReadOnlyList<Point> points = CreateBrowDisplayOutline(currentFaceLandmarkFrame.LeftBrowContour);
-			IReadOnlyList<Point> points2 = CreateBrowDisplayOutline(currentFaceLandmarkFrame.RightBrowContour);
-			previewTrackingOverlay = new PreviewTrackingOverlay
-			{
-				FaceBox = ToPreviewOverlayRect(currentFaceFeatureDetection.FaceBox),
-				FaceContour = ToPreviewOverlayPolyline(currentFaceLandmarkFrame.FaceContour, closed: true),
-				JawContour = ToPreviewOverlayPolyline(currentFaceLandmarkFrame.JawContour, closed: false),
-				LeftEyeContour = ToPreviewOverlayPolyline(currentFaceLandmarkFrame.LeftEyeContour, closed: true, currentFaceLandmarkFrame.LeftEyeReconstructed || eyeArtifactSuppressed),
-				RightEyeContour = ToPreviewOverlayPolyline(currentFaceLandmarkFrame.RightEyeContour, closed: true, currentFaceLandmarkFrame.RightEyeReconstructed || eyeArtifactSuppressed),
-				LeftBrowContour = ToPreviewOverlayPolyline(points, closed: true),
-				RightBrowContour = ToPreviewOverlayPolyline(points2, closed: true),
-				OuterLipContour = ToPreviewOverlayPolyline(currentFaceLandmarkFrame.OuterLipContour, closed: true, currentFaceLandmarkFrame.MouthReconstructed),
-				InnerLipContour = ToPreviewOverlayPolyline(currentFaceLandmarkFrame.InnerLipContour, closed: true, currentFaceLandmarkFrame.MouthReconstructed)
-			};
-		}
-		goto IL_0199;
-		IL_0199:
+			SourceTimestamp = sourceTimestamp,
+			MaximumAge = MaximumLiveAwarenessFrameAge
+		};
 		_cachedNativeOverlayFeatureDetection = currentFaceFeatureDetection;
 		_cachedNativeOverlayLandmarkFrame = currentFaceLandmarkFrame;
-		_cachedNativeOverlayAvatarSnapshot = currentAvatarReconstructionSnapshot;
 		_cachedNativeOverlayIncludesFaceMesh = _showFaceMeshOverlay;
-		_cachedNativeOverlayIncludesAvatarModel = _showAvatarModelOverlay;
 		_cachedNativeTrackingOverlay = previewTrackingOverlay;
 		return previewTrackingOverlay;
 	}
 
-	private static PreviewOverlayMesh? CreateAvatarModelPreviewOverlayMesh(AvatarReconstructionSnapshot? snapshot)
+	private static PreviewTrackingOverlay CreateNativePreviewTrackingOverlay(
+		FaceFeatureDetection featureDetection,
+		FaceLandmarkFrame landmarkFrame,
+		bool includeFaceMesh)
 	{
-		if (snapshot == null || snapshot.SourceFrameWidthPixels <= 0 || snapshot.SourceFrameHeightPixels <= 0 || snapshot.AlignedIdentityVertices.Count < 1000 || snapshot.TopologyEdges.Count == 0)
+		if (includeFaceMesh)
 		{
-			return null;
-		}
-		int pointCount = snapshot.AlignedIdentityVertices.Max((FaceMeshLandmarkPoint point) => point.Index) + 1;
-		PreviewOverlayPoint[] array = new PreviewOverlayPoint[pointCount];
-		Array.Fill(array, new PreviewOverlayPoint(double.NaN, double.NaN));
-		foreach (FaceMeshLandmarkPoint alignedIdentityVertex in snapshot.AlignedIdentityVertices)
-		{
-			if ((uint)alignedIdentityVertex.Index < (uint)array.Length && double.IsFinite(alignedIdentityVertex.X) && double.IsFinite(alignedIdentityVertex.Y))
+			return new PreviewTrackingOverlay
 			{
-				array[alignedIdentityVertex.Index] = new PreviewOverlayPoint(alignedIdentityVertex.X / (double)snapshot.SourceFrameWidthPixels, alignedIdentityVertex.Y / (double)snapshot.SourceFrameHeightPixels).Clamp();
-			}
+				FaceMesh = CreatePreviewOverlayMesh(landmarkFrame.DenseMeshPoints)
+			};
 		}
-		PreviewOverlayEdge[] array2 = (from edge in snapshot.TopologyEdges
-			where (uint)edge.FromIndex < (uint)pointCount && (uint)edge.ToIndex < (uint)pointCount
-			select new PreviewOverlayEdge(edge.FromIndex, edge.ToIndex)).ToArray();
-		if (array2.Length != 0)
+		IReadOnlyList<Point> leftBrow = CreateBrowDisplayOutline(landmarkFrame.LeftBrowContour);
+		IReadOnlyList<Point> rightBrow = CreateBrowDisplayOutline(landmarkFrame.RightBrowContour);
+		(IReadOnlyList<Point> Left, IReadOnlyList<Point> Right) eyes = CreateDenseMeshEyeContours(landmarkFrame);
+		return new PreviewTrackingOverlay
 		{
-			return new PreviewOverlayMesh(array, array2, Array.Empty<PreviewOverlayIndexedPath>(), Array.Empty<bool>(), DrawPoints: false);
+			FaceBox = ToPreviewOverlayRect(featureDetection.FaceBox),
+			FaceContour = ToPreviewOverlayPolyline(landmarkFrame.FaceContour, closed: true),
+			JawContour = ToPreviewOverlayPolyline(landmarkFrame.JawContour, closed: false),
+			LeftEyeContour = ToPreviewOverlayPolyline(eyes.Left, closed: true),
+			RightEyeContour = ToPreviewOverlayPolyline(eyes.Right, closed: true),
+			LeftBrowContour = ToPreviewOverlayPolyline(leftBrow, closed: true),
+			RightBrowContour = ToPreviewOverlayPolyline(rightBrow, closed: true),
+			OuterLipContour = ToPreviewOverlayPolyline(landmarkFrame.OuterLipContour, closed: true, landmarkFrame.MouthReconstructed),
+			InnerLipContour = ToPreviewOverlayPolyline(landmarkFrame.InnerLipContour, closed: true, landmarkFrame.MouthReconstructed)
+		};
+	}
+
+	private static (IReadOnlyList<Point> Left, IReadOnlyList<Point> Right) CreateDenseMeshEyeContours(FaceLandmarkFrame frame)
+	{
+		IReadOnlyList<Point> readOnlyList = CreateDenseMeshContour(frame.DenseMeshPoints, DenseMeshEyeA);
+		IReadOnlyList<Point> readOnlyList2 = CreateDenseMeshContour(frame.DenseMeshPoints, DenseMeshEyeB);
+		if (readOnlyList.Count != DenseMeshEyeA.Length || readOnlyList2.Count != DenseMeshEyeB.Length)
+		{
+			return (frame.LeftEyeContour, frame.RightEyeContour);
 		}
-		return null;
+		return (MeanX(readOnlyList) <= MeanX(readOnlyList2)) ? (readOnlyList, readOnlyList2) : (readOnlyList2, readOnlyList);
+	}
+
+	private static IReadOnlyList<Point> CreateDenseMeshContour(IReadOnlyList<FaceMeshLandmarkPoint> denseMeshPoints, IReadOnlyList<int> indices)
+	{
+		Point[] array = new Point[indices.Count];
+		int num = 0;
+		foreach (int index in indices)
+		{
+			if ((uint)index >= (uint)denseMeshPoints.Count)
+			{
+				return Array.Empty<Point>();
+			}
+			FaceMeshLandmarkPoint faceMeshLandmarkPoint = denseMeshPoints[index];
+			if (faceMeshLandmarkPoint.Index != index || !double.IsFinite(faceMeshLandmarkPoint.X) || !double.IsFinite(faceMeshLandmarkPoint.Y))
+			{
+				return Array.Empty<Point>();
+			}
+			array[num++] = new Point(faceMeshLandmarkPoint.X, faceMeshLandmarkPoint.Y);
+		}
+		return array;
+	}
+
+	private static double MeanX(IReadOnlyList<Point> points)
+	{
+		double num = 0.0;
+		foreach (Point point in points)
+		{
+			num += point.X;
+		}
+		return num / (double)points.Count;
 	}
 
 	private static PreviewOverlayEdge[] CreateMediaPipePreviewMeshEdges()
@@ -5883,183 +4488,19 @@ public partial class MainWindow : Window, IComponentConnector
 		return new PreviewOverlayMesh(array, MediaPipePreviewMeshEdges, featurePaths, MediaPipePreviewMeshFeaturePointMask);
 	}
 
-	private void AddAvatarModelOverlay(Rect display, AvatarReconstructionSnapshot? snapshot)
-	{
-		if (snapshot == null || snapshot.SourceFrameWidthPixels <= 0 || snapshot.SourceFrameHeightPixels <= 0 || snapshot.AlignedIdentityVertices.Count < 1000 || snapshot.TopologyEdges.Count == 0)
-		{
-			return;
-		}
-		int num = snapshot.AlignedIdentityVertices.Max((FaceMeshLandmarkPoint point) => point.Index) + 1;
-		Point[] array = new Point[num];
-		bool[] array2 = new bool[num];
-		foreach (FaceMeshLandmarkPoint alignedIdentityVertex in snapshot.AlignedIdentityVertices)
-		{
-			if ((uint)alignedIdentityVertex.Index < (uint)num && double.IsFinite(alignedIdentityVertex.X) && double.IsFinite(alignedIdentityVertex.Y))
-			{
-				array[alignedIdentityVertex.Index] = new Point(display.Left + Math.Clamp(alignedIdentityVertex.X / (double)snapshot.SourceFrameWidthPixels, 0.0, 1.0) * display.Width, display.Top + Math.Clamp(alignedIdentityVertex.Y / (double)snapshot.SourceFrameHeightPixels, 0.0, 1.0) * display.Height);
-				array2[alignedIdentityVertex.Index] = true;
-			}
-		}
-		StreamGeometry streamGeometry = new StreamGeometry();
-		using (StreamGeometryContext streamGeometryContext = streamGeometry.Open())
-		{
-			foreach (MeshTopologyEdge topologyEdge in snapshot.TopologyEdges)
-			{
-				if ((uint)topologyEdge.FromIndex < (uint)num && (uint)topologyEdge.ToIndex < (uint)num && array2[topologyEdge.FromIndex] && array2[topologyEdge.ToIndex])
-				{
-					streamGeometryContext.BeginFigure(array[topologyEdge.FromIndex], isFilled: false, isClosed: false);
-					streamGeometryContext.LineTo(array[topologyEdge.ToIndex], isStroked: true, isSmoothJoin: false);
-				}
-			}
-		}
-		streamGeometry.Freeze();
-		FaceCueGuideCanvas.Children.Add(new System.Windows.Shapes.Path
-		{
-			Data = streamGeometry,
-			Stroke = FaceMeshOverlayBrush,
-			StrokeThickness = 0.42,
-			IsHitTestVisible = false
-		});
-	}
-
 	private void AddFaceMeshOverlay(Rect display, FaceLandmarkFrame frame)
 	{
 		if (!_showFaceMeshOverlay || !frame.HasDenseMesh)
 		{
 			return;
 		}
-		int count = frame.DenseMeshPoints.Count;
-		Point[] array = new Point[count];
-		bool[] array2 = new bool[count];
-		foreach (FaceMeshLandmarkPoint denseMeshPoint in frame.DenseMeshPoints)
-		{
-			if ((uint)denseMeshPoint.Index < (uint)count && double.IsFinite(denseMeshPoint.X) && double.IsFinite(denseMeshPoint.Y))
-			{
-				array[denseMeshPoint.Index] = new Point(display.Left + Math.Clamp(denseMeshPoint.X, 0.0, 1.0) * display.Width, display.Top + Math.Clamp(denseMeshPoint.Y, 0.0, 1.0) * display.Height);
-				array2[denseMeshPoint.Index] = true;
-			}
-		}
-		StreamGeometry streamGeometry = new StreamGeometry();
-		using (StreamGeometryContext streamGeometryContext = streamGeometry.Open())
-		{
-			PreviewOverlayEdge[] mediaPipePreviewMeshEdges = MediaPipePreviewMeshEdges;
-			for (int i = 0; i < mediaPipePreviewMeshEdges.Length; i++)
-			{
-				PreviewOverlayEdge previewOverlayEdge = mediaPipePreviewMeshEdges[i];
-				if ((uint)previewOverlayEdge.FromIndex < (uint)count && (uint)previewOverlayEdge.ToIndex < (uint)count && array2[previewOverlayEdge.FromIndex] && array2[previewOverlayEdge.ToIndex])
-				{
-					streamGeometryContext.BeginFigure(array[previewOverlayEdge.FromIndex], isFilled: false, isClosed: false);
-					streamGeometryContext.LineTo(array[previewOverlayEdge.ToIndex], isStroked: true, isSmoothJoin: false);
-				}
-			}
-		}
-		streamGeometry.Freeze();
-		FaceCueGuideCanvas.Children.Add(new System.Windows.Shapes.Path
-		{
-			Data = streamGeometry,
-			Stroke = FaceMeshOverlayBrush,
-			StrokeThickness = 0.5,
-			IsHitTestVisible = false
-		});
-		PreviewOverlayIndexedPath[] array3 = CreateMediaPipePreviewMeshFeaturePaths(frame.DenseMeshPoints);
-		foreach (PreviewOverlayIndexedPath previewOverlayIndexedPath in array3)
-		{
-			StreamGeometry streamGeometry2 = new StreamGeometry();
-			using (StreamGeometryContext streamGeometryContext2 = streamGeometry2.Open())
-			{
-				Point? point = null;
-				foreach (int pointIndex in previewOverlayIndexedPath.PointIndices)
-				{
-					if ((uint)pointIndex >= (uint)count || !array2[pointIndex])
-					{
-						point = null;
-						continue;
-					}
-					Point point2 = array[pointIndex];
-					if (point.HasValue)
-					{
-						Point valueOrDefault = point.GetValueOrDefault();
-						streamGeometryContext2.BeginFigure(valueOrDefault, isFilled: false, isClosed: false);
-						streamGeometryContext2.LineTo(point2, isStroked: true, isSmoothJoin: false);
-					}
-					point = point2;
-				}
-				if (previewOverlayIndexedPath.Closed && previewOverlayIndexedPath.PointIndices.Count > 2 && (uint)previewOverlayIndexedPath.PointIndices[0] < (uint)count)
-				{
-					IReadOnlyList<int> pointIndices = previewOverlayIndexedPath.PointIndices;
-					if ((uint)pointIndices[pointIndices.Count - 1] < (uint)count && array2[previewOverlayIndexedPath.PointIndices[0]])
-					{
-						IReadOnlyList<int> pointIndices2 = previewOverlayIndexedPath.PointIndices;
-						if (array2[pointIndices2[pointIndices2.Count - 1]])
-						{
-							IReadOnlyList<int> pointIndices3 = previewOverlayIndexedPath.PointIndices;
-							streamGeometryContext2.BeginFigure(array[pointIndices3[pointIndices3.Count - 1]], isFilled: false, isClosed: false);
-							streamGeometryContext2.LineTo(array[previewOverlayIndexedPath.PointIndices[0]], isStroked: true, isSmoothJoin: false);
-						}
-					}
-				}
-			}
-			streamGeometry2.Freeze();
-			FaceCueGuideCanvas.Children.Add(new System.Windows.Shapes.Path
-			{
-				Data = streamGeometry2,
-				Stroke = BrushForWireframeRole(RoleName(previewOverlayIndexedPath.Role)),
-				StrokeThickness = 1.75,
-				IsHitTestVisible = false
-			});
-		}
-		for (int j = 0; j < count; j++)
-		{
-			if (array2[j])
-			{
-				double num = ((j < MediaPipePreviewMeshFeaturePointMask.Length && MediaPipePreviewMeshFeaturePointMask[j]) ? 3.2 : 2.0);
-				Ellipse element = new Ellipse
-				{
-					Width = num,
-					Height = num,
-					Fill = FaceMeshOverlayPointBrush,
-					IsHitTestVisible = false
-				};
-				Canvas.SetLeft(element, array[j].X - num / 2.0);
-				Canvas.SetTop(element, array[j].Y - num / 2.0);
-				FaceCueGuideCanvas.Children.Add(element);
-			}
-		}
-	}
-
-	private static string RoleName(PreviewOverlayMeshFeatureRole role)
-	{
-		return role switch
-		{
-			PreviewOverlayMeshFeatureRole.Eye => "eye", 
-			PreviewOverlayMeshFeatureRole.Brow => "brow", 
-			PreviewOverlayMeshFeatureRole.Mouth => "mouth", 
-			PreviewOverlayMeshFeatureRole.Jaw => "jaw", 
-			PreviewOverlayMeshFeatureRole.Nose => "nose", 
-			PreviewOverlayMeshFeatureRole.Face => "face", 
-			_ => "surface", 
-		};
-	}
-
-	private List<MeshTopologyEdge> GetOrCreateThreeDdfaTopology(IReadOnlyList<ThreeDdfaOnnxSidecarEdge> source)
-	{
-		lock (_threeDdfaTopologyLock)
-		{
-			if (_threeDdfaDenseTopologyEdges.Count >= source.Count && _threeDdfaDenseTopologyEdges.Count > 0)
-			{
-				return _threeDdfaDenseTopologyEdges;
-			}
-			_threeDdfaDenseTopologyEdges = source.Select((ThreeDdfaOnnxSidecarEdge edge) => new MeshTopologyEdge
-			{
-				FromIndex = edge.FromIndex,
-				ToIndex = edge.ToIndex,
-				Role = "surface",
-				Source = "3ddfa-full-resolution-topology",
-				LengthPercent = 0.0,
-				ConfidencePercent = 100.0
-			}).ToList();
-			return _threeDdfaDenseTopologyEdges;
-		}
+		DrawMediaPipeWireframe(
+			FaceCueGuideCanvas,
+			frame.DenseMeshPoints,
+			display,
+			FaceMeshOverlayBrush,
+			0.5,
+			FaceMeshOverlayPointBrush);
 	}
 
 	private static PreviewOverlayPolyline? ToPreviewOverlayPolyline(IReadOnlyList<Point> points, bool closed, bool inferred = false)
@@ -6239,17 +4680,13 @@ public partial class MainWindow : Window, IComponentConnector
 	private void AddLandmarkContours(Rect display, FaceLandmarkFrame frame)
 	{
 		SolidColorBrush solidColorBrush = new SolidColorBrush(Color.FromArgb(245, 122, 218, byte.MaxValue));
-		SolidColorBrush solidColorBrush2 = new SolidColorBrush(Color.FromArgb(245, 238, 174, 74));
 		SolidColorBrush stroke = new SolidColorBrush(Color.FromArgb(245, 245, 133, 176));
 		SolidColorBrush stroke2 = new SolidColorBrush(Color.FromArgb(245, 196, 247, 163));
 		SolidColorBrush stroke3 = new SolidColorBrush(Color.FromArgb(135, 185, 215, 239));
-		bool flag = frame.LeftEyeReconstructed || frame.EyeArtifactSuppressed;
-		bool flag2 = frame.RightEyeReconstructed || frame.EyeArtifactSuppressed;
-		SolidColorBrush solidColorBrush3 = (frame.EyeArtifactSuppressed ? solidColorBrush2 : solidColorBrush);
 		AddGuidePolyline(display, frame.FaceContour, stroke3, 1.4, close: true);
 		AddGuidePolyline(display, frame.JawContour, stroke3, 1.8, close: false);
-		AddGuidePolyline(display, frame.LeftEyeContour, flag ? solidColorBrush3 : solidColorBrush, 2.4, close: true, flag);
-		AddGuidePolyline(display, frame.RightEyeContour, flag2 ? solidColorBrush3 : solidColorBrush, 2.4, close: true, flag2);
+		AddGuidePolyline(display, frame.LeftEyeContour, solidColorBrush, 2.4, close: true);
+		AddGuidePolyline(display, frame.RightEyeContour, solidColorBrush, 2.4, close: true);
 		AddGuidePolyline(display, CreateBrowDisplayOutline(frame.LeftBrowContour), stroke2, 0.5, close: true);
 		AddGuidePolyline(display, CreateBrowDisplayOutline(frame.RightBrowContour), stroke2, 0.5, close: true);
 		AddGuidePolyline(display, frame.OuterLipContour, stroke, 2.2, close: true, frame.MouthReconstructed);

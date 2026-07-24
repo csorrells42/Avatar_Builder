@@ -12,15 +12,20 @@ public static class EvidenceWeightedDenseFaceWarperSelfTest
 		{
 			List<DenseFaceWarpVertex> list = CreateGrid();
 			List<DenseFaceWarpControlPoint> list2 = CreateControls(list);
+			List<MeshTopologyEdge> measuredTopology = CreateGridTopology();
+			double[] measuredConfidences = Enumerable.Repeat(0.82, list.Count).ToArray();
 			DenseFaceWarpResult denseFaceWarpResult = EvidenceWeightedDenseFaceWarper.Warp(new DenseFaceWarpInput
 			{
 				SubjectId = "self-test",
 				SubjectDisplayName = "Self Test",
 				CreatedAtUtc = DateTime.UtcNow,
 				SourceVertices = list,
+				MeasuredVertices = list,
+				MeasuredConfidences = measuredConfidences,
+				MeasuredTopologyEdges = measuredTopology,
 				ControlPoints = list2
 			});
-			if (!denseFaceWarpResult.HasGeometry)
+			if (!denseFaceWarpResult.HasGeometry || !denseFaceWarpResult.HasMeasuredGeometry)
 			{
 				return new EvidenceWeightedDenseFaceWarperSelfTestResult(Succeeded: false, "FAIL: " + denseFaceWarpResult.Status);
 			}
@@ -42,6 +47,22 @@ public static class EvidenceWeightedDenseFaceWarperSelfTest
 			if (denseFaceWarpResult.SafetyClampVertexPercent > 0.0 || denseFaceWarpResult.Percentile95AppliedDisplacement > 0.2)
 			{
 				return new EvidenceWeightedDenseFaceWarperSelfTestResult(Succeeded: false, $"FAIL: warp is over-aggressive (p95 {denseFaceWarpResult.Percentile95AppliedDisplacement:0.0000}, safety clamp {denseFaceWarpResult.SafetyClampVertexPercent:0.00}%).");
+			}
+			DenseFaceWarpDocument denseFaceWarpDocument = DenseFaceWarpDocument.Create(denseFaceWarpResult);
+			if (denseFaceWarpDocument.MeasuredCoordinates.Count != list.Count * 3 || denseFaceWarpDocument.MeasuredConfidences.Count != list.Count || denseFaceWarpDocument.MeasuredEdgeIndices.Count != measuredTopology.Count * 2)
+			{
+				return new EvidenceWeightedDenseFaceWarperSelfTestResult(Succeeded: false, "FAIL: the viewer document did not preserve measured MediaPipe geometry, confidence, and topology.");
+			}
+			if (denseFaceWarpDocument.WarpedCoordinates.Count != list.Count * 3 || denseFaceWarpDocument.SourceVertexCount != list.Count || denseFaceWarpDocument.AppliedControlPointCount != list2.Count)
+			{
+				return new EvidenceWeightedDenseFaceWarperSelfTestResult(Succeeded: false, "FAIL: the viewer document reported inconsistent dense-warp geometry or counts.");
+			}
+			if (denseFaceWarpDocument.MeasuredVertexCount != list.Count || denseFaceWarpDocument.MeasuredEdgeCount != measuredTopology.Count || denseFaceWarpDocument.DenseEdgeCount != 0 ||
+				denseFaceWarpDocument.HighConfidenceMeasuredVertexCount != list.Count || denseFaceWarpDocument.MediumConfidenceMeasuredVertexCount != 0 ||
+				denseFaceWarpDocument.LowConfidenceMeasuredVertexCount != 0 || Math.Abs(denseFaceWarpDocument.MeanMeasuredConfidence - 0.82) > 1e-9 ||
+				denseFaceWarpDocument.AnchorRmsImprovementPercent <= 55.0)
+			{
+				return new EvidenceWeightedDenseFaceWarperSelfTestResult(Succeeded: false, "FAIL: the viewer evidence statistics do not match the measured and warped test geometry.");
 			}
 			return new EvidenceWeightedDenseFaceWarperSelfTestResult(Succeeded: true, $"Dense face warp self-test passed: {list.Count:n0} vertices, {list2.Count:n0} controls, anchor RMS {denseFaceWarpResult.SourceAnchorRms:0.0000} -> {denseFaceWarpResult.WarpedAnchorRms:0.0000}, p95 movement {denseFaceWarpResult.Percentile95AppliedDisplacement:0.0000}, no safety clamping.");
 		}
@@ -67,6 +88,39 @@ public static class EvidenceWeightedDenseFaceWarperSelfTest
 					Y = num2,
 					Z = 0.05 * (1.0 - num * num) * (1.0 - num2 * num2)
 				});
+			}
+		}
+		return list;
+	}
+
+	private static List<MeshTopologyEdge> CreateGridTopology()
+	{
+		List<MeshTopologyEdge> list = new List<MeshTopologyEdge>(1200);
+		for (int row = 0; row < 25; row++)
+		{
+			for (int column = 0; column < 25; column++)
+			{
+				int index = row * 25 + column;
+				if (column + 1 < 25)
+				{
+					list.Add(new MeshTopologyEdge
+					{
+						FromIndex = index,
+						ToIndex = index + 1,
+						Role = "self-test-horizontal",
+						Source = "self-test"
+					});
+				}
+				if (row + 1 < 25)
+				{
+					list.Add(new MeshTopologyEdge
+					{
+						FromIndex = index,
+						ToIndex = index + 25,
+						Role = "self-test-vertical",
+						Source = "self-test"
+					});
+				}
 			}
 		}
 		return list;

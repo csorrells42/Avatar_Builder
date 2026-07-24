@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 
 namespace AvatarBuilder.Modules.Webcam.DirectX12;
 
@@ -28,6 +29,19 @@ public sealed record PreviewTrackingOverlay
 	public PreviewOverlayMesh? FaceMesh { get; init; }
 
 	public IReadOnlyList<PreviewOverlayDiagnosticMesh> DiagnosticMeshes { get; init; } = Array.Empty<PreviewOverlayDiagnosticMesh>();
+
+	public long SourceTimestamp { get; init; }
+
+	public TimeSpan MaximumAge { get; init; }
+
+	public bool IsFresh
+	{
+		get
+		{
+			return MaximumAge <= TimeSpan.Zero
+				|| (SourceTimestamp != 0L && Stopwatch.GetElapsedTime(SourceTimestamp) <= MaximumAge);
+		}
+	}
 
 	public bool HasContent
 	{

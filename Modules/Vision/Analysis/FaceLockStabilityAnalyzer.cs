@@ -1,5 +1,4 @@
 using System;
-using System.Collections.Generic;
 using System.Windows;
 using AvatarBuilder.Modules.Vision.Common;
 
@@ -7,15 +6,43 @@ namespace AvatarBuilder.Modules.Vision.Analysis;
 
 public sealed class FaceLockStabilityAnalyzer
 {
-	private sealed record Sample(DateTime CapturedAtUtc, Rect? FaceBounds, bool EyeUsable, bool MouthUsable, double EyeQualityPercent, double MouthQualityPercent, double OverallMeasurementQualityPercent);
+	private const double StabilityWindowSeconds = 12.0;
 
-	private static readonly TimeSpan StabilityWindow = TimeSpan.FromSeconds(12L);
+	private int _sampleCount;
 
-	private readonly Queue<Sample> _samples = new Queue<Sample>();
+	private DateTime _firstCapturedAtUtc;
+
+	private DateTime _lastCapturedAtUtc;
+
+	private Rect? _previousFaceBounds;
+
+	private double _faceBoundsRatePercent;
+
+	private double _faceContinuityPercent;
+
+	private double _eyeUsableRatePercent;
+
+	private double _mouthUsableRatePercent;
+
+	private double _averageEyeQualityPercent;
+
+	private double _averageMouthQualityPercent;
+
+	private double _averageOverallQualityPercent;
 
 	public void Reset()
 	{
-		_samples.Clear();
+		_sampleCount = 0;
+		_firstCapturedAtUtc = default;
+		_lastCapturedAtUtc = default;
+		_previousFaceBounds = null;
+		_faceBoundsRatePercent = 0.0;
+		_faceContinuityPercent = 0.0;
+		_eyeUsableRatePercent = 0.0;
+		_mouthUsableRatePercent = 0.0;
+		_averageEyeQualityPercent = 0.0;
+		_averageMouthQualityPercent = 0.0;
+		_averageOverallQualityPercent = 0.0;
 	}
 
 	public FaceLockStabilityAnalysis Update(FaceFeatureDetection featureDetection, FaceLandmarkFrame frame, FaceLandmarkMetrics metrics)
@@ -26,88 +53,62 @@ public sealed class FaceLockStabilityAnalyzer
 			return FaceLockStabilityAnalysis.Waiting;
 		}
 		DateTime capturedAtUtc = (metrics.HasFace ? metrics.CapturedAtUtc : (frame.HasFace ? frame.CapturedAtUtc : DateTime.UtcNow));
-		_samples.Enqueue(new Sample(capturedAtUtc, GetFaceBounds(featureDetection, frame), metrics.IsEyeMeasurementUsable, metrics.IsMouthMeasurementUsable, metrics.EyeMeasurementQualityPercent, metrics.MouthMeasurementQualityPercent, metrics.OverallMeasurementQualityPercent));
-		Trim(capturedAtUtc);
-		return CreateAnalysis();
-	}
-
-	private void Trim(DateTime capturedAtUtc)
-	{
-		while (_samples.Count > 0 && capturedAtUtc - _samples.Peek().CapturedAtUtc > StabilityWindow)
+		Rect? faceBounds = GetFaceBounds(featureDetection, frame);
+		double elapsedSeconds = _sampleCount == 0
+			? 0.0
+			: Math.Max(0.0, (capturedAtUtc - _lastCapturedAtUtc).TotalSeconds);
+		double blend = _sampleCount == 0
+			? 1.0
+			: 1.0 - Math.Exp(-elapsedSeconds / StabilityWindowSeconds);
+		if (blend <= 0.0)
 		{
-			_samples.Dequeue();
+			blend = 1.0 / Math.Min(_sampleCount + 1.0, StabilityWindowSeconds * 30.0);
 		}
-	}
-
-	private FaceLockStabilityAnalysis CreateAnalysis()
-	{
-		if (_samples.Count == 0)
+		if (_sampleCount == 0)
 		{
-			return FaceLockStabilityAnalysis.Waiting;
+			_firstCapturedAtUtc = capturedAtUtc;
 		}
-		int count = _samples.Count;
-		int num = 0;
-		int num2 = 0;
-		int num3 = 0;
-		double num4 = 0.0;
-		double num5 = 0.0;
-		double num6 = 0.0;
-		double num7 = 0.0;
-		Rect? rect = null;
-		DateTime dateTime = DateTime.MaxValue;
-		DateTime dateTime2 = DateTime.MinValue;
-		foreach (Sample sample in _samples)
+		_sampleCount++;
+		_lastCapturedAtUtc = capturedAtUtc;
+		double continuity = 50.0;
+		if (faceBounds.HasValue)
 		{
-			dateTime = ((dateTime == DateTime.MaxValue) ? sample.CapturedAtUtc : dateTime);
-			dateTime2 = sample.CapturedAtUtc;
-			num2 += (sample.EyeUsable ? 1 : 0);
-			num3 += (sample.MouthUsable ? 1 : 0);
-			num4 += sample.EyeQualityPercent;
-			num5 += sample.MouthQualityPercent;
-			num6 += sample.OverallMeasurementQualityPercent;
-			Rect? faceBounds = sample.FaceBounds;
-			if (faceBounds.HasValue)
+			if (_previousFaceBounds.HasValue)
 			{
-				Rect valueOrDefault = faceBounds.GetValueOrDefault();
-				if (rect.HasValue)
-				{
-					Rect valueOrDefault2 = rect.GetValueOrDefault();
-					num7 += CalculatePairContinuity(valueOrDefault2, valueOrDefault);
-				}
-				rect = valueOrDefault;
-				num++;
+				continuity = CalculatePairContinuity(_previousFaceBounds.Value, faceBounds.Value) * 100.0;
 			}
+			_previousFaceBounds = faceBounds;
 		}
-		double num8 = Rate(num, count);
-		double num9 = num switch
-		{
-			0 => 0.0, 
-			1 => 50.0, 
-			_ => Math.Clamp(num7 / (double)(num - 1) * 100.0, 0.0, 100.0), 
-		};
-		double num10 = Rate(num2, count);
-		double num11 = Rate(num3, count);
-		double num12 = num4 / (double)count;
-		double num13 = num5 / (double)count;
-		double num14 = num6 / (double)count;
-		double num15 = CalculateFeatureReliability(num8, num9, num10, num12);
-		double num16 = CalculateFeatureReliability(num8, num9, num11, num13);
-		double compositeReliabilityPercent = Math.Clamp(num8 * 0.18 + num9 * 0.26 + num15 * 0.34 + num16 * 0.12 + num14 * 0.1, 0.0, 100.0);
+		_faceBoundsRatePercent = Blend(_faceBoundsRatePercent, faceBounds.HasValue ? 100.0 : 0.0, blend);
+		_faceContinuityPercent = Blend(_faceContinuityPercent, continuity, blend);
+		_eyeUsableRatePercent = Blend(_eyeUsableRatePercent, metrics.IsEyeMeasurementUsable ? 100.0 : 0.0, blend);
+		_mouthUsableRatePercent = Blend(_mouthUsableRatePercent, metrics.IsMouthMeasurementUsable ? 100.0 : 0.0, blend);
+		_averageEyeQualityPercent = Blend(_averageEyeQualityPercent, metrics.EyeMeasurementQualityPercent, blend);
+		_averageMouthQualityPercent = Blend(_averageMouthQualityPercent, metrics.MouthMeasurementQualityPercent, blend);
+		_averageOverallQualityPercent = Blend(_averageOverallQualityPercent, metrics.OverallMeasurementQualityPercent, blend);
+		double eyeReliability = CalculateFeatureReliability(_faceBoundsRatePercent, _faceContinuityPercent, _eyeUsableRatePercent, _averageEyeQualityPercent);
+		double mouthReliability = CalculateFeatureReliability(_faceBoundsRatePercent, _faceContinuityPercent, _mouthUsableRatePercent, _averageMouthQualityPercent);
+		double compositeReliabilityPercent = Math.Clamp(_faceBoundsRatePercent * 0.18 + _faceContinuityPercent * 0.26 + eyeReliability * 0.34 + mouthReliability * 0.12 + _averageOverallQualityPercent * 0.1, 0.0, 100.0);
 		return new FaceLockStabilityAnalysis
 		{
-			SampleCount = count,
-			WindowSeconds = (dateTime2 - dateTime).TotalSeconds,
-			FaceBoundsRatePercent = num8,
-			FaceContinuityPercent = num9,
-			EyeUsableRatePercent = num10,
-			MouthUsableRatePercent = num11,
-			AverageEyeQualityPercent = Math.Clamp(num12, 0.0, 100.0),
-			AverageMouthQualityPercent = Math.Clamp(num13, 0.0, 100.0),
-			AverageOverallQualityPercent = Math.Clamp(num14, 0.0, 100.0),
-			EyeReliabilityPercent = num15,
-			MouthReliabilityPercent = num16,
+			SampleCount = _sampleCount,
+			WindowSeconds = Math.Min(StabilityWindowSeconds, Math.Max(0.0, (capturedAtUtc - _firstCapturedAtUtc).TotalSeconds)),
+			FaceBoundsRatePercent = _faceBoundsRatePercent,
+			FaceContinuityPercent = _faceContinuityPercent,
+			EyeUsableRatePercent = _eyeUsableRatePercent,
+			MouthUsableRatePercent = _mouthUsableRatePercent,
+			AverageEyeQualityPercent = Math.Clamp(_averageEyeQualityPercent, 0.0, 100.0),
+			AverageMouthQualityPercent = Math.Clamp(_averageMouthQualityPercent, 0.0, 100.0),
+			AverageOverallQualityPercent = Math.Clamp(_averageOverallQualityPercent, 0.0, 100.0),
+			EyeReliabilityPercent = eyeReliability,
+			MouthReliabilityPercent = mouthReliability,
 			CompositeReliabilityPercent = compositeReliabilityPercent
 		};
+	}
+
+	private static double Blend(double current, double next, double amount)
+	{
+		return current + (next - current) * amount;
 	}
 
 	private static double CalculateFeatureReliability(double faceBoundsRate, double continuityPercent, double usableRate, double qualityPercent)
@@ -186,12 +187,4 @@ public sealed class FaceLockStabilityAnalyzer
 		return 1.0 - Math.Clamp(num / Math.Log(Math.Max(1.01, toleranceFactor)), 0.0, 1.0);
 	}
 
-	private static double Rate(int count, int total)
-	{
-		if (total > 0)
-		{
-			return (double)count / (double)total * 100.0;
-		}
-		return 0.0;
-	}
 }

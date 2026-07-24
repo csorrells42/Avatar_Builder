@@ -19,7 +19,7 @@ public sealed class CameraPreviewService : ICameraPreviewService, IDisposable
 
 	private int _maxOutputWidth = 960;
 
-	private double _maxOutputFramesPerSecond = 15.0;
+	private double _maxOutputFramesPerSecond = 1000.0;
 
 	public bool IsAvailable
 	{

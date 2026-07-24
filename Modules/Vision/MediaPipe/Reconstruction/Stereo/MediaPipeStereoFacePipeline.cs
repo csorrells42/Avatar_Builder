@@ -8,8 +8,6 @@ namespace AvatarBuilder.Modules.Vision.MediaPipe.Reconstruction.Stereo;
 
 public sealed class MediaPipeStereoFacePipeline : IAsyncDisposable
 {
-	private sealed record QueuedFrame(int Generation, MediaPipeStereoGeometryFrame Frame);
-
 	private static readonly TimeSpan PublishInterval = TimeSpan.FromSeconds(1L);
 
 	private static readonly TimeSpan SaveInterval = TimeSpan.FromSeconds(10L);
@@ -18,15 +16,13 @@ public sealed class MediaPipeStereoFacePipeline : IAsyncDisposable
 
 	private readonly CancellationTokenSource _shutdown = new CancellationTokenSource();
 
-	private readonly SemaphoreSlim _signal = new SemaphoreSlim(0, 1);
-
 	private readonly SemaphoreSlim _ownerGate = new SemaphoreSlim(1, 1);
 
 	private readonly object _configurationLock = new object();
 
-	private readonly Task _worker;
+	private readonly object _workerLock = new object();
 
-	private QueuedFrame? _pending;
+	private Task? _activeWorker;
 
 	private string _profileFolder = "";
 
@@ -36,37 +32,25 @@ public sealed class MediaPipeStereoFacePipeline : IAsyncDisposable
 
 	private int _generation;
 
-	private DateTime _lastPublishUtc = DateTime.MinValue;
+	private long _lastPublishTimestamp;
 
-	private DateTime _lastSaveUtc = DateTime.MinValue;
+	private long _lastSaveTimestamp;
 
 	private long _submittedFrameCount;
 
-	private long _replacedFrameCount;
+	private long _busyDropCount;
 
 	private int _workerBusy;
 
+	private int _configured;
+
 	private bool _disposed;
 
-	public bool IsConfigured
-	{
-		get
-		{
-			lock (_configurationLock)
-			{
-				return !string.IsNullOrWhiteSpace(_profileFolder);
-			}
-		}
-	}
+	public bool IsConfigured => Volatile.Read(ref _configured) != 0;
 
 	public event EventHandler<MediaPipeStereoModelUpdatedEventArgs>? ModelUpdated;
 
 	public event EventHandler<string>? ProcessingFailed;
-
-	public MediaPipeStereoFacePipeline()
-	{
-		_worker = Task.Run((Func<Task?>)WorkerLoopAsync);
-	}
 
 	public async Task<MediaPipeStereoFaceModel> ConfigureProfileAsync(string profileFolder, string subjectId, string subjectDisplayName, CancellationToken cancellationToken = default(CancellationToken))
 	{
@@ -76,11 +60,11 @@ public sealed class MediaPipeStereoFacePipeline : IAsyncDisposable
 		int generation;
 		lock (_configurationLock)
 		{
+			Volatile.Write(ref _configured, 0);
 			_profileFolder = Path.GetFullPath(profileFolder);
 			_subjectId = subjectId.Trim();
 			_subjectDisplayName = (string.IsNullOrWhiteSpace(subjectDisplayName) ? _subjectId : subjectDisplayName.Trim());
 			generation = ++_generation;
-			DiscardPendingFrame();
 		}
 		await _ownerGate.WaitAsync(cancellationToken).ConfigureAwait(continueOnCapturedContext: false);
 		MediaPipeStereoFaceModel mediaPipeStereoFaceModel;
@@ -98,9 +82,10 @@ public sealed class MediaPipeStereoFacePipeline : IAsyncDisposable
 			Directory.CreateDirectory(profileFolder2);
 			_reconstructor.Restore(MediaPipeStereoFaceStore.ReadState(profileFolder2), _subjectId, _subjectDisplayName);
 			mediaPipeStereoFaceModel = _reconstructor.CreateModel();
-			MediaPipeStereoFaceStore.Write(profileFolder2, _reconstructor.CreateState(), mediaPipeStereoFaceModel);
-			_lastPublishUtc = DateTime.UtcNow;
-			_lastSaveUtc = _lastPublishUtc;
+			long timestamp = Stopwatch.GetTimestamp();
+			_lastPublishTimestamp = timestamp;
+			_lastSaveTimestamp = timestamp;
+			Volatile.Write(ref _configured, 1);
 		}
 		finally
 		{
@@ -110,62 +95,54 @@ public sealed class MediaPipeStereoFacePipeline : IAsyncDisposable
 		return mediaPipeStereoFaceModel;
 	}
 
-	public bool Queue(MediaPipeStereoGeometryFrame frame)
+	public bool TryStart(Func<MediaPipeStereoGeometryFrame> frameFactory)
 	{
-		ArgumentNullException.ThrowIfNull(frame, "frame");
+		ArgumentNullException.ThrowIfNull(frameFactory, "frameFactory");
 		if (_disposed || !IsConfigured)
 		{
 			return false;
 		}
-		int generation;
-		lock (_configurationLock)
-		{
-			generation = _generation;
-		}
+		int generation = Volatile.Read(ref _generation);
 		if (Interlocked.CompareExchange(ref _workerBusy, 1, 0) != 0)
 		{
-			Interlocked.Increment(ref _replacedFrameCount);
+			Interlocked.Increment(ref _busyDropCount);
 			return false;
 		}
-		QueuedFrame queuedFrame = new QueuedFrame(generation, frame);
-		if ((object)Interlocked.CompareExchange(ref _pending, queuedFrame, null) != null)
-		{
-			Interlocked.Increment(ref _replacedFrameCount);
-			Interlocked.Exchange(ref _workerBusy, 0);
-			return false;
-		}
-		Interlocked.Increment(ref _submittedFrameCount);
+		MediaPipeStereoGeometryFrame frame;
 		try
 		{
-			_signal.Release();
+			frame = frameFactory();
 		}
-		catch (SemaphoreFullException)
+		catch
 		{
-		}
-		catch (ObjectDisposedException)
-		{
-			Interlocked.CompareExchange(ref _pending, null, queuedFrame);
 			Interlocked.Exchange(ref _workerBusy, 0);
-			return false;
+			throw;
+		}
+		Interlocked.Increment(ref _submittedFrameCount);
+		Task task = Task.Run(() => ProcessFrameAsync(generation, frame));
+		lock (_workerLock)
+		{
+			_activeWorker = task;
 		}
 		return true;
 	}
 
-	public async Task<MediaPipeStereoFaceModel> FlushAsync(CancellationToken cancellationToken = default(CancellationToken))
+	public async Task<MediaPipeStereoFaceModel> FlushAsync(bool writeViewers = false, CancellationToken cancellationToken = default(CancellationToken))
 	{
 		ThrowIfDisposed();
 		await _ownerGate.WaitAsync(cancellationToken).ConfigureAwait(continueOnCapturedContext: false);
 		try
 		{
 			MediaPipeStereoFaceModel mediaPipeStereoFaceModel = _reconstructor.CreateModel();
-			string profileFolder;
-			lock (_configurationLock)
-			{
-				profileFolder = _profileFolder;
-			}
+			MediaPipeStereoFaceState state = _reconstructor.CreateState();
+			string profileFolder = _profileFolder;
 			if (!string.IsNullOrWhiteSpace(profileFolder))
 			{
-				MediaPipeStereoFaceStore.Write(profileFolder, _reconstructor.CreateState(), mediaPipeStereoFaceModel);
+				MediaPipeStereoFaceStore.WriteData(profileFolder, state);
+				if (writeViewers)
+				{
+					MediaPipeStereoFaceStore.WriteViewers(profileFolder, state, mediaPipeStereoFaceModel);
+				}
 			}
 			return mediaPipeStereoFaceModel;
 		}
@@ -208,106 +185,74 @@ public sealed class MediaPipeStereoFacePipeline : IAsyncDisposable
 		}, cancellationToken).ConfigureAwait(continueOnCapturedContext: false);
 	}
 
-	private async Task WorkerLoopAsync()
+	private async Task ProcessFrameAsync(int generation, MediaPipeStereoGeometryFrame frame)
 	{
-		_ = 1;
 		try
 		{
-			while (!_shutdown.IsCancellationRequested)
+			if (!IsCurrentGeneration(generation))
 			{
-				await _signal.WaitAsync(_shutdown.Token).ConfigureAwait(continueOnCapturedContext: false);
-				QueuedFrame queued = Interlocked.Exchange(ref _pending, null);
-				if ((object)queued == null)
+				return;
+			}
+			long processingStartedTimestamp = Stopwatch.GetTimestamp();
+			await _ownerGate.WaitAsync(_shutdown.Token).ConfigureAwait(continueOnCapturedContext: false);
+			MediaPipeStereoFaceModel? model = null;
+			try
+			{
+				if (!IsCurrentGeneration(generation))
 				{
-					continue;
+					return;
 				}
-				try
+				_reconstructor.TryAddFrame(frame);
+				long timestamp = Stopwatch.GetTimestamp();
+				bool shouldPublish = Stopwatch.GetElapsedTime(_lastPublishTimestamp, timestamp) >= PublishInterval;
+				bool shouldSave = Stopwatch.GetElapsedTime(_lastSaveTimestamp, timestamp) >= SaveInterval;
+				if (shouldPublish)
 				{
-					if (!IsCurrentGeneration(queued.Generation))
-					{
-						continue;
-					}
-					Stopwatch stopwatch = Stopwatch.StartNew();
-					await _ownerGate.WaitAsync(_shutdown.Token).ConfigureAwait(continueOnCapturedContext: false);
-					MediaPipeStereoFaceModel mediaPipeStereoFaceModel = null;
+					model = _reconstructor.CreateModel();
+				}
+				if (shouldSave)
+				{
 					try
 					{
-						if (!IsCurrentGeneration(queued.Generation))
-						{
-							continue;
-						}
-						_reconstructor.TryAddFrame(queued.Frame);
-						DateTime utcNow = DateTime.UtcNow;
-						bool flag = utcNow - _lastPublishUtc >= PublishInterval;
-						bool flag2 = utcNow - _lastSaveUtc >= SaveInterval;
-						if (flag || flag2)
-						{
-							mediaPipeStereoFaceModel = _reconstructor.CreateModel();
-						}
-						if (flag2 && mediaPipeStereoFaceModel != null)
-						{
-							string profileFolder;
-							lock (_configurationLock)
-							{
-								profileFolder = _profileFolder;
-							}
-							try
-							{
-								MediaPipeStereoFaceStore.Write(profileFolder, _reconstructor.CreateState(), mediaPipeStereoFaceModel);
-								_lastSaveUtc = utcNow;
-							}
-							catch (Exception ex) when (!(ex is OperationCanceledException))
-							{
-								this.ProcessingFailed?.Invoke(this, "Could not save the calibrated 3D face: " + ex.Message);
-							}
-						}
-						if (flag && mediaPipeStereoFaceModel != null)
-						{
-							_lastPublishUtc = utcNow;
-						}
-						goto IL_0292;
+						MediaPipeStereoFaceStore.WriteData(_profileFolder, _reconstructor.CreateState());
+						_lastSaveTimestamp = timestamp;
 					}
-					finally
+					catch (Exception ex) when (!(ex is OperationCanceledException))
 					{
-						_ownerGate.Release();
-					}
-					IL_0292:
-					stopwatch.Stop();
-					if (mediaPipeStereoFaceModel != null)
-					{
-						Publish(mediaPipeStereoFaceModel, stopwatch.Elapsed);
+						this.ProcessingFailed?.Invoke(this, "Could not save the calibrated 3D face: " + ex.Message);
 					}
 				}
-				finally
+				if (shouldPublish && model != null)
 				{
-					Interlocked.Exchange(ref _workerBusy, 0);
+					_lastPublishTimestamp = timestamp;
 				}
+			}
+			finally
+			{
+				_ownerGate.Release();
+			}
+			if (model != null)
+			{
+				Publish(model, Stopwatch.GetElapsedTime(processingStartedTimestamp));
 			}
 		}
 		catch (OperationCanceledException) when (_shutdown.IsCancellationRequested)
 		{
 		}
-	}
-
-	private bool IsCurrentGeneration(int generation)
-	{
-		lock (_configurationLock)
-		{
-			return generation == _generation && !string.IsNullOrWhiteSpace(_profileFolder);
-		}
-	}
-
-	private void DiscardPendingFrame()
-	{
-		if ((object)Interlocked.Exchange(ref _pending, null) != null)
+		finally
 		{
 			Interlocked.Exchange(ref _workerBusy, 0);
 		}
 	}
 
+	private bool IsCurrentGeneration(int generation)
+	{
+		return generation == Volatile.Read(ref _generation) && Volatile.Read(ref _configured) != 0;
+	}
+
 	private void Publish(MediaPipeStereoFaceModel model, TimeSpan processingDuration)
 	{
-		this.ModelUpdated?.Invoke(this, new MediaPipeStereoModelUpdatedEventArgs(model, processingDuration, Interlocked.Read(in _submittedFrameCount), Interlocked.Read(in _replacedFrameCount)));
+		this.ModelUpdated?.Invoke(this, new MediaPipeStereoModelUpdatedEventArgs(model, processingDuration, Interlocked.Read(in _submittedFrameCount), Interlocked.Read(in _busyDropCount)));
 	}
 
 	private void ThrowIfDisposed()
@@ -328,22 +273,22 @@ public sealed class MediaPipeStereoFacePipeline : IAsyncDisposable
 			}
 			_disposed = true;
 			_shutdown.Cancel();
-			try
+			Task? activeWorker;
+			lock (_workerLock)
 			{
-				_signal.Release();
-			}
-			catch (SemaphoreFullException)
-			{
+				activeWorker = _activeWorker;
 			}
 			try
 			{
-				await _worker.ConfigureAwait(continueOnCapturedContext: false);
+				if (activeWorker != null)
+				{
+					await activeWorker.ConfigureAwait(continueOnCapturedContext: false);
+				}
 			}
 			catch (OperationCanceledException)
 			{
 			}
 			_ownerGate.Dispose();
-			_signal.Dispose();
 			_shutdown.Dispose();
 		}
 	}

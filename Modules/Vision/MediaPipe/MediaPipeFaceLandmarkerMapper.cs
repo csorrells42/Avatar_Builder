@@ -7,6 +7,20 @@ namespace AvatarBuilder.Modules.Vision.MediaPipe;
 
 internal static class MediaPipeFaceLandmarkerMapper
 {
+	private static readonly Lazy<MediaPipeFaceGeometryEstimator>
+		FaceGeometryEstimator = new(
+			() =>
+			{
+				DenseFaceLandmarkModelInfo model =
+					DenseFaceLandmarkModelInfo.Load();
+				if (!model.ModelExists)
+				{
+					throw new InvalidOperationException(model.Status);
+				}
+				return MediaPipeFaceGeometryEstimator.Load(model.ModelPath);
+			},
+			isThreadSafe: true);
+
 	private static readonly int[] FaceOval = new int[36]
 	{
 		10, 338, 297, 332, 284, 251, 389, 356, 454, 323,
@@ -46,7 +60,12 @@ internal static class MediaPipeFaceLandmarkerMapper
 		454
 	};
 
-	public static FaceLandmarkTrackingResult ToTrackingResult(MediaPipeSidecarResponse response, DateTime capturedAtUtc, string backendName)
+	public static FaceLandmarkTrackingResult ToTrackingResult(
+		MediaPipeSidecarResponse response,
+		DateTime capturedAtUtc,
+		string backendName,
+		int frameWidth,
+		int frameHeight)
 	{
 		if (!response.Ok)
 		{
@@ -64,23 +83,31 @@ internal static class MediaPipeFaceLandmarkerMapper
 				BackendStatus = (string.IsNullOrWhiteSpace(response.Status) ? "MediaPipe sidecar searching" : response.Status)
 			};
 		}
-		IReadOnlyList<Point> readOnlyList = Select(response.Landmarks, FaceOval);
-		IReadOnlyList<Point> first = Select(response.Landmarks, EyeA);
-		IReadOnlyList<Point> second = Select(response.Landmarks, EyeB);
-		(IReadOnlyList<Point> Left, IReadOnlyList<Point> Right) tuple = SortEyesByFramePosition(first, second);
-		IReadOnlyList<Point> item = tuple.Left;
-		IReadOnlyList<Point> item2 = tuple.Right;
-		IReadOnlyList<Point> first2 = Select(response.Landmarks, MediaPipeBrowOutlineGeometry.BrowAIndices);
-		IReadOnlyList<Point> second2 = Select(response.Landmarks, MediaPipeBrowOutlineGeometry.BrowBIndices);
-		(IReadOnlyList<Point> Left, IReadOnlyList<Point> Right) tuple2 = SortEyesByFramePosition(first2, second2);
-		IReadOnlyList<Point> item3 = tuple2.Left;
-		IReadOnlyList<Point> item4 = tuple2.Right;
-		IReadOnlyList<Point> readOnlyList2 = Select(response.Landmarks, OuterLip);
-		IReadOnlyList<Point> readOnlyList3 = Select(response.Landmarks, InnerLip);
-		IReadOnlyList<Point> jawContour = Select(response.Landmarks, Jaw);
-		IReadOnlyDictionary<string, double> blendshapeScores = CreateBlendshapeDictionary(response.Blendshapes);
+		Point[] readOnlyList = Select(response.Landmarks, FaceOval);
+		Point[] first = Select(response.Landmarks, EyeA);
+		Point[] second = Select(response.Landmarks, EyeB);
+		(Point[] Left, Point[] Right) tuple = SortEyesByFramePosition(first, second);
+		Point[] item = tuple.Left;
+		Point[] item2 = tuple.Right;
+		Point[] first2 = Select(response.Landmarks, MediaPipeBrowOutlineGeometry.BrowAIndices);
+		Point[] second2 = Select(response.Landmarks, MediaPipeBrowOutlineGeometry.BrowBIndices);
+		(Point[] Left, Point[] Right) tuple2 = SortEyesByFramePosition(first2, second2);
+		Point[] item3 = tuple2.Left;
+		Point[] item4 = tuple2.Right;
+		Point[] readOnlyList2 = Select(response.Landmarks, OuterLip);
+		Point[] readOnlyList3 = Select(response.Landmarks, InnerLip);
+		Point[] jawContour = Select(response.Landmarks, Jaw);
 		Rect? rect = BoundingRect(readOnlyList);
-		(double, double, double) tuple3 = EstimatePoseDegrees(response, item, item2);
+		IReadOnlyList<double> facialTransformationMatrix =
+			ResolveFacialTransformationMatrix(
+				response,
+				frameWidth,
+				frameHeight);
+		(double, double, double) tuple3 = EstimatePoseDegrees(
+			response,
+			facialTransformationMatrix,
+			item,
+			item2);
 		FaceLandmarkFrame faceLandmarkFrame = new FaceLandmarkFrame
 		{
 			HasFace = true,
@@ -92,10 +119,13 @@ internal static class MediaPipeFaceLandmarkerMapper
 			HeadYawDegrees = tuple3.Item1,
 			HeadPitchDegrees = tuple3.Item2,
 			HeadRollDegrees = tuple3.Item3,
-			BlendshapeScores = blendshapeScores,
+			MediaPipeEyeBlinkLeftScore = response.EyeBlinkLeftScore,
+			MediaPipeEyeBlinkRightScore = response.EyeBlinkRightScore,
+			MediaPipeJawOpenScore = response.JawOpenScore,
+			MediaPipeMouthCloseScore = response.MouthCloseScore,
 			DenseMeshTopology = "MediaPipeFaceMesh468",
 			DenseMeshPoints = CreateDenseMeshPoints(response.Landmarks),
-			FacialTransformationMatrix = response.FacialTransformationMatrix,
+			FacialTransformationMatrix = facialTransformationMatrix,
 			FaceContour = readOnlyList,
 			LeftEyeContour = item,
 			RightEyeContour = item2,
@@ -112,7 +142,7 @@ internal static class MediaPipeFaceLandmarkerMapper
 			FaceBox = (rect ?? new Rect(0.0, 0.0, 0.0, 0.0)),
 			LeftEyeBox = BoundingRect(item),
 			RightEyeBox = BoundingRect(item2),
-			MouthBox = BoundingRect((readOnlyList2.Count > 0) ? readOnlyList2 : readOnlyList3),
+			MouthBox = BoundingRect((readOnlyList2.Length > 0) ? readOnlyList2 : readOnlyList3),
 			TrackingConfidence = faceLandmarkFrame.TrackingConfidence,
 			EyeConfidence = faceLandmarkFrame.EyeConfidence,
 			MouthConfidence = faceLandmarkFrame.MouthConfidence,
@@ -135,39 +165,46 @@ internal static class MediaPipeFaceLandmarkerMapper
 
 	private static IReadOnlyList<FaceMeshLandmarkPoint> CreateDenseMeshPoints(IReadOnlyList<MediaPipeSidecarLandmark> landmarks)
 	{
-		List<FaceMeshLandmarkPoint> list = new List<FaceMeshLandmarkPoint>(landmarks.Count);
+		FaceMeshLandmarkPoint[] points = new FaceMeshLandmarkPoint[landmarks.Count];
 		for (int i = 0; i < landmarks.Count; i++)
 		{
 			MediaPipeSidecarLandmark mediaPipeSidecarLandmark = landmarks[i];
-			list.Add(new FaceMeshLandmarkPoint
+			points[i] = new FaceMeshLandmarkPoint
 			{
 				Index = i,
 				X = Math.Clamp(mediaPipeSidecarLandmark.X, 0.0, 1.0),
 				Y = Math.Clamp(mediaPipeSidecarLandmark.Y, 0.0, 1.0),
 				Z = mediaPipeSidecarLandmark.Z
-			});
+			};
 		}
-		return list;
+		return points;
 	}
 
-	private static IReadOnlyList<Point> Select(IReadOnlyList<MediaPipeSidecarLandmark> landmarks, IReadOnlyList<int> indices)
+	private static Point[] Select(IReadOnlyList<MediaPipeSidecarLandmark> landmarks, IReadOnlyList<int> indices)
 	{
-		List<Point> list = new List<Point>(indices.Count);
-		foreach (int index in indices)
+		Point[] points = new Point[indices.Count];
+		int count = 0;
+		for (int i = 0; i < indices.Count; i++)
 		{
+			int index = indices[i];
 			if (index >= 0 && index < landmarks.Count)
 			{
 				MediaPipeSidecarLandmark mediaPipeSidecarLandmark = landmarks[index];
-				list.Add(new Point(Math.Clamp(mediaPipeSidecarLandmark.X, 0.0, 1.0), Math.Clamp(mediaPipeSidecarLandmark.Y, 0.0, 1.0)));
+				points[count++] = new Point(Math.Clamp(mediaPipeSidecarLandmark.X, 0.0, 1.0), Math.Clamp(mediaPipeSidecarLandmark.Y, 0.0, 1.0));
 			}
 		}
-		return list;
+		if (count == points.Length)
+		{
+			return points;
+		}
+		Array.Resize(ref points, count);
+		return points;
 	}
 
-	private static (IReadOnlyList<Point> Left, IReadOnlyList<Point> Right) SortEyesByFramePosition(IReadOnlyList<Point> first, IReadOnlyList<Point> second)
+	private static (Point[] Left, Point[] Right) SortEyesByFramePosition(Point[] first, Point[] second)
 	{
-		double num = ((first.Count == 0) ? 0.0 : MeanX(first));
-		double num2 = ((second.Count == 0) ? 1.0 : MeanX(second));
+		double num = ((first.Length == 0) ? 0.0 : MeanX(first));
+		double num2 = ((second.Length == 0) ? 1.0 : MeanX(second));
 		if (!(num <= num2))
 		{
 			return (Left: second, Right: first);
@@ -175,14 +212,44 @@ internal static class MediaPipeFaceLandmarkerMapper
 		return (Left: first, Right: second);
 	}
 
-	private static (double YawDegrees, double PitchDegrees, double RollDegrees) EstimatePoseDegrees(MediaPipeSidecarResponse response, IReadOnlyList<Point> leftEye, IReadOnlyList<Point> rightEye)
+	private static IReadOnlyList<double> ResolveFacialTransformationMatrix(
+		MediaPipeSidecarResponse response,
+		int frameWidth,
+		int frameHeight)
 	{
-		double item = EstimateRollDegrees(leftEye, rightEye);
-		if (TryEstimatePoseFromMatrix(response.FacialTransformationMatrix, out (double, double, double) pose))
+		if (response.FacialTransformationMatrix.Count >= 16)
+		{
+			return response.FacialTransformationMatrix;
+		}
+		try
+		{
+			return FaceGeometryEstimator.Value.TryEstimate(
+				response.Landmarks,
+				frameWidth,
+				frameHeight,
+				out double[] matrix)
+				? matrix
+				: Array.Empty<double>();
+		}
+		catch
+		{
+			return Array.Empty<double>();
+		}
+	}
+
+	private static (double YawDegrees, double PitchDegrees, double RollDegrees) EstimatePoseDegrees(
+		MediaPipeSidecarResponse response,
+		IReadOnlyList<double> facialTransformationMatrix,
+		IReadOnlyList<Point> leftEye,
+		IReadOnlyList<Point> rightEye)
+	{
+		if (TryEstimatePoseFromMatrix(
+			facialTransformationMatrix,
+			out (double, double, double) pose))
 		{
 			return pose;
 		}
-		return (YawDegrees: EstimateYawDegrees(response.Landmarks), PitchDegrees: EstimatePitchDegrees(response.Landmarks), RollDegrees: item);
+		return (YawDegrees: EstimateYawDegrees(response.Landmarks), PitchDegrees: EstimatePitchDegrees(response.Landmarks), RollDegrees: EstimateRollDegrees(leftEye, rightEye));
 	}
 
 	private static bool TryEstimatePoseFromMatrix(IReadOnlyList<double> values, out (double YawDegrees, double PitchDegrees, double RollDegrees) pose)
@@ -255,7 +322,7 @@ internal static class MediaPipeFaceLandmarkerMapper
 			landmark = landmarks[index];
 			return true;
 		}
-		landmark = new MediaPipeSidecarLandmark();
+		landmark = default;
 		return false;
 	}
 
@@ -318,16 +385,4 @@ internal static class MediaPipeFaceLandmarkerMapper
 		return num / (double)points.Count;
 	}
 
-	private static IReadOnlyDictionary<string, double> CreateBlendshapeDictionary(IReadOnlyList<MediaPipeSidecarBlendshape> blendshapes)
-	{
-		Dictionary<string, double> dictionary = new Dictionary<string, double>(StringComparer.OrdinalIgnoreCase);
-		foreach (MediaPipeSidecarBlendshape blendshape in blendshapes)
-		{
-			if (!string.IsNullOrWhiteSpace(blendshape.CategoryName))
-			{
-				dictionary[blendshape.CategoryName] = Math.Clamp(blendshape.Score, 0.0, 1.0);
-			}
-		}
-		return dictionary;
-	}
 }

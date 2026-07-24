@@ -16,7 +16,6 @@ Shared camera models and contracts:
 - `CameraDeviceCatalog.cs`: merges Media Foundation and DirectShow camera lists into one physical-camera picker row when they describe the same camera.
 - `CameraSourceSelection.cs`: facade for merged camera discovery, default camera lookup, selected-source matching, and DirectShow fallback checks.
 - `CameraFrame.cs`: BGRA/NV12 frame container with pooled, reference-counted ownership for high-rate raw NV12 streams.
-- `CameraModeRecommendation.cs`: chooses the best camera mode for the selected tracking fidelity, including 4K/HD/safe preferences.
 - `CameraVideoMode.cs`: camera resolution, frame rate, input format, and Auto mode model.
 - `ICameraPreviewService.cs`: common preview service contract used by backend adapters and the preview pipeline; it emits WPF bitmaps for analysis/overlay work and raw `CameraFrame` payloads for GPU presenters.
 - `VideoFrameColorSettings.cs`: shared color/denoise adjustment model consumed by the DX12 presenter.
@@ -79,7 +78,7 @@ Composition layer. `CameraPreviewService` tries Media Foundation first, then FFm
 
 Files:
 
-- `CameraPreviewService.cs`: high-level preview facade that applies tracking-fidelity limits, tries Media Foundation first, and falls back to FFmpeg using the DirectShow paired camera.
+- `CameraPreviewService.cs`: high-level preview facade that honors the selected camera mode, tries Media Foundation first, and falls back to FFmpeg using the DirectShow paired camera.
 - `Dx12UploadCamera.cs`: presents DirectShow-only virtual cameras through the DX12 NV12 uploader while disabling redundant WPF bitmap generation.
 
 Change this folder when backend ordering, fallback behavior, or shared preview settings need work.
@@ -111,6 +110,7 @@ Files:
 - `ICameraPreviewPresenter.cs`: narrow UI-facing presenter contract for a camera preview surface.
 - `Direct3D12DeviceManager.cs`: D3D12-backed Media Foundation device-manager implementation for native texture capture.
 - `Dx12Camera.cs`: high-level texture-native camera wrapper that owns the preview host, native stream, fallback preview, status, diagnostics, and recording controls.
+- `Dx12CameraWindow.cs`: reusable camera-first 720x460 DX12 window; showing it opens the configured camera and closing it releases the session.
 - `Dx12CameraOptions.cs`: startup options and event hooks for `Dx12Camera`.
 - `TextureNativePreviewPolicy.cs`: remembers short-lived native DX12 camera open failures per camera/mode so fallback can proceed without retry storms.
 - `TextureNativeCameraRecorder.cs`: texture-native stream, pooled ref-counted frame leases, NV12 conversion, raw/processed recording sessions, and texture sink writer.
@@ -118,8 +118,8 @@ Files:
 
 Change this folder when GPU preview rendering, swap-chain management, Direct3D shader upload, or texture-native preview/recording needs work. Keep generic camera enumeration in `Common`, Media Foundation source-reader setup in `MediaFoundation`, and high-level backend choice in `Pipeline` or the UI integration layer.
 
-The D3D11 bridge is timing-critical. Its shared texture is reusable, so bridge presentation remains synchronous through `WaitForGpu()` before the capture loop may copy the next frame. CPU analysis uses a data-only frame duplicate and must never hold the GPU resource or shared handle. Do not remove the bridge because an NV12 upload fallback exists; the upload path is recovery, not the primary D3D11-to-DX12 camera path.
+The D3D11 bridge is timing-critical. Its shared texture is reusable, so bridge rendering and its fence remain on the dedicated render/observer lanes. Camera ingestion performs only a reference-counted handoff and never waits for the bridge, the swap chain, analysis, recording, or UI. CPU analysis uses a data-only frame duplicate and must never hold the GPU resource or shared handle. Do not remove the bridge because an NV12 upload fallback exists; the upload path is recovery, not the primary D3D11-to-DX12 camera path.
 
-DX12 preview teardown is also timing-critical. A preview host must stop and join its render worker before destroying the child HWND, swap chain, synchronization event, or native device reference. Never replace that ownership handoff with a timeout that continues resource destruction while the worker may still be inside `Present` or `WaitForGpu`.
+DX12 preview teardown is also timing-critical. Normal teardown joins the render worker before destroying its resources. If a video-card or driver call is non-responsive, the wait is bounded: the failed renderer is detached and left for process teardown rather than freezing the UI or camera recovery while releasing resources that may still be in use.
 
 The DirectShow compatibility path is also timing-critical. FFmpeg continuously drains pooled raw NV12 frames so the camera driver cannot build a backlog. The DX12 presenter and analysis lane each accept work only while idle, finish the accepted frame, and drop arrivals while busy. Never replace this with an encoded image pipe, pending-frame replacement, or an unbounded frame queue.

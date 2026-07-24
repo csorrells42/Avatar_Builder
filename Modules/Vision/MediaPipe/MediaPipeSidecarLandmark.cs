@@ -2,8 +2,15 @@ using System.Text.Json.Serialization;
 
 namespace AvatarBuilder.Modules.Vision.MediaPipe;
 
-internal sealed class MediaPipeSidecarLandmark
+internal readonly struct MediaPipeSidecarLandmark
 {
+	public MediaPipeSidecarLandmark(double x, double y, double z)
+	{
+		X = x;
+		Y = y;
+		Z = z;
+	}
+
 	[JsonPropertyName("x")]
 	public double X { get; init; }
 

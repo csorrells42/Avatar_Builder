@@ -47,22 +47,12 @@ public static class MediaPipeBrowGeometrySelfTest
 			(0.1, 0.62)
 		}.Select(delegate((double X, double Y) point, int index)
 		{
-			FaceMeshLandmarkPoint obj = new FaceMeshLandmarkPoint
+			return new FaceMeshLandmarkPoint
 			{
-				Index = index
+				Index = index,
+				X = mirror ? 1.0 - point.X : point.X,
+				Y = point.Y
 			};
-			double x;
-			if (!mirror)
-			{
-				(x, _) = point;
-			}
-			else
-			{
-				x = 1.0 - point.X;
-			}
-			obj.X = x;
-			obj.Y = point.Y;
-			return obj;
 		}).ToArray();
 	}
 
@@ -70,12 +60,12 @@ public static class MediaPipeBrowGeometrySelfTest
 	{
 		return points.Select(delegate((double X, double Y) point, int index)
 		{
-			FaceMeshLandmarkPoint obj = new FaceMeshLandmarkPoint
+			return new FaceMeshLandmarkPoint
 			{
-				Index = index
+				Index = index,
+				X = point.X,
+				Y = point.Y
 			};
-			(obj.X, obj.Y) = point;
-			return obj;
 		}).ToArray();
 	}
 

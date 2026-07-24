@@ -24,8 +24,4 @@ public sealed class AvatarCaptureQualityInput
 	public bool UserLoggedIn { get; init; }
 
 	public bool AvatarCaptureRequested { get; init; }
-
-	public bool CaptureGateAccepted { get; init; }
-
-	public string CaptureGateReason { get; init; } = "not started";
 }

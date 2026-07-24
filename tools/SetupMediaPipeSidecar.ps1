@@ -45,7 +45,7 @@ if (-not (Test-Path -LiteralPath $venvPython)) {
 
 & $venvPython -m pip install --upgrade pip
 & $venvPython -m pip install -r $requirements
-& $venvPython -c "import mediapipe, cv2; print('MediaPipe sidecar environment ready')"
+& $venvPython -c "import mediapipe, cv2, onnxruntime as ort; assert 'DmlExecutionProvider' in ort.get_available_providers(); print('MediaPipe CPU and DirectML sidecar environment ready')"
 
 Write-Host ""
 Write-Host "To force Avatar Builder to use this environment, set:"

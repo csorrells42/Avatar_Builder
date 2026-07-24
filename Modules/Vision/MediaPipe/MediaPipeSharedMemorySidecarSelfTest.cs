@@ -19,7 +19,7 @@ public static class MediaPipeSharedMemorySidecarSelfTest
 				return new MediaPipeSharedMemorySidecarSelfTestResult(Succeeded: false, "MediaPipe shared-memory test image does not exist: " + fullPath);
 			}
 			BitmapSource bitmap = LoadBitmap(fullPath);
-			using MediaPipeFaceLandmarkerSidecarTracker mediaPipeFaceLandmarkerSidecarTracker = new MediaPipeFaceLandmarkerSidecarTracker
+			using MediaPipeFaceLandmarkerSidecarTracker mediaPipeFaceLandmarkerSidecarTracker = new MediaPipeFaceLandmarkerSidecarTracker(collectDiagnostics: true)
 			{
 				MaxDetectionDimension = 1920
 			};
@@ -45,7 +45,7 @@ public static class MediaPipeSharedMemorySidecarSelfTest
 			int count = faceLandmarkTrackingResult.LandmarkFrame.DenseMeshPoints.Count;
 			int num2;
 			object obj;
-			if (faceLandmarkTrackingResult.LandmarkFrame.HasDenseMesh && diagnostics.Mode == "video-tracking-shared-memory")
+			if (faceLandmarkTrackingResult.LandmarkFrame.HasDenseMesh && diagnostics.Mode.StartsWith("video-tracking-shared-memory-", StringComparison.Ordinal))
 			{
 				num2 = ((diagnostics.EncodedPayloadBytes == num) ? 1 : 0);
 				if (num2 != 0)

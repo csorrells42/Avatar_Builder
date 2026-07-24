@@ -5,5 +5,6 @@ public enum ThreeDdfaOnnxRequestMode
 	FaceBoxOnly,
 	Tracking,
 	Preview,
-	Full
+	Full,
+	CanonicalModel
 }

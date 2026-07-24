@@ -7,7 +7,7 @@ This module turns synchronized, physically calibrated dual-camera landmarks into
 ## Ownership
 
 - `MediaPipeStereoGeometryFrame` carries the calibrated 478-point solve and optional references to the two existing analysis images. It does not copy another pair of 4K frames.
-- `MediaPipeStereoFacePipeline` owns one active observation and one replaceable newest pending observation. The active observation finishes; newer arrivals replace the pending input instead of forming a queue.
+- `MediaPipeStereoFacePipeline` owns one active observation and no waiting observation. It reserves its worker before creating the immutable handoff, finishes accepted work, and ignores arrivals while occupied.
 - `MediaPipeStereoFaceReconstructor` removes rigid head translation and rotation, applies per-point directness/reprojection gates, and robustly accumulates canonical vertices.
 - `MediaPipeDenseStereoMatcher` measures additional stable surface locations inside the MediaPipe triangles with pyramidal optical flow. Forward/backward flow, epipolar distance, and calibrated reprojection gates reject mismatches before triangulation.
 - `MediaPipeStereoFaceStore` atomically persists resumable state, the inspectable model, and the viewer beneath the active profile.
@@ -30,7 +30,7 @@ Dynamic eye and lip landmarks are retained for future animation evidence but are
 
 The 478 MediaPipe anchors and 15,372 possible dense image-matched samples remain separate evidence layers in storage and in the viewer, for 15,850 possible measured points in total. The dense layer does not invent new MediaPipe landmarks or interpolate a generic surface. It finds corresponding image evidence on a stable interior lattice inside each MediaPipe triangle and stores only successfully triangulated locations in head-fixed inches. Each triangle originates from the camera with the larger normalized projected area, so both cheeks can use their more direct camera view instead of forcing every dense match through Camera A.
 
-Dense work executes only on the reconstruction worker. If it cannot keep up, one newest synchronized pair is retained while older pending input is replaced; camera preview and each MediaPipe lane continue independently.
+Dense work executes only on the reconstruction worker. If it cannot keep up, synchronized pairs arriving while it is occupied are ignored before copying; camera preview and each MediaPipe lane continue independently.
 
 ## Verification
 

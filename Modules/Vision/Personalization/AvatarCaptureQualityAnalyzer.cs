@@ -46,7 +46,7 @@ public sealed class AvatarCaptureQualityAnalyzer
 		double num6 = CalculateStorageScore(input, list, list2);
 		double num7 = Round(num * 0.14 + faceScaleScore.ScorePercent * 0.18 + num2 * 0.26 + num3 * 0.14 + num4 * 0.16 + num5 * 0.06 + num6 * 0.06);
 		bool userLoggedIn = input.UserLoggedIn;
-		bool flag = input.AvatarCaptureRequested && input.CaptureGateAccepted;
+		bool flag = input.AvatarCaptureRequested;
 		if (!userLoggedIn)
 		{
 			list.Add("no avatar user is logged in");
@@ -56,14 +56,6 @@ public sealed class AvatarCaptureQualityAnalyzer
 		{
 			list.Add("avatar capture is stopped");
 			list2.Add("Click Start Avatar Capture when the selected user is ready to collect 3DDFA samples.");
-		}
-		else if (!flag)
-		{
-			list.Add("avatar capture is waiting");
-			if (!string.IsNullOrWhiteSpace(input.CaptureGateReason))
-			{
-				list2.Add(input.CaptureGateReason);
-			}
 		}
 		bool flag2 = userLoggedIn && flag && num7 >= 62.0 && num >= 60.0 && num6 >= 35.0;
 		bool flag3 = flag2 && num7 >= 80.0 && num >= 84.0 && num2 >= 72.0 && faceScaleScore.ScorePercent >= 70.0 && num4 >= 70.0;
@@ -369,10 +361,31 @@ public sealed class AvatarCaptureQualityAnalyzer
 		{
 			return null;
 		}
-		double num = points.Min((Point point) => point.X);
-		double num2 = points.Min((Point point) => point.Y);
-		double num3 = points.Max((Point point) => point.X);
-		double num4 = points.Max((Point point) => point.Y);
+		Point first = points[0];
+		double num = first.X;
+		double num2 = first.Y;
+		double num3 = first.X;
+		double num4 = first.Y;
+		for (int i = 1; i < points.Count; i++)
+		{
+			Point point = points[i];
+			if (point.X < num)
+			{
+				num = point.X;
+			}
+			else if (point.X > num3)
+			{
+				num3 = point.X;
+			}
+			if (point.Y < num2)
+			{
+				num2 = point.Y;
+			}
+			else if (point.Y > num4)
+			{
+				num4 = point.Y;
+			}
+		}
 		if (!(num3 > num) || !(num4 > num2))
 		{
 			return null;

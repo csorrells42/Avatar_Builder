@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.Linq;
 using OpenCvSharp;
 
 namespace AvatarBuilder.Modules.Vision.MediaPipe.Reconstruction.Stereo;
@@ -23,13 +22,41 @@ internal static class MediaPipeDenseStereoMatcher
 
 	private readonly record struct Point3(double X, double Y, double Z);
 
-	private readonly record struct CameraParameters(double Fx, double Fy, double Cx, double Cy, int Width, int Height, IReadOnlyList<double> Distortion)
+	private readonly record struct CameraParameters(
+		double Fx,
+		double Fy,
+		double Cx,
+		double Cy,
+		int Width,
+		int Height,
+		double K1,
+		double K2,
+		double P1,
+		double P2,
+		double K3,
+		double K4,
+		double K5,
+		double K6)
 	{
 		public static CameraParameters Create(IReadOnlyList<double> matrix, IReadOnlyList<double> distortion, int calibrationWidth, int calibrationHeight, int frameWidth, int frameHeight)
 		{
 			double num = (double)frameWidth / Math.Max(1.0, calibrationWidth);
 			double num2 = (double)frameHeight / Math.Max(1.0, calibrationHeight);
-			return new CameraParameters(matrix[0] * num, matrix[4] * num2, matrix[2] * num, matrix[5] * num2, frameWidth, frameHeight, distortion);
+			return new CameraParameters(
+				matrix[0] * num,
+				matrix[4] * num2,
+				matrix[2] * num,
+				matrix[5] * num2,
+				frameWidth,
+				frameHeight,
+				ReadCoefficient(distortion, 0),
+				ReadCoefficient(distortion, 1),
+				ReadCoefficient(distortion, 2),
+				ReadCoefficient(distortion, 3),
+				ReadCoefficient(distortion, 4),
+				ReadCoefficient(distortion, 5),
+				ReadCoefficient(distortion, 6),
+				ReadCoefficient(distortion, 7));
 		}
 
 		public Point2d Undistort(double pixelX, double pixelY)
@@ -43,9 +70,9 @@ internal static class MediaPipeDenseStereoMatcher
 				double num5 = num3 * num3 + num4 * num4;
 				double num6 = num5 * num5;
 				double num7 = num6 * num5;
-				double val = (1.0 + Coefficient(0) * num5 + Coefficient(1) * num6 + Coefficient(4) * num7) / Math.Max(1E-09, 1.0 + Coefficient(5) * num5 + Coefficient(6) * num6 + Coefficient(7) * num7);
-				double num8 = 2.0 * Coefficient(2) * num3 * num4 + Coefficient(3) * (num5 + 2.0 * num3 * num3);
-				double num9 = Coefficient(2) * (num5 + 2.0 * num4 * num4) + 2.0 * Coefficient(3) * num3 * num4;
+				double val = (1.0 + K1 * num5 + K2 * num6 + K3 * num7) / Math.Max(1E-09, 1.0 + K4 * num5 + K5 * num6 + K6 * num7);
+				double num8 = 2.0 * P1 * num3 * num4 + P2 * (num5 + 2.0 * num3 * num3);
+				double num9 = P1 * (num5 + 2.0 * num4 * num4) + 2.0 * P2 * num3 * num4;
 				num3 = (num - num8) / Math.Max(1E-09, val);
 				num4 = (num2 - num9) / Math.Max(1E-09, val);
 			}
@@ -63,19 +90,19 @@ internal static class MediaPipeDenseStereoMatcher
 			double num3 = num * num + num2 * num2;
 			double num4 = num3 * num3;
 			double num5 = num4 * num3;
-			double num6 = (1.0 + Coefficient(0) * num3 + Coefficient(1) * num4 + Coefficient(4) * num5) / Math.Max(1E-09, 1.0 + Coefficient(5) * num3 + Coefficient(6) * num4 + Coefficient(7) * num5);
-			double num7 = 2.0 * Coefficient(2) * num * num2 + Coefficient(3) * (num3 + 2.0 * num * num);
-			double num8 = Coefficient(2) * (num3 + 2.0 * num2 * num2) + 2.0 * Coefficient(3) * num * num2;
+			double num6 = (1.0 + K1 * num3 + K2 * num4 + K3 * num5) / Math.Max(1E-09, 1.0 + K4 * num3 + K5 * num4 + K6 * num5);
+			double num7 = 2.0 * P1 * num * num2 + P2 * (num3 + 2.0 * num * num);
+			double num8 = P1 * (num3 + 2.0 * num2 * num2) + 2.0 * P2 * num * num2;
 			return new Point2d(Fx * (num * num6 + num7) + Cx, Fy * (num2 * num6 + num8) + Cy);
 		}
 
-		private double Coefficient(int index)
+		private static double ReadCoefficient(IReadOnlyList<double> distortion, int index)
 		{
-			if ((uint)index >= (uint)Distortion.Count || !double.IsFinite(Distortion[index]))
+			if ((uint)index >= (uint)distortion.Count || !double.IsFinite(distortion[index]))
 			{
 				return 0.0;
 			}
-			return Distortion[index];
+			return distortion[index];
 		}
 	}
 
@@ -118,19 +145,23 @@ internal static class MediaPipeDenseStereoMatcher
 			cLAHE.Apply(mat3, mat5);
 			cLAHE.Apply(mat4, mat6);
 		}
-		List<SampleCandidate> list = CreateCandidates(pair);
-		if (list.Count == 0)
+		int initialCapacity = Samples.Length / 2 + 1;
+		List<SampleCandidate> cameraACandidates = new List<SampleCandidate>(initialCapacity);
+		List<SampleCandidate> cameraBCandidates = new List<SampleCandidate>(initialCapacity);
+		CreateCandidates(pair, cameraACandidates, cameraBCandidates);
+		int candidateCount = cameraACandidates.Count + cameraBCandidates.Count;
+		if (candidateCount == 0)
 		{
 			return Array.Empty<MediaPipeStereoDenseRigPoint>();
 		}
-		SampleCandidate[] array = list.Where((SampleCandidate candidate) => candidate.SourceCamera == DenseSourceCamera.CameraA).ToArray();
-		SampleCandidate[] array2 = list.Where((SampleCandidate candidate) => candidate.SourceCamera == DenseSourceCamera.CameraB).ToArray();
-		List<MatchedCandidate> list2 = new List<MatchedCandidate>(list.Count);
-		TrackCandidates(pair, mat5, mat6, array, sourceIsCameraA: true, list2);
-		TrackCandidates(pair, mat6, mat5, array2, sourceIsCameraA: false, list2);
-		MediaPipeStereoDenseRigPoint[] array3 = Triangulate(pair, list2);
-		diagnostics = new MediaPipeDenseStereoDiagnostics(list.Count, list2.Count, array3.Length, Samples.Length, array.Length, array2.Length, list2.Count((MatchedCandidate candidate) => candidate.SourceCamera == DenseSourceCamera.CameraA), list2.Count((MatchedCandidate candidate) => candidate.SourceCamera == DenseSourceCamera.CameraB));
-		return array3;
+		List<MatchedCandidate> matchedCandidates = new List<MatchedCandidate>(candidateCount);
+		TrackCandidates(pair, mat5, mat6, cameraACandidates, sourceIsCameraA: true, matchedCandidates);
+		int cameraAMatchedCount = matchedCandidates.Count;
+		TrackCandidates(pair, mat6, mat5, cameraBCandidates, sourceIsCameraA: false, matchedCandidates);
+		int cameraBMatchedCount = matchedCandidates.Count - cameraAMatchedCount;
+		MediaPipeStereoDenseRigPoint[] triangulatedPoints = Triangulate(pair, matchedCandidates);
+		diagnostics = new MediaPipeDenseStereoDiagnostics(candidateCount, matchedCandidates.Count, triangulatedPoints.Length, Samples.Length, cameraACandidates.Count, cameraBCandidates.Count, cameraAMatchedCount, cameraBMatchedCount);
+		return triangulatedPoints;
 	}
 
 	private static void TrackCandidates(MediaPipeStereoImagePair pair, Mat sourceImage, Mat destinationImage, IReadOnlyList<SampleCandidate> candidates, bool sourceIsCameraA, List<MatchedCandidate> acceptedCandidates)
@@ -231,9 +262,8 @@ internal static class MediaPipeDenseStereoMatcher
 		return list.ToArray();
 	}
 
-	private static List<SampleCandidate> CreateCandidates(MediaPipeStereoImagePair pair)
+	private static void CreateCandidates(MediaPipeStereoImagePair pair, List<SampleCandidate> cameraACandidates, List<SampleCandidate> cameraBCandidates)
 	{
-		List<SampleCandidate> list = new List<SampleCandidate>(Samples.Length);
 		double num = Math.Max(1E-09, NormalizedLandmarkDistance(pair.CameraALandmarks, 234, 454));
 		double num2 = Math.Max(1E-09, NormalizedLandmarkDistance(pair.CameraBLandmarks, 234, 454));
 		DenseSourceCamera[] array = new DenseSourceCamera[Triangles.Length];
@@ -255,11 +285,19 @@ internal static class MediaPipeDenseStereoMatcher
 				Point2f point2f2 = new Point2f((float)(point2.X * (double)pair.CameraBWidth), (float)(point2.Y * (double)pair.CameraBHeight));
 				if (IsInside(point2f, pair.CameraAWidth, pair.CameraAHeight) && IsInside(point2f2, pair.CameraBWidth, pair.CameraBHeight))
 				{
-					list.Add(new SampleCandidate(definition, point2f, point2f2, array[definition.TriangleIndex]));
+					DenseSourceCamera sourceCamera = array[definition.TriangleIndex];
+					SampleCandidate candidate = new SampleCandidate(definition, point2f, point2f2, sourceCamera);
+					if (sourceCamera == DenseSourceCamera.CameraA)
+					{
+						cameraACandidates.Add(candidate);
+					}
+					else
+					{
+						cameraBCandidates.Add(candidate);
+					}
 				}
 			}
 		}
-		return list;
 	}
 
 	private static bool TryInterpolate(IReadOnlyList<MediaPipeStereoImageLandmark> landmarks, Triangle triangle, SampleDefinition definition, out Point2d point)

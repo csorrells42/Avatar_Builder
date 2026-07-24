@@ -1,5 +1,4 @@
 using System;
-using System.Linq;
 
 namespace AvatarBuilder.Modules.Vision.Reconstruction;
 
@@ -26,7 +25,7 @@ public static class AvatarCaptureGuidanceAdvisor
 		}
 		if (!input.CaptureQuality.CanCollectMeasurements)
 		{
-			string text = input.CaptureQuality.Suggestions.FirstOrDefault() ?? input.CaptureQuality.PrimaryReason ?? "Improve camera mode, lighting, face scale, eye visibility, mouth visibility, or stability.";
+			string text = input.CaptureQuality.Suggestions.Count > 0 ? input.CaptureQuality.Suggestions[0] : input.CaptureQuality.PrimaryReason ?? "Improve camera mode, lighting, face scale, eye visibility, mouth visibility, or stability.";
 			return Warning("Fix capture quality", "Avatar capture is on, but sample collection is paused: " + Clean(input.CaptureQuality.PrimaryReason, "capture quality is not ready") + ". Fix: " + text);
 		}
 		return Good("3D capture running", "The selected dense backend is the avatar reconstruction lane. Keep a relaxed, logged-in session running with natural blinks, speech, small head turns, and distance changes.");
@@ -49,12 +48,7 @@ public static class AvatarCaptureGuidanceAdvisor
 
 	private static AvatarCaptureGuidanceState CreateState(string title, string detail, string severity)
 	{
-		return new AvatarCaptureGuidanceState
-		{
-			Title = title,
-			Detail = detail,
-			Severity = severity
-		};
+		return new AvatarCaptureGuidanceState(title, detail, severity);
 	}
 
 	private static string Clean(string? value, string fallback)

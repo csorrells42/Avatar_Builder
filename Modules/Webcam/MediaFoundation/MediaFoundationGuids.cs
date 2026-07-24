@@ -46,6 +46,8 @@ internal static class MediaFoundationGuids
 
 	public static readonly Guid MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS = new Guid(2788469020u, 33323, 16825, 164, 148, 77, 228, 100, 54, 18, 176);
 
+	public static readonly Guid MF_LOW_LATENCY = new Guid(2619836698u, 60794, 16609, 136, 232, 178, 39, 39, 160, 36, 238);
+
 	public static readonly Guid MF_SOURCE_READER_D3D_MANAGER = new Guid(3967954338u, 57833, 19241, 160, 216, 86, 60, 113, 159, 82, 105);
 
 	public static readonly Guid MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING = new Guid(4214837053u, 52465, 17134, 187, 179, 249, 184, 69, 213, 104, 29);

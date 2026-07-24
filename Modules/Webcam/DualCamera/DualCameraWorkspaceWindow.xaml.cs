@@ -84,14 +84,14 @@ public partial class DualCameraWorkspaceWindow : Window, IComponentConnector
 			CameraAStatusText.Text = status;
 		}, delegate(string reason)
 		{
-			QueueLaneRecovery(laneA: true, reason);
+			ScheduleLaneRecovery(laneA: true, reason);
 		});
 		_laneB = new DualCameraLane("Camera B", CameraBPreviewPanel, CameraBPlaceholder, CameraBPreviewStateText, delegate(string status)
 		{
 			CameraBStatusText.Text = status;
 		}, delegate(string reason)
 		{
-			QueueLaneRecovery(laneA: false, reason);
+			ScheduleLaneRecovery(laneA: false, reason);
 		});
 		_registrationCoordinator = new DualCameraRegistrationCoordinator();
 		_calibrationCoordinator = new DualCameraCalibrationCoordinator(outputRoot);
@@ -310,23 +310,26 @@ public partial class DualCameraWorkspaceWindow : Window, IComponentConnector
 		double? physicalBaselineInches = diagnostics.PhysicalBaselineInches;
 		if (physicalBaselineInches.HasValue && physicalBaselineInches.GetValueOrDefault() > 0.0 && cameraA.TriangulatedRigPoints.Count >= 468)
 		{
-			MediaPipeStereoRigLandmark[] array = new MediaPipeStereoRigLandmark[cameraA.TriangulatedRigPoints.Count];
-			for (int i = 0; i < array.Length; i++)
+			_stereoFacePipeline.TryStart(delegate
 			{
-				DualCameraRigPoint dualCameraRigPoint = cameraA.TriangulatedRigPoints[i];
-				array[i] = new MediaPipeStereoRigLandmark(i, dualCameraRigPoint.XInches, dualCameraRigPoint.YInches, dualCameraRigPoint.ZInches, dualCameraRigPoint.IsValid, dualCameraRigPoint.ReprojectionResidualPercent, dualCameraRigPoint.CameraADirectnessRatio, dualCameraRigPoint.CameraBDirectnessRatio, dualCameraRigPoint.IsDirectlyMeasured);
-			}
-			_stereoFacePipeline.Queue(new MediaPipeStereoGeometryFrame
-			{
-				CalibrationId = (_savedCalibration?.ReconstructionId ?? ""),
-				CapturedAtUtc = cameraA.TargetCapturedAtUtc,
-				PairSkew = diagnostics.PairSkew,
-				BaselineInches = diagnostics.PhysicalBaselineInches.Value,
-				FrameReprojectionResidualPercent = diagnostics.RootMeanSquareResidualPercent,
-				CameraATrackingConfidence = diagnostics.CameraATrackingConfidence,
-				CameraBTrackingConfidence = diagnostics.CameraBTrackingConfidence,
-				Landmarks = array,
-				ImagePair = CreateStereoImagePair(diagnostics.DenseStereoSource)
+				MediaPipeStereoRigLandmark[] array = new MediaPipeStereoRigLandmark[cameraA.TriangulatedRigPoints.Count];
+				for (int i = 0; i < array.Length; i++)
+				{
+					DualCameraRigPoint dualCameraRigPoint = cameraA.TriangulatedRigPoints[i];
+					array[i] = new MediaPipeStereoRigLandmark(i, dualCameraRigPoint.XInches, dualCameraRigPoint.YInches, dualCameraRigPoint.ZInches, dualCameraRigPoint.IsValid, dualCameraRigPoint.ReprojectionResidualPercent, dualCameraRigPoint.CameraADirectnessRatio, dualCameraRigPoint.CameraBDirectnessRatio, dualCameraRigPoint.IsDirectlyMeasured);
+				}
+				return new MediaPipeStereoGeometryFrame
+				{
+					CalibrationId = (_savedCalibration?.ReconstructionId ?? ""),
+					CapturedAtUtc = cameraA.TargetCapturedAtUtc,
+					PairSkew = diagnostics.PairSkew,
+					BaselineInches = diagnostics.PhysicalBaselineInches.Value,
+					FrameReprojectionResidualPercent = diagnostics.RootMeanSquareResidualPercent,
+					CameraATrackingConfidence = diagnostics.CameraATrackingConfidence,
+					CameraBTrackingConfidence = diagnostics.CameraBTrackingConfidence,
+					Landmarks = array,
+					ImagePair = CreateStereoImagePair(diagnostics.DenseStereoSource)
+				};
 			});
 		}
 	}
@@ -384,7 +387,7 @@ public partial class DualCameraWorkspaceWindow : Window, IComponentConnector
 		{
 			if (!_shutdownStarted)
 			{
-				StereoReconstructionStatusText.Text = CreateStereoModelStatus(e.Model) + $" | worker {e.ProcessingDuration.TotalMilliseconds:0} ms | replaced {e.ReplacedFrameCount:n0}";
+				StereoReconstructionStatusText.Text = CreateStereoModelStatus(e.Model) + $" | worker {e.ProcessingDuration.TotalMilliseconds:0} ms | busy drops {e.BusyDropCount:n0}";
 				ViewStereoFaceButton.IsEnabled = e.Model.HasGeometry;
 				ViewRawStereoPointsButton.IsEnabled = e.Model.RawPointBinCount > 0;
 				ViewProbabilityFaceButton.IsEnabled = e.Model.RawPointBinCount >= 100;
@@ -428,7 +431,7 @@ public partial class DualCameraWorkspaceWindow : Window, IComponentConnector
 	{
 		try
 		{
-			_currentStereoFaceModel = await _stereoFacePipeline.FlushAsync();
+			_currentStereoFaceModel = await _stereoFacePipeline.FlushAsync(writeViewers: true);
 			Process.Start(new ProcessStartInfo(MediaPipeStereoFaceStore.GetViewerPath(_profileFolder))
 			{
 				UseShellExecute = true
@@ -445,7 +448,7 @@ public partial class DualCameraWorkspaceWindow : Window, IComponentConnector
 	{
 		try
 		{
-			_currentStereoFaceModel = await _stereoFacePipeline.FlushAsync();
+			_currentStereoFaceModel = await _stereoFacePipeline.FlushAsync(writeViewers: true);
 			Process.Start(new ProcessStartInfo(MediaPipeStereoFaceStore.GetRawViewerPath(_profileFolder))
 			{
 				UseShellExecute = true
@@ -582,7 +585,7 @@ public partial class DualCameraWorkspaceWindow : Window, IComponentConnector
 		await SetLaneStateAsync(laneA, enabled: true);
 	}
 
-	private void QueueLaneRecovery(bool laneA, string reason)
+	private void ScheduleLaneRecovery(bool laneA, string reason)
 	{
 		if (!_shutdownStarted)
 		{

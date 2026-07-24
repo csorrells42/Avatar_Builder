@@ -87,8 +87,11 @@ public static class EvidenceWeightedDenseFaceWarper
 			Percentile95AppliedDisplacement = Percentile(array3, 0.95),
 			SafetyClampVertexPercent = 100.0 * (double)num15 / (double)array3.Length,
 			SourceVertices = input.SourceVertices,
+			MeasuredVertices = input.MeasuredVertices,
+			MeasuredConfidences = input.MeasuredConfidences,
 			WarpedVertices = array2,
 			TopologyEdges = input.TopologyEdges,
+			MeasuredTopologyEdges = input.MeasuredTopologyEdges,
 			ControlPoints = array
 		};
 	}
@@ -103,7 +106,10 @@ public static class EvidenceWeightedDenseFaceWarper
 			Status = status,
 			SourceVertexCount = input.SourceVertices.Count,
 			SourceVertices = input.SourceVertices,
+			MeasuredVertices = input.MeasuredVertices,
+			MeasuredConfidences = input.MeasuredConfidences,
 			TopologyEdges = input.TopologyEdges,
+			MeasuredTopologyEdges = input.MeasuredTopologyEdges,
 			ControlPoints = input.ControlPoints
 		};
 	}

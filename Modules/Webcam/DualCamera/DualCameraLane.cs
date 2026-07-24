@@ -35,7 +35,7 @@ internal sealed class DualCameraLane : IAsyncDisposable
 
 	private static readonly TimeSpan WorkerShutdownGrace = TimeSpan.FromSeconds(3L);
 
-	private readonly object _pendingFrameLock = new object();
+	private readonly object _acceptedFrameLock = new object();
 
 	private readonly Panel _previewPanel;
 
@@ -55,9 +55,9 @@ internal sealed class DualCameraLane : IAsyncDisposable
 
 	private MediaPipeFaceLandmarkerSidecarTracker? _tracker;
 
-	private TextureNativeFrameLease? _pendingFrame;
+	private TextureNativeFrameLease? _acceptedTextureFrame;
 
-	private CameraFrame? _pendingDecodedFrame;
+	private CameraFrame? _acceptedDecodedFrame;
 
 	private CancellationTokenSource? _workerCancellation;
 
@@ -67,7 +67,7 @@ internal sealed class DualCameraLane : IAsyncDisposable
 
 	private Task? _healthTask;
 
-	private DateTime _lastAnalysisQueuedAtUtc = DateTime.MinValue;
+	private DateTime _lastAnalysisAcceptedAtUtc = DateTime.MinValue;
 
 	private long _lastSourceFrameTimestamp;
 
@@ -101,7 +101,7 @@ internal sealed class DualCameraLane : IAsyncDisposable
 
 	private int _analysisBusy;
 
-	private int _recoveryQueued;
+	private int _recoveryScheduled;
 
 	private int _acceptFrames;
 
@@ -212,7 +212,7 @@ internal sealed class DualCameraLane : IAsyncDisposable
 		};
 		_workerCancellation = new CancellationTokenSource();
 		_workerSignal = new AutoResetEvent(initialState: false);
-		_lastAnalysisQueuedAtUtc = DateTime.MinValue;
+		_lastAnalysisAcceptedAtUtc = DateTime.MinValue;
 		long timestamp = Stopwatch.GetTimestamp();
 		Interlocked.Exchange(ref _lastSourceFrameTimestamp, timestamp);
 		Interlocked.Exchange(ref _lastRenderedFrameTimestamp, timestamp);
@@ -222,7 +222,7 @@ internal sealed class DualCameraLane : IAsyncDisposable
 		Interlocked.Exchange(ref _analysisBusy, 0);
 		Interlocked.Exchange(ref _lastRenderedFrames, 0L);
 		Interlocked.Exchange(ref _hasFace, 0);
-		Interlocked.Exchange(ref _recoveryQueued, 0);
+		Interlocked.Exchange(ref _recoveryScheduled, 0);
 		Interlocked.Exchange(ref _latestObservationTicks, 0L);
 		Volatile.Write(ref _latestBaseOverlay, PreviewTrackingOverlay.Empty);
 		Volatile.Write(ref _latestRegistration, null);
@@ -300,18 +300,18 @@ internal sealed class DualCameraLane : IAsyncDisposable
 			await dx12UploadCamera.DisposeAsync();
 			Interlocked.Exchange(ref _lastCameraStoppedTimestamp, Stopwatch.GetTimestamp());
 		}
-		TextureNativeFrameLease pendingFrame;
-		CameraFrame pendingDecodedFrame;
-		lock (_pendingFrameLock)
+		TextureNativeFrameLease acceptedTextureFrame;
+		CameraFrame acceptedDecodedFrame;
+		lock (_acceptedFrameLock)
 		{
-			pendingFrame = _pendingFrame;
-			_pendingFrame = null;
-			pendingDecodedFrame = _pendingDecodedFrame;
-			_pendingDecodedFrame = null;
+			acceptedTextureFrame = _acceptedTextureFrame;
+			_acceptedTextureFrame = null;
+			acceptedDecodedFrame = _acceptedDecodedFrame;
+			_acceptedDecodedFrame = null;
 		}
-		pendingFrame?.Dispose();
-		pendingDecodedFrame?.Dispose();
-		if (pendingFrame != null || pendingDecodedFrame != null)
+		acceptedTextureFrame?.Dispose();
+		acceptedDecodedFrame?.Dispose();
+		if (acceptedTextureFrame != null || acceptedDecodedFrame != null)
 		{
 			Interlocked.Exchange(ref _analysisBusy, 0);
 		}
@@ -406,11 +406,11 @@ internal sealed class DualCameraLane : IAsyncDisposable
 			return;
 		}
 		DateTime utcNow = DateTime.UtcNow;
-		if ((_lastAnalysisQueuedAtUtc != DateTime.MinValue && utcNow - _lastAnalysisQueuedAtUtc < AnalysisInterval) || Interlocked.CompareExchange(ref _analysisBusy, 1, 0) != 0)
+		if ((_lastAnalysisAcceptedAtUtc != DateTime.MinValue && utcNow - _lastAnalysisAcceptedAtUtc < AnalysisInterval) || Interlocked.CompareExchange(ref _analysisBusy, 1, 0) != 0)
 		{
 			return;
 		}
-		_lastAnalysisQueuedAtUtc = utcNow;
+		_lastAnalysisAcceptedAtUtc = utcNow;
 		TextureNativeFrameLease textureNativeFrameLease;
 		try
 		{
@@ -426,18 +426,18 @@ internal sealed class DualCameraLane : IAsyncDisposable
 			Interlocked.Exchange(ref _analysisBusy, 0);
 			return;
 		}
-		lock (_pendingFrameLock)
+		lock (_acceptedFrameLock)
 		{
-			_pendingFrame = textureNativeFrameLease;
+			_acceptedTextureFrame = textureNativeFrameLease;
 		}
 		AutoResetEvent autoResetEvent = Volatile.Read(in _workerSignal);
 		if (autoResetEvent == null)
 		{
-			lock (_pendingFrameLock)
+			lock (_acceptedFrameLock)
 			{
-				if (_pendingFrame == textureNativeFrameLease)
+				if (_acceptedTextureFrame == textureNativeFrameLease)
 				{
-					_pendingFrame = null;
+					_acceptedTextureFrame = null;
 					textureNativeFrameLease.Dispose();
 					Interlocked.Exchange(ref _analysisBusy, 0);
 				}
@@ -450,11 +450,11 @@ internal sealed class DualCameraLane : IAsyncDisposable
 		}
 		catch (ObjectDisposedException)
 		{
-			lock (_pendingFrameLock)
+			lock (_acceptedFrameLock)
 			{
-				if (_pendingFrame == textureNativeFrameLease)
+				if (_acceptedTextureFrame == textureNativeFrameLease)
 				{
-					_pendingFrame = null;
+					_acceptedTextureFrame = null;
 					textureNativeFrameLease.Dispose();
 					Interlocked.Exchange(ref _analysisBusy, 0);
 				}
@@ -483,11 +483,11 @@ internal sealed class DualCameraLane : IAsyncDisposable
 		Interlocked.Increment(ref _sourceFrames);
 		Interlocked.Exchange(ref _lastSourceFrameTimestamp, Stopwatch.GetTimestamp());
 		DateTime utcNow = DateTime.UtcNow;
-		if ((_lastAnalysisQueuedAtUtc != DateTime.MinValue && utcNow - _lastAnalysisQueuedAtUtc < AnalysisInterval) || Interlocked.CompareExchange(ref _analysisBusy, 1, 0) != 0)
+		if ((_lastAnalysisAcceptedAtUtc != DateTime.MinValue && utcNow - _lastAnalysisAcceptedAtUtc < AnalysisInterval) || Interlocked.CompareExchange(ref _analysisBusy, 1, 0) != 0)
 		{
 			return;
 		}
-		_lastAnalysisQueuedAtUtc = utcNow;
+		_lastAnalysisAcceptedAtUtc = utcNow;
 		CameraFrame cameraFrame;
 		try
 		{
@@ -498,18 +498,18 @@ internal sealed class DualCameraLane : IAsyncDisposable
 			Interlocked.Exchange(ref _analysisBusy, 0);
 			return;
 		}
-		lock (_pendingFrameLock)
+		lock (_acceptedFrameLock)
 		{
-			_pendingDecodedFrame = cameraFrame;
+			_acceptedDecodedFrame = cameraFrame;
 		}
 		AutoResetEvent autoResetEvent = Volatile.Read(in _workerSignal);
 		if (autoResetEvent == null)
 		{
-			lock (_pendingFrameLock)
+			lock (_acceptedFrameLock)
 			{
-				if (_pendingDecodedFrame == cameraFrame)
+				if (_acceptedDecodedFrame == cameraFrame)
 				{
-					_pendingDecodedFrame = null;
+					_acceptedDecodedFrame = null;
 					cameraFrame.Dispose();
 					Interlocked.Exchange(ref _analysisBusy, 0);
 				}
@@ -522,11 +522,11 @@ internal sealed class DualCameraLane : IAsyncDisposable
 		}
 		catch (ObjectDisposedException)
 		{
-			lock (_pendingFrameLock)
+			lock (_acceptedFrameLock)
 			{
-				if (_pendingDecodedFrame == cameraFrame)
+				if (_acceptedDecodedFrame == cameraFrame)
 				{
-					_pendingDecodedFrame = null;
+					_acceptedDecodedFrame = null;
 					cameraFrame.Dispose();
 					Interlocked.Exchange(ref _analysisBusy, 0);
 				}
@@ -564,25 +564,25 @@ internal sealed class DualCameraLane : IAsyncDisposable
 			{
 				break;
 			}
-			TextureNativeFrameLease pendingFrame;
+			TextureNativeFrameLease acceptedTextureFrame;
 			CameraFrame cameraFrame;
-			lock (_pendingFrameLock)
+			lock (_acceptedFrameLock)
 			{
-				pendingFrame = _pendingFrame;
-				_pendingFrame = null;
-				cameraFrame = ((pendingFrame == null) ? _pendingDecodedFrame : null);
-				_pendingDecodedFrame = null;
+				acceptedTextureFrame = _acceptedTextureFrame;
+				_acceptedTextureFrame = null;
+				cameraFrame = ((acceptedTextureFrame == null) ? _acceptedDecodedFrame : null);
+				_acceptedDecodedFrame = null;
 			}
-			if (pendingFrame == null && cameraFrame == null)
+			if (acceptedTextureFrame == null && cameraFrame == null)
 			{
 				Interlocked.Exchange(ref _analysisBusy, 0);
 				continue;
 			}
 			try
 			{
-				if (pendingFrame != null)
+				if (acceptedTextureFrame != null)
 				{
-					AnalyzeFrame(pendingFrame);
+					AnalyzeFrame(acceptedTextureFrame);
 				}
 				else if (cameraFrame != null)
 				{
@@ -595,7 +595,7 @@ internal sealed class DualCameraLane : IAsyncDisposable
 			}
 			finally
 			{
-				pendingFrame?.Dispose();
+				acceptedTextureFrame?.Dispose();
 				cameraFrame?.Dispose();
 				Interlocked.Exchange(ref _analysisBusy, 0);
 			}
@@ -712,6 +712,7 @@ internal sealed class DualCameraLane : IAsyncDisposable
 	private async Task RunHealthMonitorAsync(CancellationToken cancellationToken)
 	{
 		long previousTimestamp = Stopwatch.GetTimestamp();
+		RefreshNativeSourceHeartbeat();
 		long previousSourceFrames = Interlocked.Read(in _sourceFrames);
 		long previousAnalysisFrames = Interlocked.Read(in _analysisFrames);
 		while (!cancellationToken.IsCancellationRequested)
@@ -730,6 +731,7 @@ internal sealed class DualCameraLane : IAsyncDisposable
 			}
 			long timestamp = Stopwatch.GetTimestamp();
 			double num = Math.Max(0.001, Stopwatch.GetElapsedTime(previousTimestamp, timestamp).TotalSeconds);
+			RefreshNativeSourceHeartbeat();
 			long num2 = Interlocked.Read(in _sourceFrames);
 			long num3 = Interlocked.Read(in _analysisFrames);
 			_measuredSourceFramesPerSecond = (double)(num2 - previousSourceFrames) / num;
@@ -768,6 +770,21 @@ internal sealed class DualCameraLane : IAsyncDisposable
 		}
 	}
 
+	private void RefreshNativeSourceHeartbeat()
+	{
+		Dx12Camera? camera = _camera;
+		if (camera == null)
+		{
+			return;
+		}
+		Interlocked.Exchange(ref _sourceFrames, camera.FramesRead);
+		long sourceTimestamp = camera.LastSourceFrameTimestamp;
+		if (sourceTimestamp != 0L)
+		{
+			Interlocked.Exchange(ref _lastSourceFrameTimestamp, sourceTimestamp);
+		}
+	}
+
 	private void PublishStatistics()
 	{
 		string value = ((Volatile.Read(in _hasFace) != 0) ? $"lock {_trackingConfidence:P0}" : "face waiting");
@@ -776,7 +793,7 @@ internal sealed class DualCameraLane : IAsyncDisposable
 
 	private void RequestRecovery(string reason)
 	{
-		if (Interlocked.CompareExchange(ref _recoveryQueued, 1, 0) == 0 && Volatile.Read(in _acceptFrames) != 0)
+		if (Interlocked.CompareExchange(ref _recoveryScheduled, 1, 0) == 0 && Volatile.Read(in _acceptFrames) != 0)
 		{
 			PublishStatus(_name + ": " + reason + "; reopening only this camera lane.");
 			_previewPanel.Dispatcher.InvokeAsync(delegate

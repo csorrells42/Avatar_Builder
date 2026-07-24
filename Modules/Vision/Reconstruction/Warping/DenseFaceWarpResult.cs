@@ -5,10 +5,6 @@ namespace AvatarBuilder.Modules.Vision.Reconstruction.Warping;
 
 public sealed class DenseFaceWarpResult
 {
-	public const string CurrentSchemaVersion = "three-ddfa-mediapipe-warp-v2";
-
-	public string SchemaVersion { get; init; } = "three-ddfa-mediapipe-warp-v2";
-
 	public string SubjectId { get; init; } = "";
 
 	public string SubjectDisplayName { get; init; } = "";
@@ -35,9 +31,15 @@ public sealed class DenseFaceWarpResult
 
 	public IReadOnlyList<DenseFaceWarpVertex> SourceVertices { get; init; } = Array.Empty<DenseFaceWarpVertex>();
 
+	public IReadOnlyList<DenseFaceWarpVertex> MeasuredVertices { get; init; } = Array.Empty<DenseFaceWarpVertex>();
+
+	public IReadOnlyList<double> MeasuredConfidences { get; init; } = Array.Empty<double>();
+
 	public IReadOnlyList<DenseFaceWarpVertex> WarpedVertices { get; init; } = Array.Empty<DenseFaceWarpVertex>();
 
 	public IReadOnlyList<MeshTopologyEdge> TopologyEdges { get; init; } = Array.Empty<MeshTopologyEdge>();
+
+	public IReadOnlyList<MeshTopologyEdge> MeasuredTopologyEdges { get; init; } = Array.Empty<MeshTopologyEdge>();
 
 	public IReadOnlyList<DenseFaceWarpControlPoint> ControlPoints { get; init; } = Array.Empty<DenseFaceWarpControlPoint>();
 
@@ -52,4 +54,9 @@ public sealed class DenseFaceWarpResult
 			return false;
 		}
 	}
+
+	public bool HasMeasuredGeometry =>
+		MeasuredVertices.Count > 0 &&
+		MeasuredConfidences.Count == MeasuredVertices.Count &&
+		MeasuredTopologyEdges.Count > 0;
 }

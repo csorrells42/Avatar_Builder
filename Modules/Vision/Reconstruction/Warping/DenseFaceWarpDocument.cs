@@ -6,8 +6,6 @@ namespace AvatarBuilder.Modules.Vision.Reconstruction.Warping;
 
 internal sealed class DenseFaceWarpDocument
 {
-	public string SchemaVersion { get; init; } = "three-ddfa-mediapipe-warp-v2";
-
 	public string SubjectId { get; init; } = "";
 
 	public string SubjectDisplayName { get; init; } = "";
@@ -19,6 +17,22 @@ internal sealed class DenseFaceWarpDocument
 	public int SourceVertexCount { get; init; }
 
 	public int AppliedControlPointCount { get; init; }
+
+	public int MeasuredVertexCount { get; init; }
+
+	public int MeasuredEdgeCount { get; init; }
+
+	public int DenseEdgeCount { get; init; }
+
+	public int HighConfidenceMeasuredVertexCount { get; init; }
+
+	public int MediumConfidenceMeasuredVertexCount { get; init; }
+
+	public int LowConfidenceMeasuredVertexCount { get; init; }
+
+	public double MeanMeasuredConfidence { get; init; }
+
+	public double AnchorRmsImprovementPercent { get; init; }
 
 	public double SourceAnchorRms { get; init; }
 
@@ -34,14 +48,24 @@ internal sealed class DenseFaceWarpDocument
 
 	public IReadOnlyList<double> SourceCoordinates { get; init; } = Array.Empty<double>();
 
+	public IReadOnlyList<double> MeasuredCoordinates { get; init; } = Array.Empty<double>();
+
+	public IReadOnlyList<double> MeasuredConfidences { get; init; } = Array.Empty<double>();
+
 	public IReadOnlyList<double> WarpedCoordinates { get; init; } = Array.Empty<double>();
 
 	public IReadOnlyList<int> EdgeIndices { get; init; } = Array.Empty<int>();
+
+	public IReadOnlyList<int> MeasuredEdgeIndices { get; init; } = Array.Empty<int>();
 
 	public IReadOnlyList<DenseFaceWarpControlDocument> Controls { get; init; } = Array.Empty<DenseFaceWarpControlDocument>();
 
 	public static DenseFaceWarpDocument Create(DenseFaceWarpResult result)
 	{
+		double[] measuredConfidences = NormalizeMeasuredConfidences(result.MeasuredConfidences, result.MeasuredVertices.Count);
+		int highConfidenceCount = measuredConfidences.Count(confidence => confidence >= 0.72);
+		int mediumConfidenceCount = measuredConfidences.Count(confidence => confidence >= 0.35 && confidence < 0.72);
+		int lowConfidenceCount = measuredConfidences.Length - highConfidenceCount - mediumConfidenceCount;
 		return new DenseFaceWarpDocument
 		{
 			SubjectId = result.SubjectId,
@@ -50,6 +74,14 @@ internal sealed class DenseFaceWarpDocument
 			Status = result.Status,
 			SourceVertexCount = result.SourceVertexCount,
 			AppliedControlPointCount = result.AppliedControlPointCount,
+			MeasuredVertexCount = result.MeasuredVertices.Count,
+			MeasuredEdgeCount = result.MeasuredTopologyEdges.Count,
+			DenseEdgeCount = result.TopologyEdges.Count,
+			HighConfidenceMeasuredVertexCount = highConfidenceCount,
+			MediumConfidenceMeasuredVertexCount = mediumConfidenceCount,
+			LowConfidenceMeasuredVertexCount = lowConfidenceCount,
+			MeanMeasuredConfidence = measuredConfidences.Length == 0 ? 0.0 : measuredConfidences.Average(),
+			AnchorRmsImprovementPercent = CalculateAnchorRmsImprovement(result.SourceAnchorRms, result.WarpedAnchorRms),
 			SourceAnchorRms = result.SourceAnchorRms,
 			WarpedAnchorRms = result.WarpedAnchorRms,
 			MaximumAppliedDisplacement = result.MaximumAppliedDisplacement,
@@ -57,10 +89,33 @@ internal sealed class DenseFaceWarpDocument
 			Percentile95AppliedDisplacement = result.Percentile95AppliedDisplacement,
 			SafetyClampVertexPercent = result.SafetyClampVertexPercent,
 			SourceCoordinates = FlattenVertices(result.SourceVertices),
+			MeasuredCoordinates = FlattenVertices(result.MeasuredVertices),
+			MeasuredConfidences = measuredConfidences,
 			WarpedCoordinates = FlattenVertices(result.WarpedVertices),
 			EdgeIndices = FlattenEdges(result.TopologyEdges),
+			MeasuredEdgeIndices = FlattenEdges(result.MeasuredTopologyEdges),
 			Controls = result.ControlPoints.Select(DenseFaceWarpControlDocument.Create).ToArray()
 		};
+	}
+
+	private static double[] NormalizeMeasuredConfidences(IReadOnlyList<double> confidences, int vertexCount)
+	{
+		double[] normalized = new double[Math.Max(0, vertexCount)];
+		for (int i = 0; i < normalized.Length; i++)
+		{
+			double confidence = i < confidences.Count ? confidences[i] : 0.0;
+			normalized[i] = double.IsFinite(confidence) ? Math.Clamp(confidence, 0.0, 1.0) : 0.0;
+		}
+		return normalized;
+	}
+
+	private static double CalculateAnchorRmsImprovement(double sourceRms, double warpedRms)
+	{
+		if (!double.IsFinite(sourceRms) || !double.IsFinite(warpedRms) || sourceRms <= 1e-9)
+		{
+			return 0.0;
+		}
+		return Math.Clamp((sourceRms - warpedRms) / sourceRms * 100.0, -999.0, 100.0);
 	}
 
 	private static double[] FlattenVertices(IReadOnlyList<DenseFaceWarpVertex> vertices)

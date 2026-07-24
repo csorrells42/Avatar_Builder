@@ -5,8 +5,6 @@ namespace AvatarBuilder.Modules.Vision.MediaPipe.Reconstruction;
 
 public sealed class MediaPipeNormalizedFaceState
 {
-	public string SchemaVersion { get; init; } = "mediapipe-visible-geometry-v2";
-
 	public string SubjectId { get; init; } = "";
 
 	public string SubjectDisplayName { get; init; } = "";

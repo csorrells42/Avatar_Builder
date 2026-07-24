@@ -8,22 +8,30 @@ namespace AvatarBuilder.Modules.Vision.MediaPipe;
 
 public sealed class MediaPipeFaceLandmarkerSidecarTracker : IStatefulFaceLandmarkTracker, IFaceLandmarkTracker, IDisposable, IFaceLandmarkCropRefiner
 {
+	private static readonly BitmapSource EmptyBgraBitmap = CreateEmptyBgraBitmap();
+
 	private readonly DenseFaceLandmarkModelInfo _modelInfo = DenseFaceLandmarkModelInfo.Load();
 
 	private readonly Lazy<MediaPipeSidecarPythonEnvironment> _environment;
+
+	private readonly MediaPipeExecutionBackend _executionBackend;
+
+	private readonly bool _collectDiagnostics;
 
 	private MediaPipeFaceLandmarkerSidecarClient? _client;
 
 	private string _lastStatus = "MediaPipe sidecar not checked";
 
-	public string Name => "MediaPipe Face Landmarker sidecar";
+	public string Name => $"MediaPipe Face Landmarker ({_executionBackend.ToDisplayName()})";
 
 	public bool IsAvailable => _environment.Value.IsReady;
 
 	public int MaxDetectionDimension { get; set; } = 1920;
 
-	public MediaPipeFaceLandmarkerSidecarTracker()
+	public MediaPipeFaceLandmarkerSidecarTracker(MediaPipeExecutionBackend executionBackend = MediaPipeExecutionBackend.Cpu, bool collectDiagnostics = false)
 	{
+		_executionBackend = executionBackend;
+		_collectDiagnostics = collectDiagnostics;
 		_environment = new Lazy<MediaPipeSidecarPythonEnvironment>(delegate
 		{
 			MediaPipeSidecarPythonEnvironment mediaPipeSidecarPythonEnvironment = MediaPipeSidecarPythonEnvironment.Detect(_modelInfo);
@@ -44,12 +52,17 @@ public sealed class MediaPipeFaceLandmarkerSidecarTracker : IStatefulFaceLandmar
 		}
 		if (_client == null)
 		{
-			_client = new MediaPipeFaceLandmarkerSidecarClient(_environment.Value);
+			_client = new MediaPipeFaceLandmarkerSidecarClient(_environment.Value, _executionBackend, _collectDiagnostics);
 		}
 		BitmapSource bitmap2 = ResizeForDetection(bitmap, MaxDetectionDimension);
 		MediaPipeSidecarResponse mediaPipeSidecarResponse = _client.Analyze(bitmap2, capturedAtUtc, bitmap.PixelWidth, bitmap.PixelHeight);
 		_lastStatus = (string.IsNullOrWhiteSpace(mediaPipeSidecarResponse.Status) ? _client.Status : mediaPipeSidecarResponse.Status);
-		return MediaPipeFaceLandmarkerMapper.ToTrackingResult(mediaPipeSidecarResponse, capturedAtUtc, Name);
+		return MediaPipeFaceLandmarkerMapper.ToTrackingResult(
+			mediaPipeSidecarResponse,
+			capturedAtUtc,
+			Name,
+			bitmap2.PixelWidth,
+			bitmap2.PixelHeight);
 	}
 
 	public FaceLandmarkTrackingResult DetectFaceCrop(BitmapSource bitmap, Rect normalizedFaceHint, DateTime capturedAtUtc)
@@ -72,12 +85,20 @@ public sealed class MediaPipeFaceLandmarkerSidecarTracker : IStatefulFaceLandmar
 		}
 		if (_client == null)
 		{
-			_client = new MediaPipeFaceLandmarkerSidecarClient(_environment.Value);
+			_client = new MediaPipeFaceLandmarkerSidecarClient(_environment.Value, _executionBackend, _collectDiagnostics);
 		}
 		BitmapSource bitmap2 = ResizeForDetection(cropBitmap, MaxDetectionDimension);
 		MediaPipeSidecarResponse mediaPipeSidecarResponse = _client.Analyze(bitmap2, capturedAtUtc, cropBitmap.PixelWidth, cropBitmap.PixelHeight);
 		_lastStatus = (string.IsNullOrWhiteSpace(mediaPipeSidecarResponse.Status) ? _client.Status : mediaPipeSidecarResponse.Status);
-		return FaceLandmarkCropMapper.MapToFrame(MediaPipeFaceLandmarkerMapper.ToTrackingResult(mediaPipeSidecarResponse, capturedAtUtc, Name), normalizedCrop, "crop refined from face hint " + FormatCrop(normalizedCrop));
+		return FaceLandmarkCropMapper.MapToFrame(
+			MediaPipeFaceLandmarkerMapper.ToTrackingResult(
+				mediaPipeSidecarResponse,
+				capturedAtUtc,
+				Name,
+				bitmap2.PixelWidth,
+				bitmap2.PixelHeight),
+			normalizedCrop,
+			"crop refined from face hint " + FormatCrop(normalizedCrop));
 	}
 
 	public void Reset()
@@ -110,7 +131,7 @@ public sealed class MediaPipeFaceLandmarkerSidecarTracker : IStatefulFaceLandmar
 
 	private static bool TryCreateFaceCrop(BitmapSource bitmap, Rect normalizedFaceHint, out BitmapSource cropBitmap, out Rect normalizedCrop)
 	{
-		cropBitmap = BitmapSource.Create(1, 1, 96.0, 96.0, PixelFormats.Bgra32, null, new byte[4], 4);
+		cropBitmap = EmptyBgraBitmap;
 		normalizedCrop = Rect.Empty;
 		if (bitmap.PixelWidth <= 0 || bitmap.PixelHeight <= 0 || normalizedFaceHint.Width <= 0.0 || normalizedFaceHint.Height <= 0.0)
 		{
@@ -160,5 +181,12 @@ public sealed class MediaPipeFaceLandmarkerSidecarTracker : IStatefulFaceLandmar
 	private static string FormatCrop(Rect rect)
 	{
 		return $"{rect.Left:0.###},{rect.Top:0.###},{rect.Width:0.###}x{rect.Height:0.###}";
+	}
+
+	private static BitmapSource CreateEmptyBgraBitmap()
+	{
+		BitmapSource bitmap = BitmapSource.Create(1, 1, 96.0, 96.0, PixelFormats.Bgra32, null, new byte[4], 4);
+		bitmap.Freeze();
+		return bitmap;
 	}
 }

@@ -38,9 +38,12 @@ public static class DenseFaceWarpStore
 	{
 		ArgumentException.ThrowIfNullOrWhiteSpace(profileFolder, "profileFolder");
 		ArgumentNullException.ThrowIfNull(result, "result");
-		if (!result.HasGeometry)
+		if (!result.HasGeometry || !result.HasMeasuredGeometry)
 		{
-			throw new InvalidOperationException(result.Status);
+			throw new InvalidOperationException(
+				string.IsNullOrWhiteSpace(result.Status)
+					? "The dense warp result must contain both measured MediaPipe geometry and warped 3DDFA geometry."
+					: result.Status);
 		}
 		string text = JsonSerializer.Serialize(DenseFaceWarpDocument.Create(result), JsonOptions);
 		Directory.CreateDirectory(GetFolder(profileFolder));

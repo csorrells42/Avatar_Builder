@@ -1,5 +1,6 @@
 using System;
 using System.Diagnostics;
+using System.Globalization;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
@@ -14,7 +15,13 @@ internal sealed class MediaPipeFaceLandmarkerSidecarClient : IDisposable
 
 	private readonly MediaPipeSidecarPythonEnvironment _environment;
 
+	private readonly MediaPipeExecutionBackend _executionBackend;
+
+	private readonly bool _collectDiagnostics;
+
 	private readonly MediaPipeSharedMemoryFrame _sharedMemoryFrame = new MediaPipeSharedMemoryFrame();
+
+	private readonly MediaPipeSharedMemoryLandmarks _sharedMemoryLandmarks = new MediaPipeSharedMemoryLandmarks();
 
 	private readonly object _sync = new object();
 
@@ -28,109 +35,160 @@ internal sealed class MediaPipeFaceLandmarkerSidecarClient : IDisposable
 
 	private long _lastTimestampMilliseconds;
 
+	private MediaPipeSharedMemoryFrameDescriptor _lastSentFrameDescriptor;
+
 	private int _disposed;
+
+	private int _analysisInFlight;
 
 	public string Status { get; private set; } = "";
 
-	public MediaPipeFaceLandmarkerSidecarClient(MediaPipeSidecarPythonEnvironment environment)
+	public MediaPipeFaceLandmarkerSidecarClient(MediaPipeSidecarPythonEnvironment environment, MediaPipeExecutionBackend executionBackend, bool collectDiagnostics)
 	{
 		_environment = environment;
+		_executionBackend = executionBackend;
+		_collectDiagnostics = collectDiagnostics;
 		_timeout = TimeSpan.FromMilliseconds(ReadTimeoutMilliseconds());
 	}
 
 	public MediaPipeSidecarResponse Analyze(BitmapSource bitmap, DateTime capturedAtUtc, int sourceWidth = 0, int sourceHeight = 0)
 	{
-		lock (_sync)
+		if (Interlocked.CompareExchange(ref _analysisInFlight, 1, 0) != 0)
 		{
-			if (Volatile.Read(in _disposed) != 0)
+			return Error("MediaPipe frame dropped before conversion because the selected processor is busy.");
+		}
+		try
+		{
+			lock (_sync)
 			{
-				return Error("MediaPipe sidecar client is stopped.");
-			}
-			if (!_environment.IsReady)
-			{
-				return Error(_environment.Status);
-			}
-			if (!EnsureProcess())
-			{
-				return Error(Status);
-			}
-			try
-			{
-				Stopwatch stopwatch = Stopwatch.StartNew();
-				Stopwatch stopwatch2 = Stopwatch.StartNew();
-				MediaPipeSharedMemoryFrameDescriptor mediaPipeSharedMemoryFrameDescriptor = _sharedMemoryFrame.Write(bitmap);
-				long timestampMilliseconds = (_lastTimestampMilliseconds = Math.Max(new DateTimeOffset(capturedAtUtc).ToUnixTimeMilliseconds(), _lastTimestampMilliseconds + 1));
-				MediaPipeSidecarRequest mediaPipeSidecarRequest = new MediaPipeSidecarRequest
+				if (Volatile.Read(in _disposed) != 0)
 				{
-					RequestId = Interlocked.Increment(ref _requestNumber).ToString("D6"),
-					CapturedAtUtc = capturedAtUtc.ToString("O"),
-					TimestampMilliseconds = timestampMilliseconds,
-					SharedMemoryName = mediaPipeSharedMemoryFrameDescriptor.Name,
-					SharedMemoryCapacityBytes = mediaPipeSharedMemoryFrameDescriptor.CapacityBytes,
-					ImageByteLength = mediaPipeSharedMemoryFrameDescriptor.ImageByteLength,
-					ImageWidth = mediaPipeSharedMemoryFrameDescriptor.Width,
-					ImageHeight = mediaPipeSharedMemoryFrameDescriptor.Height,
-					ImageStride = mediaPipeSharedMemoryFrameDescriptor.Stride,
-					ImagePixelFormat = mediaPipeSharedMemoryFrameDescriptor.PixelFormat
-				};
-				string value = JsonSerializer.Serialize(mediaPipeSidecarRequest, JsonOptions);
-				stopwatch2.Stop();
-				Stopwatch stopwatch3 = Stopwatch.StartNew();
-				_process.StandardInput.WriteLine(value);
-				_process.StandardInput.Flush();
-				Task<string> task = _process.StandardOutput.ReadLineAsync();
-				TimeSpan timeout = (_firstResponseAfterStart ? TimeSpan.FromMilliseconds(ReadStartupTimeoutMilliseconds()) : _timeout);
-				if (!task.Wait(timeout))
+					return Error("MediaPipe sidecar client is stopped.");
+				}
+				if (!_environment.IsReady)
 				{
-					RestartAfterFailure("MediaPipe sidecar timed out waiting for a frame response.");
+					return Error(_environment.Status);
+				}
+				if (!EnsureProcess())
+				{
 					return Error(Status);
 				}
-				_firstResponseAfterStart = false;
-				string result = task.Result;
-				stopwatch3.Stop();
-				if (string.IsNullOrWhiteSpace(result))
+				try
 				{
-					RestartAfterFailure("MediaPipe sidecar closed its output stream.");
+					long totalStartedAt = _collectDiagnostics ? Stopwatch.GetTimestamp() : 0L;
+					long prepareStartedAt = totalStartedAt;
+					MediaPipeSharedMemoryFrameDescriptor mediaPipeSharedMemoryFrameDescriptor = _sharedMemoryFrame.Write(bitmap);
+					long timestampMilliseconds = (_lastTimestampMilliseconds = Math.Max(Environment.TickCount64, _lastTimestampMilliseconds + 1));
+					int requestId = Interlocked.Increment(ref _requestNumber);
+					bool sendTransportSetup = _firstResponseAfterStart || mediaPipeSharedMemoryFrameDescriptor != _lastSentFrameDescriptor;
+					string value;
+					if (sendTransportSetup || _collectDiagnostics)
+					{
+						MediaPipeSidecarRequest mediaPipeSidecarRequest = new MediaPipeSidecarRequest
+						{
+							RequestId = requestId,
+							TimestampMilliseconds = timestampMilliseconds,
+							SharedMemoryName = sendTransportSetup ? mediaPipeSharedMemoryFrameDescriptor.Name : null,
+							SharedMemoryCapacityBytes = sendTransportSetup ? mediaPipeSharedMemoryFrameDescriptor.CapacityBytes : 0,
+							ImageByteLength = sendTransportSetup ? mediaPipeSharedMemoryFrameDescriptor.ImageByteLength : 0,
+							ImageWidth = sendTransportSetup ? mediaPipeSharedMemoryFrameDescriptor.Width : 0,
+							ImageHeight = sendTransportSetup ? mediaPipeSharedMemoryFrameDescriptor.Height : 0,
+							ImageStride = sendTransportSetup ? mediaPipeSharedMemoryFrameDescriptor.Stride : 0,
+							ImagePixelFormat = sendTransportSetup ? mediaPipeSharedMemoryFrameDescriptor.PixelFormat : null,
+							LandmarkSharedMemoryName = sendTransportSetup ? _sharedMemoryLandmarks.Name : null,
+							LandmarkSharedMemoryCapacityBytes = sendTransportSetup ? _sharedMemoryLandmarks.Capacity : 0,
+							CollectDiagnostics = _collectDiagnostics
+						};
+						value = JsonSerializer.Serialize(mediaPipeSidecarRequest, JsonOptions);
+					}
+					else
+					{
+						value = string.Create(
+							CultureInfo.InvariantCulture,
+							$"{{\"requestId\":{requestId},\"timestampMilliseconds\":{timestampMilliseconds}}}");
+					}
+					double prepareMilliseconds = ElapsedMilliseconds(prepareStartedAt);
+					long roundTripStartedAt = _collectDiagnostics ? Stopwatch.GetTimestamp() : 0L;
+					_process.StandardInput.WriteLine(value);
+					_process.StandardInput.Flush();
+					Task<string> task = _process.StandardOutput.ReadLineAsync();
+					TimeSpan timeout = (_firstResponseAfterStart ? TimeSpan.FromMilliseconds(ReadStartupTimeoutMilliseconds()) : _timeout);
+					if (!task.Wait(timeout))
+					{
+						RestartAfterFailure("MediaPipe sidecar timed out waiting for a frame response.");
+						return Error(Status);
+					}
+					_firstResponseAfterStart = false;
+					string result = task.Result;
+					double roundTripMilliseconds = ElapsedMilliseconds(roundTripStartedAt);
+					if (string.IsNullOrWhiteSpace(result))
+					{
+						RestartAfterFailure("MediaPipe sidecar closed its output stream.");
+						return Error(Status);
+					}
+					long parseStartedAt = _collectDiagnostics ? Stopwatch.GetTimestamp() : 0L;
+					MediaPipeSidecarResponse mediaPipeSidecarResponse = JsonSerializer.Deserialize<MediaPipeSidecarResponse>(result, JsonOptions);
+					double parseMilliseconds = ElapsedMilliseconds(parseStartedAt);
+					if (mediaPipeSidecarResponse == null)
+					{
+						return Error("MediaPipe sidecar returned an empty response.");
+					}
+					if (mediaPipeSidecarResponse.RequestId != requestId)
+					{
+						return Error($"MediaPipe sidecar response id mismatch: expected {requestId}, got {mediaPipeSidecarResponse.RequestId}.");
+					}
+					if (sendTransportSetup && mediaPipeSidecarResponse.Ok)
+					{
+						_lastSentFrameDescriptor = mediaPipeSharedMemoryFrameDescriptor;
+					}
+					if (mediaPipeSidecarResponse.HasFace)
+					{
+						_sharedMemoryLandmarks.Read(
+							mediaPipeSidecarResponse.LandmarkCount,
+							mediaPipeSidecarResponse.FacialTransformationMatrixCount,
+							out MediaPipeSidecarLandmark[] landmarks,
+							out double[] transformationMatrix);
+						mediaPipeSidecarResponse.Landmarks = landmarks;
+						mediaPipeSidecarResponse.FacialTransformationMatrix = transformationMatrix;
+					}
+					if (mediaPipeSidecarResponse.Status.Length == 0)
+					{
+						mediaPipeSidecarResponse.Status = GetNormalStatus(mediaPipeSidecarResponse.HasFace);
+					}
+					Status = mediaPipeSidecarResponse.Status;
+					if (_collectDiagnostics)
+					{
+						mediaPipeSidecarResponse.Diagnostics = new VisionPipelineDiagnostics
+						{
+							CapturedAtUtc = capturedAtUtc,
+							Backend = "MediaPipe Face Landmarker",
+							Mode = $"video-tracking-shared-memory-{_executionBackend.ToProtocolValue()}",
+							SourceWidth = ((sourceWidth > 0) ? sourceWidth : bitmap.PixelWidth),
+							SourceHeight = ((sourceHeight > 0) ? sourceHeight : bitmap.PixelHeight),
+							InputWidth = bitmap.PixelWidth,
+							InputHeight = bitmap.PixelHeight,
+							EncodedPayloadBytes = mediaPipeSharedMemoryFrameDescriptor.ImageByteLength,
+							HasFace = mediaPipeSidecarResponse.HasFace,
+							ClientPrepareMilliseconds = prepareMilliseconds,
+							SidecarRoundTripMilliseconds = roundTripMilliseconds,
+							ClientParseMilliseconds = parseMilliseconds,
+							EndToEndMilliseconds = ElapsedMilliseconds(totalStartedAt),
+							SidecarStagesMilliseconds = mediaPipeSidecarResponse.TimingsMilliseconds,
+							Status = mediaPipeSidecarResponse.Status
+						};
+					}
+					return mediaPipeSidecarResponse;
+				}
+				catch (Exception ex)
+				{
+					RestartAfterFailure("MediaPipe sidecar call failed: " + ex.Message);
 					return Error(Status);
 				}
-				Stopwatch stopwatch4 = Stopwatch.StartNew();
-				MediaPipeSidecarResponse mediaPipeSidecarResponse = JsonSerializer.Deserialize<MediaPipeSidecarResponse>(result, JsonOptions);
-				stopwatch4.Stop();
-				if (mediaPipeSidecarResponse == null)
-				{
-					return Error("MediaPipe sidecar returned an empty response.");
-				}
-				if (!string.Equals(mediaPipeSidecarResponse.RequestId, mediaPipeSidecarRequest.RequestId, StringComparison.Ordinal))
-				{
-					return Error($"MediaPipe sidecar response id mismatch: expected {mediaPipeSidecarRequest.RequestId}, got {mediaPipeSidecarResponse.RequestId}.");
-				}
-				Status = mediaPipeSidecarResponse.Status;
-				stopwatch.Stop();
-				mediaPipeSidecarResponse.Diagnostics = new VisionPipelineDiagnostics
-				{
-					CapturedAtUtc = capturedAtUtc,
-					Backend = "MediaPipe Face Landmarker",
-					Mode = "video-tracking-shared-memory",
-					SourceWidth = ((sourceWidth > 0) ? sourceWidth : bitmap.PixelWidth),
-					SourceHeight = ((sourceHeight > 0) ? sourceHeight : bitmap.PixelHeight),
-					InputWidth = bitmap.PixelWidth,
-					InputHeight = bitmap.PixelHeight,
-					EncodedPayloadBytes = mediaPipeSharedMemoryFrameDescriptor.ImageByteLength,
-					HasFace = mediaPipeSidecarResponse.HasFace,
-					ClientPrepareMilliseconds = stopwatch2.Elapsed.TotalMilliseconds,
-					SidecarRoundTripMilliseconds = stopwatch3.Elapsed.TotalMilliseconds,
-					ClientParseMilliseconds = stopwatch4.Elapsed.TotalMilliseconds,
-					EndToEndMilliseconds = stopwatch.Elapsed.TotalMilliseconds,
-					SidecarStagesMilliseconds = mediaPipeSidecarResponse.TimingsMilliseconds,
-					Status = mediaPipeSidecarResponse.Status
-				};
-				return mediaPipeSidecarResponse;
 			}
-			catch (Exception ex)
-			{
-				RestartAfterFailure("MediaPipe sidecar call failed: " + ex.Message);
-				return Error(Status);
-			}
+		}
+		finally
+		{
+			Volatile.Write(ref _analysisInFlight, 0);
 		}
 	}
 
@@ -140,6 +198,7 @@ internal sealed class MediaPipeFaceLandmarkerSidecarClient : IDisposable
 		{
 			StopProcess();
 			_sharedMemoryFrame.Dispose();
+			_sharedMemoryLandmarks.Dispose();
 		}
 	}
 
@@ -171,9 +230,7 @@ internal sealed class MediaPipeFaceLandmarkerSidecarClient : IDisposable
 					CreateNoWindow = true
 				}
 			};
-			process2.StartInfo.ArgumentList.Add(_environment.ScriptPath);
-			process2.StartInfo.ArgumentList.Add("--model");
-			process2.StartInfo.ArgumentList.Add(_environment.ModelPath);
+			_environment.ConfigureStartInfo(process2.StartInfo, _executionBackend, probe: false);
 			if (!process2.Start())
 			{
 				Status = "MediaPipe sidecar process did not start.";
@@ -183,12 +240,13 @@ internal sealed class MediaPipeFaceLandmarkerSidecarClient : IDisposable
 			Process runningProcess = process2;
 			process2 = null;
 			_firstResponseAfterStart = true;
+			_lastSentFrameDescriptor = default;
 			_lastTimestampMilliseconds = 0L;
 			Task.Run(delegate
 			{
 				ReadErrors(runningProcess);
 			});
-			Status = "MediaPipe sidecar process started.";
+			Status = $"MediaPipe {_executionBackend.ToDisplayName()} sidecar process started.";
 			return true;
 		}
 		catch (Exception ex)
@@ -211,6 +269,7 @@ internal sealed class MediaPipeFaceLandmarkerSidecarClient : IDisposable
 	private void StopProcess()
 	{
 		Process process = Interlocked.Exchange(ref _process, null);
+		_lastSentFrameDescriptor = default;
 		if (process == null)
 		{
 			return;
@@ -261,6 +320,20 @@ internal sealed class MediaPipeFaceLandmarkerSidecarClient : IDisposable
 			Ok = false,
 			Status = status
 		};
+	}
+
+	private static double ElapsedMilliseconds(long startedAt)
+	{
+		return startedAt == 0L ? 0.0 : Stopwatch.GetElapsedTime(startedAt).TotalMilliseconds;
+	}
+
+	private string GetNormalStatus(bool hasFace)
+	{
+		if (_executionBackend == MediaPipeExecutionBackend.Gpu)
+		{
+			return hasFace ? "MediaPipe DirectML landmark lock" : "MediaPipe DirectML searching";
+		}
+		return hasFace ? "MediaPipe dense landmark lock" : "MediaPipe sidecar searching";
 	}
 
 	private static int ReadTimeoutMilliseconds()

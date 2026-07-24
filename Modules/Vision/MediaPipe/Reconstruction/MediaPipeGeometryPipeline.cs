@@ -8,25 +8,19 @@ namespace AvatarBuilder.Modules.Vision.MediaPipe.Reconstruction;
 
 public sealed class MediaPipeGeometryPipeline : IAsyncDisposable
 {
-	private sealed record QueuedFrame(int Generation, MediaPipeGeometryFrame Frame);
-
-	private static readonly TimeSpan PublishInterval = TimeSpan.FromSeconds(1L);
-
-	private static readonly TimeSpan SaveInterval = TimeSpan.FromSeconds(2L);
+	private static readonly long SaveIntervalTicks = Stopwatch.Frequency * 5L;
 
 	private readonly MediaPipeNormalizedFaceReconstructor _reconstructor = new MediaPipeNormalizedFaceReconstructor();
 
 	private readonly CancellationTokenSource _shutdown = new CancellationTokenSource();
 
-	private readonly SemaphoreSlim _signal = new SemaphoreSlim(0, 1);
-
 	private readonly SemaphoreSlim _ownerGate = new SemaphoreSlim(1, 1);
 
 	private readonly object _configurationLock = new object();
 
-	private readonly Task _worker;
+	private readonly object _workerLock = new object();
 
-	private QueuedFrame? _pending;
+	private Task? _activeWorker;
 
 	private string _profileFolder = "";
 
@@ -36,13 +30,13 @@ public sealed class MediaPipeGeometryPipeline : IAsyncDisposable
 
 	private int _generation;
 
-	private DateTime _lastPublishUtc = DateTime.MinValue;
+	private int _configured;
 
-	private DateTime _lastSaveUtc = DateTime.MinValue;
+	private long _lastSaveTimestamp;
 
 	private long _submittedFrameCount;
 
-	private long _replacedFrameCount;
+	private long _busyDropCount;
 
 	private int _workerBusy;
 
@@ -50,25 +44,14 @@ public sealed class MediaPipeGeometryPipeline : IAsyncDisposable
 
 	public bool IsConfigured
 	{
-		get
-		{
-			lock (_configurationLock)
-			{
-				return !string.IsNullOrWhiteSpace(_profileFolder);
-			}
-		}
+		get => Volatile.Read(ref _configured) != 0;
 	}
 
 	public long SubmittedFrameCount => Interlocked.Read(in _submittedFrameCount);
 
-	public long ReplacedFrameCount => Interlocked.Read(in _replacedFrameCount);
+	public long BusyDropCount => Interlocked.Read(in _busyDropCount);
 
 	public event EventHandler<MediaPipeGeometryModelUpdatedEventArgs>? ModelUpdated;
-
-	public MediaPipeGeometryPipeline()
-	{
-		_worker = Task.Run((Func<Task?>)WorkerLoopAsync);
-	}
 
 	public async Task<MediaPipeNormalizedFaceModel> ConfigureProfileAsync(string profileFolder, string subjectId, string subjectDisplayName, CancellationToken cancellationToken = default(CancellationToken))
 	{
@@ -82,7 +65,7 @@ public sealed class MediaPipeGeometryPipeline : IAsyncDisposable
 			_subjectId = subjectId.Trim();
 			_subjectDisplayName = (string.IsNullOrWhiteSpace(subjectDisplayName) ? _subjectId : subjectDisplayName.Trim());
 			generation = ++_generation;
-			DiscardPendingFrame();
+			Volatile.Write(ref _configured, 1);
 		}
 		await _ownerGate.WaitAsync(cancellationToken).ConfigureAwait(continueOnCapturedContext: false);
 		MediaPipeNormalizedFaceModel mediaPipeNormalizedFaceModel;
@@ -104,9 +87,9 @@ public sealed class MediaPipeGeometryPipeline : IAsyncDisposable
 			Directory.CreateDirectory(profileFolder2);
 			_reconstructor.Restore(MediaPipeNormalizedFaceStore.ReadState(profileFolder2), subjectId2, subjectDisplayName2);
 			mediaPipeNormalizedFaceModel = _reconstructor.CreateModel();
-			MediaPipeNormalizedFaceStore.Write(profileFolder2, _reconstructor.CreateState(), mediaPipeNormalizedFaceModel);
-			_lastPublishUtc = DateTime.UtcNow;
-			_lastSaveUtc = _lastPublishUtc;
+			MediaPipeNormalizedFaceStore.WriteData(profileFolder2, _reconstructor.CreateState());
+			long timestamp = Stopwatch.GetTimestamp();
+			_lastSaveTimestamp = timestamp;
 		}
 		finally
 		{
@@ -116,47 +99,38 @@ public sealed class MediaPipeGeometryPipeline : IAsyncDisposable
 		return mediaPipeNormalizedFaceModel;
 	}
 
-	public bool Queue(MediaPipeGeometryFrame frame)
+	public bool TryStart(Func<MediaPipeGeometryFrame> frameFactory)
 	{
-		ArgumentNullException.ThrowIfNull(frame, "frame");
+		ArgumentNullException.ThrowIfNull(frameFactory, "frameFactory");
 		if (_disposed)
 		{
 			return false;
 		}
-		int generation;
-		lock (_configurationLock)
+		if (Volatile.Read(ref _configured) == 0)
 		{
-			if (string.IsNullOrWhiteSpace(_profileFolder))
-			{
-				return false;
-			}
-			generation = _generation;
+			return false;
 		}
+		int generation = Volatile.Read(ref _generation);
 		if (Interlocked.CompareExchange(ref _workerBusy, 1, 0) != 0)
 		{
-			Interlocked.Increment(ref _replacedFrameCount);
+			Interlocked.Increment(ref _busyDropCount);
 			return false;
 		}
-		QueuedFrame queuedFrame = new QueuedFrame(generation, frame);
-		if ((object)Interlocked.CompareExchange(ref _pending, queuedFrame, null) != null)
-		{
-			Interlocked.Increment(ref _replacedFrameCount);
-			Interlocked.Exchange(ref _workerBusy, 0);
-			return false;
-		}
-		Interlocked.Increment(ref _submittedFrameCount);
+		MediaPipeGeometryFrame frame;
 		try
 		{
-			_signal.Release();
+			frame = frameFactory();
 		}
-		catch (SemaphoreFullException)
+		catch
 		{
-		}
-		catch (ObjectDisposedException)
-		{
-			Interlocked.CompareExchange(ref _pending, null, queuedFrame);
 			Interlocked.Exchange(ref _workerBusy, 0);
-			return false;
+			throw;
+		}
+		Interlocked.Increment(ref _submittedFrameCount);
+		Task task = Task.Run(() => ProcessFrameAsync(generation, frame));
+		lock (_workerLock)
+		{
+			_activeWorker = task;
 		}
 		return true;
 	}
@@ -175,8 +149,8 @@ public sealed class MediaPipeGeometryPipeline : IAsyncDisposable
 			}
 			if (!string.IsNullOrWhiteSpace(profileFolder))
 			{
-				MediaPipeNormalizedFaceStore.Write(profileFolder, _reconstructor.CreateState(), mediaPipeNormalizedFaceModel);
-				_lastSaveUtc = DateTime.UtcNow;
+				MediaPipeNormalizedFaceStore.WriteData(profileFolder, _reconstructor.CreateState());
+				_lastSaveTimestamp = Stopwatch.GetTimestamp();
 			}
 			return mediaPipeNormalizedFaceModel;
 		}
@@ -199,7 +173,6 @@ public sealed class MediaPipeGeometryPipeline : IAsyncDisposable
 			folder = _profileFolder;
 			id = _subjectId;
 			displayName = _subjectDisplayName;
-			DiscardPendingFrame();
 		}
 		await _ownerGate.WaitAsync(cancellationToken).ConfigureAwait(continueOnCapturedContext: false);
 		MediaPipeNormalizedFaceModel mediaPipeNormalizedFaceModel;
@@ -217,8 +190,10 @@ public sealed class MediaPipeGeometryPipeline : IAsyncDisposable
 			mediaPipeNormalizedFaceModel = _reconstructor.CreateModel();
 			if (!string.IsNullOrWhiteSpace(folder))
 			{
-				MediaPipeNormalizedFaceStore.Write(folder, _reconstructor.CreateState(), mediaPipeNormalizedFaceModel);
+				MediaPipeNormalizedFaceStore.WriteData(folder, _reconstructor.CreateState());
 			}
+			long timestamp = Stopwatch.GetTimestamp();
+			_lastSaveTimestamp = timestamp;
 		}
 		finally
 		{
@@ -228,101 +203,75 @@ public sealed class MediaPipeGeometryPipeline : IAsyncDisposable
 		return mediaPipeNormalizedFaceModel;
 	}
 
-	private async Task WorkerLoopAsync()
+	private async Task ProcessFrameAsync(int generation, MediaPipeGeometryFrame frame)
 	{
-		_ = 1;
 		try
 		{
-			while (!_shutdown.IsCancellationRequested)
+			if (!IsCurrentGeneration(generation))
 			{
-				await _signal.WaitAsync(_shutdown.Token).ConfigureAwait(continueOnCapturedContext: false);
-				QueuedFrame queued = Interlocked.Exchange(ref _pending, null);
-				if ((object)queued == null)
+				return;
+			}
+			long startedAt = Stopwatch.GetTimestamp();
+			await _ownerGate.WaitAsync(_shutdown.Token).ConfigureAwait(continueOnCapturedContext: false);
+			MediaPipeNormalizedFaceModel? model = null;
+			bool publishModel = false;
+			try
+			{
+				if (!IsCurrentGeneration(generation) || !_reconstructor.TryAddFrame(frame))
 				{
-					continue;
+					return;
 				}
-				try
+				long timestamp = Stopwatch.GetTimestamp();
+				bool shouldSave = timestamp - Volatile.Read(ref _lastSaveTimestamp) >= SaveIntervalTicks;
+				if (shouldSave)
 				{
-					if (!IsCurrentGeneration(queued.Generation))
+					model = _reconstructor.CreateModel();
+				}
+				if (shouldSave)
+				{
+					string profileFolder;
+					lock (_configurationLock)
 					{
-						continue;
+						profileFolder = _profileFolder;
 					}
-					Stopwatch stopwatch = Stopwatch.StartNew();
-					await _ownerGate.WaitAsync(_shutdown.Token).ConfigureAwait(continueOnCapturedContext: false);
-					MediaPipeNormalizedFaceModel mediaPipeNormalizedFaceModel = null;
-					try
+					if (!string.IsNullOrWhiteSpace(profileFolder))
 					{
-						if (!IsCurrentGeneration(queued.Generation) || !_reconstructor.TryAddFrame(queued.Frame))
-						{
-							continue;
-						}
-						DateTime utcNow = DateTime.UtcNow;
-						bool flag = utcNow - _lastPublishUtc >= PublishInterval;
-						bool flag2 = utcNow - _lastSaveUtc >= SaveInterval;
-						if (flag || flag2)
-						{
-							mediaPipeNormalizedFaceModel = _reconstructor.CreateModel();
-						}
-						if (flag2 && mediaPipeNormalizedFaceModel != null)
-						{
-							string profileFolder;
-							lock (_configurationLock)
-							{
-								profileFolder = _profileFolder;
-							}
-							if (!string.IsNullOrWhiteSpace(profileFolder))
-							{
-								MediaPipeNormalizedFaceStore.Write(profileFolder, _reconstructor.CreateState(), mediaPipeNormalizedFaceModel);
-								_lastSaveUtc = utcNow;
-							}
-						}
-						if (flag && mediaPipeNormalizedFaceModel != null)
-						{
-							_lastPublishUtc = utcNow;
-						}
-						goto IL_024d;
-					}
-					finally
-					{
-						_ownerGate.Release();
-					}
-					IL_024d:
-					stopwatch.Stop();
-					if (mediaPipeNormalizedFaceModel != null)
-					{
-						Publish(mediaPipeNormalizedFaceModel, stopwatch.Elapsed);
+						MediaPipeNormalizedFaceStore.WriteData(profileFolder, _reconstructor.CreateState());
+						Volatile.Write(ref _lastSaveTimestamp, timestamp);
 					}
 				}
-				finally
+				if (shouldSave && model != null)
 				{
-					Interlocked.Exchange(ref _workerBusy, 0);
+					publishModel = true;
 				}
+			}
+			finally
+			{
+				_ownerGate.Release();
+			}
+			if (publishModel && model != null)
+			{
+				Publish(model, Stopwatch.GetElapsedTime(startedAt));
 			}
 		}
 		catch (OperationCanceledException) when (_shutdown.IsCancellationRequested)
 		{
 		}
-	}
-
-	private bool IsCurrentGeneration(int generation)
-	{
-		lock (_configurationLock)
-		{
-			return generation == _generation && !string.IsNullOrWhiteSpace(_profileFolder);
-		}
-	}
-
-	private void DiscardPendingFrame()
-	{
-		if ((object)Interlocked.Exchange(ref _pending, null) != null)
+		finally
 		{
 			Interlocked.Exchange(ref _workerBusy, 0);
 		}
 	}
 
+	private bool IsCurrentGeneration(int generation)
+	{
+		return Volatile.Read(ref _configured) != 0
+			&& generation == Volatile.Read(ref _generation);
+	}
+
 	private void Publish(MediaPipeNormalizedFaceModel model, TimeSpan processingDuration)
 	{
-		this.ModelUpdated?.Invoke(this, new MediaPipeGeometryModelUpdatedEventArgs(model, processingDuration, SubmittedFrameCount, ReplacedFrameCount));
+		this.ModelUpdated?.Invoke(this, new MediaPipeGeometryModelUpdatedEventArgs(model, processingDuration, SubmittedFrameCount, BusyDropCount));
 	}
 
 	private void ThrowIfDisposed()
@@ -343,22 +292,22 @@ public sealed class MediaPipeGeometryPipeline : IAsyncDisposable
 			}
 			_disposed = true;
 			_shutdown.Cancel();
-			try
+			Task? activeWorker;
+			lock (_workerLock)
 			{
-				_signal.Release();
-			}
-			catch (SemaphoreFullException)
-			{
+				activeWorker = _activeWorker;
 			}
 			try
 			{
-				await _worker.ConfigureAwait(continueOnCapturedContext: false);
+				if (activeWorker != null)
+				{
+					await activeWorker.ConfigureAwait(continueOnCapturedContext: false);
+				}
 			}
 			catch (OperationCanceledException)
 			{
 			}
 			_ownerGate.Dispose();
-			_signal.Dispose();
 			_shutdown.Dispose();
 		}
 	}

@@ -47,6 +47,8 @@ public sealed class Dx12Camera : IDisposable
 
 	private readonly Dispatcher _dispatcher;
 
+	private readonly LatestTextureFrameWorker _textureObserverWorker;
+
 	private TextureNativeCameraStream? _stream;
 
 	private Direct3D12PreviewHost? _previewHost;
@@ -71,6 +73,15 @@ public sealed class Dx12Camera : IDisposable
 
 	public string RecordingMode => _recordingMode;
 
+	public long FramesRead => _stream?.FramesRead ?? 0L;
+
+	public long FramesDroppedWhileProcessingBusy => _stream?.FramesDroppedWhileProcessingBusy ?? 0L;
+
+	public long LastSourceFrameTimestamp => _stream?.LastSourceFrameTimestamp ?? 0L;
+
+	public long LastPresentedFrameTimestamp =>
+		_previewHost?.LastRenderedFrameTimestamp ?? 0L;
+
 	public event EventHandler<TextureNativeFrameInfo>? FrameAvailable;
 
 	public event EventHandler<TextureNativeFrameLease>? TextureFrameAvailable;
@@ -89,6 +100,30 @@ public sealed class Dx12Camera : IDisposable
 		_mode = mode ?? CameraVideoMode.Auto;
 		_target = target;
 		_dispatcher = target.PreviewWindow.Dispatcher;
+		_textureObserverWorker = new LatestTextureFrameWorker(
+			"Avatar Builder camera observers",
+			acceptedFrame =>
+			{
+				if (!_disposed)
+				{
+					Direct3D12PreviewHost? previewHost = _previewHost;
+					if (previewHost == null
+						|| previewHost.WaitForTextureFrameRead(
+							acceptedFrame.FrameNumber))
+					{
+						NotifyTextureFrameAvailable(acceptedFrame);
+					}
+					else
+					{
+						NotifyStatusChanged(
+							"DX12 preview GPU stopped completing frames; " +
+							"the analysis frame was discarded for safe recovery.");
+					}
+				}
+			},
+			failureHandler: ex => NotifyStatusChanged(
+				"DX12 camera observer recovered after an isolated failure: " +
+				ex.Message));
 		try
 		{
 			Initialize();
@@ -249,6 +284,16 @@ public sealed class Dx12Camera : IDisposable
 		GC.SuppressFinalize(this);
 	}
 
+	public void DetachPreviewHost()
+	{
+		if (_dispatcher.CheckAccess())
+		{
+			HidePreviewHost();
+			return;
+		}
+		_dispatcher.Invoke(HidePreviewHost);
+	}
+
 	private void Initialize()
 	{
 		_target.PreviewImage?.SetCurrentValue(UIElement.VisibilityProperty, Visibility.Collapsed);
@@ -328,14 +373,31 @@ public sealed class Dx12Camera : IDisposable
 	private void StreamTextureFrameAvailable(object? sender, TextureNativeFrameLease frame)
 	{
 		_textureFrameLeaseActive = frame.IsValid;
-		NotifyTextureFrameAvailable(frame);
-		if (!ShouldAcceptPreviewRenderFrame())
+		if (_disposed)
 		{
 			return;
 		}
+
 		try
 		{
-			_previewHost?.RenderTextureFrame(frame, _denoiseEnabled, _denoiseStrength, _colorSettings);
+			// Preview submission is the only priority work on this lane. The host
+			// performs an O(1), reference-counted handoff to its dedicated render
+			// thread and drops immediately whenever that thread is already busy.
+			if (ShouldAcceptPreviewRenderFrame())
+			{
+				_previewHost?.RenderTextureFrame(frame, _denoiseEnabled, _denoiseStrength, _colorSettings);
+			}
+
+			// Optional observers run on their own dedicated, no-backlog lane.
+			// The display lane performs only this O(1) reference handoff.
+			if (!_disposed)
+			{
+				if (!_textureObserverWorker.TryAcceptTexture(frame))
+				{
+					_previewHost?.DiscardTextureFrameRead(
+						frame.FrameNumber);
+				}
+			}
 		}
 		catch (Exception ex)
 		{
@@ -496,12 +558,15 @@ public sealed class Dx12Camera : IDisposable
 		catch
 		{
 		}
+		_textureObserverWorker.Dispose();
 		_textureFrameLeaseActive = false;
-		if (disposing && _dispatcher.CheckAccess())
+		if (disposing
+			&& _previewHost != null
+			&& _dispatcher.CheckAccess())
 		{
 			HidePreviewHost();
 		}
-		else if (disposing)
+		else if (disposing && _previewHost != null)
 		{
 			try
 			{

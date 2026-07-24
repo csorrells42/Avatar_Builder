@@ -1,4 +1,6 @@
 using System;
+using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Threading;
@@ -14,7 +16,7 @@ namespace AvatarBuilder.Modules.Webcam.DirectX12;
 
 public sealed class Direct3D12PreviewHost : WebcamDirectX12ViewportHost
 {
-	private sealed record QueuedCameraFrame(CameraFrame Frame, VideoFrameColorSettings ColorSettings, bool DenoiseEnabled, double DenoiseStrength, long FrameNumber) : IDisposable
+	private sealed record AcceptedCameraFrame(CameraFrame Frame, VideoFrameColorSettings ColorSettings, bool DenoiseEnabled, double DenoiseStrength, long FrameNumber) : IDisposable
 	{
 		public byte[] BgraBytes => Frame.BgraBytes;
 
@@ -36,7 +38,7 @@ public sealed class Direct3D12PreviewHost : WebcamDirectX12ViewportHost
 		}
 	}
 
-	private sealed record QueuedTextureFrame(TextureNativeFrameLease Frame, VideoFrameColorSettings ColorSettings, bool DenoiseEnabled, double DenoiseStrength, string? SharedBridgeFailureReason) : IDisposable
+	private sealed record AcceptedTextureFrame(TextureNativeFrameLease Frame, VideoFrameColorSettings ColorSettings, bool DenoiseEnabled, double DenoiseStrength, string? SharedBridgeFailureReason, TexturePreviewRead PreviewRead) : IDisposable
 	{
 		public void Dispose()
 		{
@@ -218,6 +220,12 @@ public sealed class Direct3D12PreviewHost : WebcamDirectX12ViewportHost
 
 		private ulong _fenceValue;
 
+		private ID3D12Fence? _d3d11ProducerFence;
+
+		private nint _d3d11ProducerFenceHandle;
+
+		private long _lastSubmittedFenceValue;
+
 		private int _cameraTextureWidth;
 
 		private int _cameraTextureHeight;
@@ -267,6 +275,11 @@ public sealed class Direct3D12PreviewHost : WebcamDirectX12ViewportHost
 		}
 
 		public string LastNv12PreviewFailureReason => _nv12PreviewFailureReason ?? "no NV12 failure detail";
+
+		public ulong LastSubmittedFenceValue =>
+			checked((ulong)Math.Max(
+				0L,
+				Volatile.Read(ref _lastSubmittedFenceValue)));
 
 		public Direct3D12SwapChainRenderer(nint hwnd, int width, int height, nint nativeD3D12Device = 0)
 		{
@@ -456,6 +469,7 @@ public sealed class Direct3D12PreviewHost : WebcamDirectX12ViewportHost
 			try
 			{
 				using ID3D12Resource cameraResource = _device.OpenSharedHandle<ID3D12Resource>(frame.D3D12SharedTextureHandle);
+				WaitForD3D11Producer(frame);
 				RenderNativeNv12Resource(cameraResource, frame.Width, frame.Height, colorSettings, denoiseEnabled, denoiseStrength, trackingOverlay);
 				WaitForGpu();
 				_sharedD3D11BridgePreviewFailureReason = null;
@@ -468,6 +482,25 @@ public sealed class Direct3D12PreviewHost : WebcamDirectX12ViewportHost
 				failureReason = ex.Message;
 				return false;
 			}
+		}
+
+		private void WaitForD3D11Producer(TextureNativeFrameLease frame)
+		{
+			nint producerFenceHandle = frame.D3D11ProducerFenceHandle;
+			ulong producerFenceValue = frame.D3D11ProducerFenceValue;
+			if (producerFenceHandle == IntPtr.Zero || producerFenceValue == 0uL)
+			{
+				return;
+			}
+			if (_d3d11ProducerFence == null
+				|| _d3d11ProducerFenceHandle != producerFenceHandle)
+			{
+				_d3d11ProducerFence?.Dispose();
+				_d3d11ProducerFence =
+					_device.OpenSharedHandle<ID3D12Fence>(producerFenceHandle);
+				_d3d11ProducerFenceHandle = producerFenceHandle;
+			}
+			_commandQueue.Wait(_d3d11ProducerFence, producerFenceValue);
 		}
 
 		private void RenderNativeNv12Resource(ID3D12Resource cameraResource, int width, int height, VideoFrameColorSettings colorSettings, bool denoiseEnabled, double denoiseStrength, PreviewTrackingOverlay trackingOverlay)
@@ -1068,7 +1101,19 @@ public sealed class Direct3D12PreviewHost : WebcamDirectX12ViewportHost
 		{
 			if (!_disposed)
 			{
-				WaitForGpu();
+				try
+				{
+					WaitForGpu();
+				}
+				catch (TimeoutException)
+				{
+					// A wedged GPU must never hold the application shutdown or
+					// camera recovery path. Leave these native objects to process
+					// teardown rather than releasing resources still owned by a
+					// non-responsive command queue.
+					_disposed = true;
+					return;
+				}
 				_disposed = true;
 				_trackingOverlayRenderer?.Dispose();
 				_trackingOverlayRenderer = null;
@@ -1083,6 +1128,9 @@ public sealed class Direct3D12PreviewHost : WebcamDirectX12ViewportHost
 				_previewRootSignature?.Dispose();
 				_nv12PreviewPipelineState?.Dispose();
 				_nv12PreviewRootSignature?.Dispose();
+				_d3d11ProducerFence?.Dispose();
+				_d3d11ProducerFence = null;
+				_d3d11ProducerFenceHandle = IntPtr.Zero;
 				_fence.Dispose();
 				_fenceEvent.Dispose();
 				_commandList.Dispose();
@@ -1200,7 +1248,12 @@ public sealed class Direct3D12PreviewHost : WebcamDirectX12ViewportHost
 					return;
 				}
 				_fence.SetEventOnCompletion(_fenceValue, _fenceEvent);
-				_fenceEvent.WaitOne();
+				if (!_fenceEvent.WaitOne(GpuOperationTimeout))
+				{
+					throw new TimeoutException(
+						"DX12 preview GPU did not become idle within " +
+						$"{GpuOperationTimeout.TotalSeconds:0.#} seconds.");
+				}
 				ClearFrameFenceValues();
 			}
 		}
@@ -1212,7 +1265,28 @@ public sealed class Direct3D12PreviewHost : WebcamDirectX12ViewportHost
 				_fenceValue++;
 				_commandQueue.Signal(_fence, _fenceValue);
 				frameResource.FenceValue = _fenceValue;
+				Volatile.Write(
+					ref _lastSubmittedFenceValue,
+					checked((long)_fenceValue));
 			}
+		}
+
+		public bool WaitForFence(ulong fenceValue, TimeSpan timeout)
+		{
+			if (_disposed
+				|| fenceValue == 0uL
+				|| _fence.CompletedValue >= fenceValue)
+			{
+				return true;
+			}
+			long started = Stopwatch.GetTimestamp();
+			while (!_disposed
+				&& _fence.CompletedValue < fenceValue
+				&& Stopwatch.GetElapsedTime(started) < timeout)
+			{
+				Thread.Sleep(1);
+			}
+			return _disposed || _fence.CompletedValue >= fenceValue;
 		}
 
 		private void WaitForFrameResource(FrameResource frameResource)
@@ -1222,7 +1296,12 @@ public sealed class Direct3D12PreviewHost : WebcamDirectX12ViewportHost
 				if (_fence.CompletedValue < frameResource.FenceValue)
 				{
 					_fence.SetEventOnCompletion(frameResource.FenceValue, _fenceEvent);
-					_fenceEvent.WaitOne();
+					if (!_fenceEvent.WaitOne(GpuOperationTimeout))
+					{
+						throw new TimeoutException(
+							"DX12 preview GPU did not release a frame resource within " +
+							$"{GpuOperationTimeout.TotalSeconds:0.#} seconds.");
+					}
 				}
 				frameResource.FenceValue = 0uL;
 			}
@@ -1240,6 +1319,12 @@ public sealed class Direct3D12PreviewHost : WebcamDirectX12ViewportHost
 
 	private static readonly TimeSpan RendererDisposeLockTimeout = TimeSpan.FromMilliseconds(250L);
 
+	private static readonly TimeSpan GpuOperationTimeout = TimeSpan.FromSeconds(2L);
+
+	private static readonly TimeSpan TextureSubmissionTimeout = TimeSpan.FromSeconds(2L);
+
+	private static readonly TimeSpan RenderWorkerStopTimeout = TimeSpan.FromMilliseconds(500L);
+
 	private nint _nativeD3D12Device;
 
 	private readonly object _rendererLock = new object();
@@ -1250,13 +1335,16 @@ public sealed class Direct3D12PreviewHost : WebcamDirectX12ViewportHost
 
 	private readonly AutoResetEvent _renderFrameReady = new AutoResetEvent(initialState: false);
 
+	private readonly ConcurrentDictionary<long, TexturePreviewRead>
+		_texturePreviewReads = new();
+
 	private Direct3D12SwapChainRenderer? _renderer;
 
 	private Thread? _renderThread;
 
-	private QueuedCameraFrame? _pendingCameraFrame;
+	private AcceptedCameraFrame? _acceptedCameraFrame;
 
-	private QueuedTextureFrame? _pendingTextureFrame;
+	private AcceptedTextureFrame? _acceptedTextureFrame;
 
 	private string _previewPathDescription = "DX12 preview path pending";
 
@@ -1264,7 +1352,7 @@ public sealed class Direct3D12PreviewHost : WebcamDirectX12ViewportHost
 
 	private Direct3D12PreviewDiagnostics _diagnostics = Direct3D12PreviewDiagnostics.Empty;
 
-	private DateTimeOffset _diagnosticsFpsWindowStartUtc = DateTimeOffset.UtcNow;
+	private long _diagnosticsFpsWindowStartTimestamp = Stopwatch.GetTimestamp();
 
 	private long _diagnosticsFpsWindowStartRenderedFrames;
 
@@ -1274,13 +1362,17 @@ public sealed class Direct3D12PreviewHost : WebcamDirectX12ViewportHost
 
 	private long _droppedFrames;
 
+	private long _lastRenderedFrameTimestamp;
+
 	private double _renderFramesPerSecond;
 
 	private string _recordingMode = "not recording";
 
 	private PreviewTrackingOverlay _trackingOverlay = PreviewTrackingOverlay.Empty;
 
-	private DateTime _lastAcceptedRenderFrameUtc = DateTime.MinValue;
+	private long _lastAcceptedRenderFrameTimestamp;
+
+	private long _lastDiagnosticsPublishedTimestamp;
 
 	private double _maxRenderFramesPerSecond;
 
@@ -1299,6 +1391,17 @@ public sealed class Direct3D12PreviewHost : WebcamDirectX12ViewportHost
 	public string PreviewPathDescription => _previewPathDescription;
 
 	public string RecordingMode => Volatile.Read(in _recordingMode);
+
+	public long SubmittedFrames => Interlocked.Read(ref _submittedFrames);
+
+	public long RenderedFrames => Interlocked.Read(ref _renderedFrames);
+
+	public long DroppedFrames => Interlocked.Read(ref _droppedFrames);
+
+	public long LastRenderedFrameTimestamp =>
+		Volatile.Read(ref _lastRenderedFrameTimestamp);
+
+	public double RenderFramesPerSecond => Volatile.Read(ref _renderFramesPerSecond);
 
 	public Direct3D12PreviewDiagnostics Diagnostics
 	{
@@ -1324,7 +1427,8 @@ public sealed class Direct3D12PreviewHost : WebcamDirectX12ViewportHost
 		_renderThread = new Thread(RenderWorkerLoop)
 		{
 			IsBackground = true,
-			Name = "Avatar Builder DX12 preview"
+			Name = "Avatar Builder DX12 preview",
+			Priority = ThreadPriority.AboveNormal
 		};
 		_renderThread.Start();
 	}
@@ -1339,7 +1443,80 @@ public sealed class Direct3D12PreviewHost : WebcamDirectX12ViewportHost
 		lock (_renderThrottleLock)
 		{
 			_maxRenderFramesPerSecond = ((maxFramesPerSecond <= 0.0) ? 0.0 : Math.Clamp(maxFramesPerSecond, 1.0, 120.0));
-			_lastAcceptedRenderFrameUtc = DateTime.MinValue;
+			_lastAcceptedRenderFrameTimestamp = 0L;
+		}
+	}
+
+	private sealed class TexturePreviewRead : IDisposable
+	{
+		private readonly ManualResetEventSlim _submitted = new(false);
+
+		private long _fenceValue;
+
+		private int _published;
+
+		private int _discarded;
+
+		private int _disposed;
+
+		public void Publish(ulong fenceValue)
+		{
+			if (Interlocked.Exchange(ref _published, 1) != 0)
+			{
+				return;
+			}
+			Volatile.Write(ref _fenceValue, checked((long)fenceValue));
+			try
+			{
+				_submitted.Set();
+			}
+			catch (ObjectDisposedException)
+			{
+				return;
+			}
+			if (Volatile.Read(ref _discarded) != 0)
+			{
+				Dispose();
+			}
+		}
+
+		public void Discard()
+		{
+			if (Interlocked.Exchange(ref _discarded, 1) == 0
+				&& Volatile.Read(ref _published) != 0)
+			{
+				Dispose();
+			}
+		}
+
+		public bool TryWaitForSubmission(
+			TimeSpan timeout,
+			out ulong fenceValue)
+		{
+			fenceValue = 0uL;
+			try
+			{
+				if (!_submitted.Wait(timeout))
+				{
+					return false;
+				}
+			}
+			catch (ObjectDisposedException)
+			{
+				return false;
+			}
+			fenceValue = checked((ulong)Math.Max(
+				0L,
+				Volatile.Read(ref _fenceValue)));
+			return true;
+		}
+
+		public void Dispose()
+		{
+			if (Interlocked.Exchange(ref _disposed, 1) == 0)
+			{
+				_submitted.Dispose();
+			}
 		}
 	}
 
@@ -1360,20 +1537,20 @@ public sealed class Direct3D12PreviewHost : WebcamDirectX12ViewportHost
 			RecordDroppedFrame();
 			return;
 		}
-		QueuedCameraFrame queuedCameraFrame = null;
+		AcceptedCameraFrame acceptedCameraFrame = null;
 		bool flag = false;
 		try
 		{
-			queuedCameraFrame = new QueuedCameraFrame(frame.Duplicate(), colorSettings, denoiseEnabled, denoiseStrength, frameNumber);
+			acceptedCameraFrame = new AcceptedCameraFrame(frame.Duplicate(), colorSettings, denoiseEnabled, denoiseStrength, frameNumber);
 			lock (_renderWorkerLock)
 			{
-				if (_renderWorkerStopping || (object)_pendingCameraFrame != null || (object)_pendingTextureFrame != null)
+				if (_renderWorkerStopping || (object)_acceptedCameraFrame != null || (object)_acceptedTextureFrame != null)
 				{
 					RecordDroppedFrame();
 					return;
 				}
-				_pendingCameraFrame = queuedCameraFrame;
-				queuedCameraFrame = null;
+				_acceptedCameraFrame = acceptedCameraFrame;
+				acceptedCameraFrame = null;
 				flag = true;
 			}
 			_renderFrameReady.Set();
@@ -1381,7 +1558,7 @@ public sealed class Direct3D12PreviewHost : WebcamDirectX12ViewportHost
 		catch (ObjectDisposedException)
 		{
 			RecordDroppedFrame();
-			CancelPendingRenderHandoff();
+			CancelAcceptedRenderHandoff();
 			flag = false;
 		}
 		catch
@@ -1390,7 +1567,7 @@ public sealed class Direct3D12PreviewHost : WebcamDirectX12ViewportHost
 		}
 		finally
 		{
-			queuedCameraFrame?.Dispose();
+			acceptedCameraFrame?.Dispose();
 			if (!flag)
 			{
 				Interlocked.Exchange(ref _renderFrameBusy, 0);
@@ -1430,35 +1607,16 @@ public sealed class Direct3D12PreviewHost : WebcamDirectX12ViewportHost
 			RecordDroppedFrame();
 			return;
 		}
-		string failureReason = null;
 		bool flag = false;
 		bool flag2 = string.Equals(frame.DeviceMode, "D3D12", StringComparison.OrdinalIgnoreCase);
 		bool flag3 = TextureNativePreviewPolicy.ShouldPreferNv12UploadFallback(frame.MediaSubtype, frame.Width, frame.Height, frame.Nv12PreviewBytes, frame.Nv12PreviewStride);
-		if (!flag2 && !flag3 && frame.D3D12SharedTextureHandle != IntPtr.Zero)
-		{
-			try
-			{
-				lock (_rendererLock)
-				{
-					if (!IsRenderingSuspended && _renderer != null && _renderer.RenderSharedD3D11BridgeFrame(frame, colorSettings, denoiseEnabled, denoiseStrength, Volatile.Read(in _trackingOverlay), out failureReason))
-					{
-						ReportPreviewPath("DX12 D3D11 bridge texture preview");
-						RecordRenderedFrame("DX12 D3D11 bridge texture preview", frame.MediaSubtype, frame.Width, frame.Height, frame.FramesPerSecond, denoiseEnabled, denoiseStrength, colorSettings, RecordingMode, null, frame.FrameNumber);
-						Interlocked.Exchange(ref _renderFrameBusy, 0);
-						return;
-					}
-				}
-			}
-			catch (Exception ex)
-			{
-				failureReason = ex.Message;
-			}
-		}
-		else if (!flag2 && !flag3)
-		{
-			failureReason = "D3D11 bridge shared texture handle missing";
-		}
+		string? failureReason = !flag2
+			&& !flag3
+			&& frame.D3D12SharedTextureHandle == IntPtr.Zero
+				? "D3D11 bridge shared texture handle missing"
+				: null;
 		TextureNativeFrameLease textureNativeFrameLease = null;
+		TexturePreviewRead? previewRead = null;
 		try
 		{
 			textureNativeFrameLease = frame.Duplicate();
@@ -1469,13 +1627,28 @@ public sealed class Direct3D12PreviewHost : WebcamDirectX12ViewportHost
 			}
 			lock (_renderWorkerLock)
 			{
-				if (_renderWorkerStopping || (object)_pendingCameraFrame != null || (object)_pendingTextureFrame != null)
+				if (_renderWorkerStopping || (object)_acceptedCameraFrame != null || (object)_acceptedTextureFrame != null)
 				{
 					RecordDroppedFrame();
 					return;
 				}
-				_pendingTextureFrame = new QueuedTextureFrame(textureNativeFrameLease, colorSettings, denoiseEnabled, denoiseStrength, failureReason);
+				previewRead = new TexturePreviewRead();
+				if (_texturePreviewReads.TryRemove(
+					frame.FrameNumber,
+					out TexturePreviewRead? previousRead))
+				{
+					previousRead.Dispose();
+				}
+				_texturePreviewReads[frame.FrameNumber] = previewRead;
+				_acceptedTextureFrame = new AcceptedTextureFrame(
+					textureNativeFrameLease,
+					colorSettings,
+					denoiseEnabled,
+					denoiseStrength,
+					failureReason,
+					previewRead);
 				textureNativeFrameLease = null;
+				previewRead = null;
 				flag = true;
 			}
 			_renderFrameReady.Set();
@@ -1483,11 +1656,12 @@ public sealed class Direct3D12PreviewHost : WebcamDirectX12ViewportHost
 		catch (ObjectDisposedException)
 		{
 			RecordDroppedFrame();
-			CancelPendingRenderHandoff();
+			CancelAcceptedRenderHandoff();
 			flag = false;
 		}
 		finally
 		{
+			previewRead?.Dispose();
 			textureNativeFrameLease?.Dispose();
 			if (!flag)
 			{
@@ -1501,13 +1675,19 @@ public sealed class Direct3D12PreviewHost : WebcamDirectX12ViewportHost
 		Volatile.Write(ref _trackingOverlay, overlay ?? PreviewTrackingOverlay.Empty);
 	}
 
+	private PreviewTrackingOverlay GetFreshTrackingOverlay()
+	{
+		PreviewTrackingOverlay overlay = Volatile.Read(in _trackingOverlay);
+		return overlay.IsFresh ? overlay : PreviewTrackingOverlay.Empty;
+	}
+
 	public void ResumeRendering()
 	{
 		if (!_disposed)
 		{
 			lock (_renderThrottleLock)
 			{
-				_lastAcceptedRenderFrameUtc = DateTime.MinValue;
+				_lastAcceptedRenderFrameTimestamp = 0L;
 			}
 			Interlocked.Exchange(ref _renderingSuspended, 0);
 			Volatile.Read(in _renderer)?.RequestPresentationRefresh();
@@ -1524,11 +1704,12 @@ public sealed class Direct3D12PreviewHost : WebcamDirectX12ViewportHost
 		Interlocked.Exchange(ref _renderingSuspended, 1);
 		lock (_renderWorkerLock)
 		{
-			bool num = (object)_pendingCameraFrame != null || (object)_pendingTextureFrame != null;
-			_pendingCameraFrame?.Dispose();
-			_pendingCameraFrame = null;
-			_pendingTextureFrame?.Dispose();
-			_pendingTextureFrame = null;
+			bool num = (object)_acceptedCameraFrame != null || (object)_acceptedTextureFrame != null;
+			_acceptedCameraFrame?.Dispose();
+			_acceptedCameraFrame = null;
+			_acceptedTextureFrame?.PreviewRead.Publish(0uL);
+			_acceptedTextureFrame?.Dispose();
+			_acceptedTextureFrame = null;
 			if (num)
 			{
 				Interlocked.Exchange(ref _renderFrameBusy, 0);
@@ -1541,14 +1722,16 @@ public sealed class Direct3D12PreviewHost : WebcamDirectX12ViewportHost
 		}
 	}
 
-	private void RenderTextureFrameCore(QueuedTextureFrame queuedFrame)
+	private void RenderTextureFrameCore(AcceptedTextureFrame acceptedFrame)
 	{
-		TextureNativeFrameLease frame = queuedFrame.Frame;
+		TextureNativeFrameLease frame = acceptedFrame.Frame;
 		if (IsRenderingSuspended)
 		{
 			RecordDroppedFrame();
+			acceptedFrame.PreviewRead.Publish(0uL);
 			return;
 		}
+		ulong submittedFenceValue = 0uL;
 		try
 		{
 			lock (_rendererLock)
@@ -1559,14 +1742,61 @@ public sealed class Direct3D12PreviewHost : WebcamDirectX12ViewportHost
 					return;
 				}
 				string failureReason = null;
-				if (frame.IsValid && string.Equals(frame.DeviceMode, "D3D12", StringComparison.OrdinalIgnoreCase) && _renderer.RenderNativeTextureFrame(frame, queuedFrame.ColorSettings, queuedFrame.DenoiseEnabled, queuedFrame.DenoiseStrength, Volatile.Read(in _trackingOverlay), out failureReason))
+				if (frame.IsValid && string.Equals(frame.DeviceMode, "D3D12", StringComparison.OrdinalIgnoreCase) && _renderer.RenderNativeTextureFrame(frame, acceptedFrame.ColorSettings, acceptedFrame.DenoiseEnabled, acceptedFrame.DenoiseStrength, GetFreshTrackingOverlay(), out failureReason))
 				{
 					ReportPreviewPath("direct DX12 texture");
-					RecordRenderedFrame("direct DX12 texture", frame.MediaSubtype, frame.Width, frame.Height, frame.FramesPerSecond, queuedFrame.DenoiseEnabled, queuedFrame.DenoiseStrength, queuedFrame.ColorSettings, RecordingMode, null, frame.FrameNumber);
+					RecordRenderedFrame("direct DX12 texture", frame.MediaSubtype, frame.Width, frame.Height, frame.FramesPerSecond, acceptedFrame.DenoiseEnabled, acceptedFrame.DenoiseStrength, acceptedFrame.ColorSettings, RecordingMode, null, frame.FrameNumber);
+					submittedFenceValue =
+						_renderer.LastSubmittedFenceValue;
 					return;
 				}
-				string text = CombineTextureFailureReasons(failureReason, queuedFrame.SharedBridgeFailureReason);
-				if (!TryRenderNv12TextureUpload(_renderer, frame, text, queuedFrame.ColorSettings, queuedFrame.DenoiseEnabled, queuedFrame.DenoiseStrength, Volatile.Read(in _trackingOverlay)))
+				bool preferNv12Upload =
+					TextureNativePreviewPolicy.ShouldPreferNv12UploadFallback(
+						frame.MediaSubtype,
+						frame.Width,
+						frame.Height,
+						frame.Nv12PreviewBytes,
+						frame.Nv12PreviewStride);
+				string? sharedBridgeFailureReason = null;
+				if (!string.Equals(
+						frame.DeviceMode,
+						"D3D12",
+						StringComparison.OrdinalIgnoreCase)
+					&& !preferNv12Upload
+					&& frame.D3D12SharedTextureHandle != IntPtr.Zero
+					&& _renderer.RenderSharedD3D11BridgeFrame(
+						frame,
+						acceptedFrame.ColorSettings,
+						acceptedFrame.DenoiseEnabled,
+						acceptedFrame.DenoiseStrength,
+						GetFreshTrackingOverlay(),
+						out sharedBridgeFailureReason))
+				{
+					ReportPreviewPath(
+						"DX12 D3D11 bridge texture preview");
+					RecordRenderedFrame(
+						"DX12 D3D11 bridge texture preview",
+						frame.MediaSubtype,
+						frame.Width,
+						frame.Height,
+						frame.FramesPerSecond,
+						acceptedFrame.DenoiseEnabled,
+						acceptedFrame.DenoiseStrength,
+						acceptedFrame.ColorSettings,
+						RecordingMode,
+						null,
+						frame.FrameNumber);
+					submittedFenceValue =
+						_renderer.LastSubmittedFenceValue;
+					return;
+				}
+				if (!string.IsNullOrWhiteSpace(
+					sharedBridgeFailureReason))
+				{
+					failureReason = sharedBridgeFailureReason;
+				}
+				string text = CombineTextureFailureReasons(failureReason, acceptedFrame.SharedBridgeFailureReason);
+				if (!TryRenderNv12TextureUpload(_renderer, frame, text, acceptedFrame.ColorSettings, acceptedFrame.DenoiseEnabled, acceptedFrame.DenoiseStrength, GetFreshTrackingOverlay()))
 				{
 					_renderer.RenderProofFrame(frame.FrameNumber);
 					ReportPreviewPath(FormatUploadFallbackPath("DX12 proof-frame fallback", text));
@@ -1578,6 +1808,10 @@ public sealed class Direct3D12PreviewHost : WebcamDirectX12ViewportHost
 		{
 			RecordDroppedFrame();
 			this.StatusChanged?.Invoke(this, "DX12 camera frame upload failed: " + ex.Message);
+		}
+		finally
+		{
+			acceptedFrame.PreviewRead.Publish(submittedFenceValue);
 		}
 	}
 
@@ -1597,35 +1831,35 @@ public sealed class Direct3D12PreviewHost : WebcamDirectX12ViewportHost
 			while (true)
 			{
 				_renderFrameReady.WaitOne();
-				QueuedTextureFrame pendingTextureFrame;
-				QueuedCameraFrame queuedCameraFrame;
+				AcceptedTextureFrame acceptedTextureFrame;
+				AcceptedCameraFrame acceptedCameraFrame;
 				lock (_renderWorkerLock)
 				{
 					if (_renderWorkerStopping)
 					{
 						break;
 					}
-					pendingTextureFrame = _pendingTextureFrame;
-					_pendingTextureFrame = null;
-					queuedCameraFrame = (((object)pendingTextureFrame == null) ? _pendingCameraFrame : null);
-					_pendingCameraFrame = null;
+					acceptedTextureFrame = _acceptedTextureFrame;
+					_acceptedTextureFrame = null;
+					acceptedCameraFrame = (((object)acceptedTextureFrame == null) ? _acceptedCameraFrame : null);
+					_acceptedCameraFrame = null;
 				}
 				try
 				{
-					if ((object)pendingTextureFrame != null)
+					if ((object)acceptedTextureFrame != null)
 					{
-						using (pendingTextureFrame)
+						using (acceptedTextureFrame)
 						{
-							RenderTextureFrameCore(pendingTextureFrame);
+							RenderTextureFrameCore(acceptedTextureFrame);
 						}
 					}
 					else
 					{
-						if ((object)queuedCameraFrame == null)
+						if ((object)acceptedCameraFrame == null)
 						{
 							continue;
 						}
-						using (queuedCameraFrame)
+						using (acceptedCameraFrame)
 						{
 							try
 							{
@@ -1633,34 +1867,34 @@ public sealed class Direct3D12PreviewHost : WebcamDirectX12ViewportHost
 								{
 									if (_renderer != null && !IsRenderingSuspended)
 									{
-										byte[] nv12Bytes = queuedCameraFrame.Nv12Bytes;
-										if (nv12Bytes == null || nv12Bytes.Length <= 0 || queuedCameraFrame.Nv12Stride <= 0)
+										byte[] nv12Bytes = acceptedCameraFrame.Nv12Bytes;
+										if (nv12Bytes == null || nv12Bytes.Length <= 0 || acceptedCameraFrame.Nv12Stride <= 0)
 										{
 											goto IL_0216;
 										}
-										if (!_renderer.RenderNv12Frame(nv12Bytes, queuedCameraFrame.Width, queuedCameraFrame.Height, queuedCameraFrame.Nv12Stride, queuedCameraFrame.FrameNumber, queuedCameraFrame.ColorSettings, queuedCameraFrame.DenoiseEnabled, queuedCameraFrame.DenoiseStrength, Volatile.Read(in _trackingOverlay), queuedCameraFrame.FrameFormat == "nv12-ffmpeg"))
+										if (!_renderer.RenderNv12Frame(nv12Bytes, acceptedCameraFrame.Width, acceptedCameraFrame.Height, acceptedCameraFrame.Nv12Stride, acceptedCameraFrame.FrameNumber, acceptedCameraFrame.ColorSettings, acceptedCameraFrame.DenoiseEnabled, acceptedCameraFrame.DenoiseStrength, GetFreshTrackingOverlay(), acceptedCameraFrame.FrameFormat == "nv12-ffmpeg"))
 										{
-											this.StatusChanged?.Invoke(this, $"DX12 NV12 preview renderer refused {queuedCameraFrame.Width}x{queuedCameraFrame.Height}, stride {queuedCameraFrame.Nv12Stride}, bytes {nv12Bytes.Length}: {_renderer.LastNv12PreviewFailureReason}");
+											this.StatusChanged?.Invoke(this, $"DX12 NV12 preview renderer refused {acceptedCameraFrame.Width}x{acceptedCameraFrame.Height}, stride {acceptedCameraFrame.Nv12Stride}, bytes {nv12Bytes.Length}: {_renderer.LastNv12PreviewFailureReason}");
 											goto IL_0216;
 										}
 										ReportPreviewPath("DX12 NV12 upload preview");
-										RecordRenderedFrame("DX12 NV12 upload preview", queuedCameraFrame.FrameFormat, queuedCameraFrame.Width, queuedCameraFrame.Height, 0.0, queuedCameraFrame.DenoiseEnabled, queuedCameraFrame.DenoiseStrength, queuedCameraFrame.ColorSettings, RecordingMode, null, queuedCameraFrame.FrameNumber);
+										RecordRenderedFrame("DX12 NV12 upload preview", acceptedCameraFrame.FrameFormat, acceptedCameraFrame.Width, acceptedCameraFrame.Height, 0.0, acceptedCameraFrame.DenoiseEnabled, acceptedCameraFrame.DenoiseStrength, acceptedCameraFrame.ColorSettings, RecordingMode, null, acceptedCameraFrame.FrameNumber);
 									}
 									goto end_IL_0085;
 									IL_0216:
-									if (queuedCameraFrame.BgraBytes.Length == 0 || queuedCameraFrame.Stride <= 0)
+									if (acceptedCameraFrame.BgraBytes.Length == 0 || acceptedCameraFrame.Stride <= 0)
 									{
 										this.StatusChanged?.Invoke(this, "DX12 preview skipped: frame had no renderable BGRA or NV12 payload.");
 										continue;
 									}
-									_renderer.RenderBgraFrame(queuedCameraFrame.BgraBytes, queuedCameraFrame.Width, queuedCameraFrame.Height, queuedCameraFrame.Stride, queuedCameraFrame.FrameNumber, queuedCameraFrame.ColorSettings, queuedCameraFrame.DenoiseEnabled, queuedCameraFrame.DenoiseStrength, Volatile.Read(in _trackingOverlay));
+									_renderer.RenderBgraFrame(acceptedCameraFrame.BgraBytes, acceptedCameraFrame.Width, acceptedCameraFrame.Height, acceptedCameraFrame.Stride, acceptedCameraFrame.FrameNumber, acceptedCameraFrame.ColorSettings, acceptedCameraFrame.DenoiseEnabled, acceptedCameraFrame.DenoiseStrength, GetFreshTrackingOverlay());
 									goto IL_0296;
 									end_IL_0085:;
 								}
 								goto end_IL_007c;
 								IL_0296:
 								ReportPreviewPath("DX12 BGRA upload preview");
-								RecordRenderedFrame("DX12 BGRA upload preview", queuedCameraFrame.FrameFormat, queuedCameraFrame.Width, queuedCameraFrame.Height, 0.0, queuedCameraFrame.DenoiseEnabled, queuedCameraFrame.DenoiseStrength, queuedCameraFrame.ColorSettings, RecordingMode, null, queuedCameraFrame.FrameNumber);
+								RecordRenderedFrame("DX12 BGRA upload preview", acceptedCameraFrame.FrameFormat, acceptedCameraFrame.Width, acceptedCameraFrame.Height, 0.0, acceptedCameraFrame.DenoiseEnabled, acceptedCameraFrame.DenoiseStrength, acceptedCameraFrame.ColorSettings, RecordingMode, null, acceptedCameraFrame.FrameNumber);
 								end_IL_007c:;
 							}
 							catch (Exception ex)
@@ -1684,16 +1918,17 @@ public sealed class Direct3D12PreviewHost : WebcamDirectX12ViewportHost
 		}
 	}
 
-	private void StopRenderWorker()
+	private bool StopRenderWorker()
 	{
 		lock (_renderWorkerLock)
 		{
 			_renderWorkerStopping = true;
-			bool num = (object)_pendingCameraFrame != null || (object)_pendingTextureFrame != null;
-			_pendingCameraFrame?.Dispose();
-			_pendingCameraFrame = null;
-			_pendingTextureFrame?.Dispose();
-			_pendingTextureFrame = null;
+			bool num = (object)_acceptedCameraFrame != null || (object)_acceptedTextureFrame != null;
+			_acceptedCameraFrame?.Dispose();
+			_acceptedCameraFrame = null;
+			_acceptedTextureFrame?.PreviewRead.Publish(0uL);
+			_acceptedTextureFrame?.Dispose();
+			_acceptedTextureFrame = null;
 			if (num)
 			{
 				Interlocked.Exchange(ref _renderFrameBusy, 0);
@@ -1701,22 +1936,77 @@ public sealed class Direct3D12PreviewHost : WebcamDirectX12ViewportHost
 		}
 		_renderFrameReady.Set();
 		Thread renderThread = _renderThread;
+		bool stopped = true;
 		if (renderThread != null && renderThread != Thread.CurrentThread)
 		{
-			renderThread.Join();
+			stopped = renderThread.Join(RenderWorkerStopTimeout);
 		}
-		_renderThread = null;
-		_renderFrameReady.Dispose();
+		if (stopped)
+		{
+			_renderThread = null;
+			_renderFrameReady.Dispose();
+		}
+		return stopped;
 	}
 
-	private void CancelPendingRenderHandoff()
+	private void CancelAcceptedRenderHandoff()
 	{
 		lock (_renderWorkerLock)
 		{
-			_pendingCameraFrame?.Dispose();
-			_pendingCameraFrame = null;
-			_pendingTextureFrame?.Dispose();
-			_pendingTextureFrame = null;
+			_acceptedCameraFrame?.Dispose();
+			_acceptedCameraFrame = null;
+			_acceptedTextureFrame?.PreviewRead.Publish(0uL);
+			_acceptedTextureFrame?.Dispose();
+			_acceptedTextureFrame = null;
+		}
+	}
+
+	public bool WaitForTextureFrameRead(long frameNumber)
+	{
+		if (!_texturePreviewReads.TryRemove(
+			frameNumber,
+			out TexturePreviewRead? previewRead))
+		{
+			return true;
+		}
+		bool submitted = false;
+		try
+		{
+			if (!previewRead.TryWaitForSubmission(
+				TextureSubmissionTimeout,
+				out ulong fenceValue))
+			{
+				previewRead.Discard();
+				return false;
+			}
+			submitted = true;
+			if (fenceValue == 0uL)
+			{
+				return true;
+			}
+			Direct3D12SwapChainRenderer? renderer =
+				Volatile.Read(ref _renderer);
+			return renderer == null
+				|| renderer.WaitForFence(
+					fenceValue,
+					GpuOperationTimeout);
+		}
+		finally
+		{
+			if (submitted)
+			{
+				previewRead.Dispose();
+			}
+		}
+	}
+
+	public void DiscardTextureFrameRead(long frameNumber)
+	{
+		if (_texturePreviewReads.TryRemove(
+			frameNumber,
+			out TexturePreviewRead? previewRead))
+		{
+			previewRead.Discard();
 		}
 	}
 
@@ -1733,12 +2023,13 @@ public sealed class Direct3D12PreviewHost : WebcamDirectX12ViewportHost
 			{
 				return true;
 			}
-			DateTime utcNow = DateTime.UtcNow;
-			if (utcNow - _lastAcceptedRenderFrameUtc < TimeSpan.FromSeconds(1.0 / _maxRenderFramesPerSecond))
+			long timestamp = Stopwatch.GetTimestamp();
+			long minimumInterval = Math.Max(1L, (long)(Stopwatch.Frequency / _maxRenderFramesPerSecond));
+			if (timestamp - _lastAcceptedRenderFrameTimestamp < minimumInterval)
 			{
 				return false;
 			}
-			_lastAcceptedRenderFrameUtc = utcNow;
+			_lastAcceptedRenderFrameTimestamp = timestamp;
 			return true;
 		}
 	}
@@ -1751,20 +2042,27 @@ public sealed class Direct3D12PreviewHost : WebcamDirectX12ViewportHost
 	private void RecordRenderedFrame(string previewPath, string frameFormat, int width, int height, double sourceFramesPerSecond, bool denoiseEnabled, double denoiseStrength, VideoFrameColorSettings colorSettings, string recordingMode, string? fallbackReason, long frameNumber)
 	{
 		long num = Interlocked.Increment(ref _renderedFrames);
+		long timestamp = Stopwatch.GetTimestamp();
+		Volatile.Write(ref _lastRenderedFrameTimestamp, timestamp);
+		long previousTimestamp = Volatile.Read(ref _lastDiagnosticsPublishedTimestamp);
+		if (timestamp - previousTimestamp < Stopwatch.Frequency * 2L
+			|| Interlocked.CompareExchange(ref _lastDiagnosticsPublishedTimestamp, timestamp, previousTimestamp) != previousTimestamp)
+		{
+			return;
+		}
 		long submittedFrames = Interlocked.Read(in _submittedFrames);
 		long droppedFrames = Interlocked.Read(in _droppedFrames);
 		DateTimeOffset utcNow = DateTimeOffset.UtcNow;
 		Direct3D12PreviewDiagnostics e;
 		lock (_diagnosticsLock)
 		{
-			TimeSpan timeSpan = utcNow - _diagnosticsFpsWindowStartUtc;
-			if (timeSpan.TotalSeconds >= 1.0)
-			{
-				long num2 = Math.Max(0L, num - _diagnosticsFpsWindowStartRenderedFrames);
-				_renderFramesPerSecond = (double)num2 / Math.Max(0.001, timeSpan.TotalSeconds);
-				_diagnosticsFpsWindowStartUtc = utcNow;
-				_diagnosticsFpsWindowStartRenderedFrames = num;
-			}
+			double elapsedSeconds = Math.Max(
+				0.001,
+				(double)(timestamp - _diagnosticsFpsWindowStartTimestamp) / Stopwatch.Frequency);
+			long num2 = Math.Max(0L, num - _diagnosticsFpsWindowStartRenderedFrames);
+			_renderFramesPerSecond = num2 / elapsedSeconds;
+			_diagnosticsFpsWindowStartTimestamp = timestamp;
+			_diagnosticsFpsWindowStartRenderedFrames = num;
 			e = (_diagnostics = new Direct3D12PreviewDiagnostics(previewPath, DeviceDescription, string.IsNullOrWhiteSpace(frameFormat) ? "unknown" : frameFormat, width, height, sourceFramesPerSecond, submittedFrames, num, droppedFrames, _renderFramesPerSecond, denoiseEnabled, denoiseStrength, colorSettings.HasVisibleAdjustments, recordingMode, fallbackReason, frameNumber, utcNow));
 		}
 		this.DiagnosticsChanged?.Invoke(this, e);

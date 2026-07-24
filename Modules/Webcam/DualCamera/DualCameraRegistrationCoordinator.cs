@@ -287,6 +287,8 @@ internal sealed class DualCameraRegistrationCoordinator : IAsyncDisposable
 
 	private int _enabled;
 
+	private int _pairBusy;
+
 	private int _disposed;
 
 	private DualCameraCalibrationModel? _physicalCalibration;
@@ -325,12 +327,16 @@ internal sealed class DualCameraRegistrationCoordinator : IAsyncDisposable
 
 	public void Submit(bool cameraA, DualCameraObservation observation)
 	{
-		if (!IsEnabled || Volatile.Read(in _disposed) != 0)
+		if (!IsEnabled || Volatile.Read(in _disposed) != 0 || Volatile.Read(in _pairBusy) != 0)
 		{
 			return;
 		}
 		lock (_observationLock)
 		{
+			if (Volatile.Read(in _pairBusy) != 0)
+			{
+				return;
+			}
 			if (cameraA)
 			{
 				_cameraAObservation = observation;
@@ -374,7 +380,7 @@ internal sealed class DualCameraRegistrationCoordinator : IAsyncDisposable
 			{
 				break;
 			}
-			if (IsEnabled && TryTakeLatestPair(out DualCameraObservation cameraA, out DualCameraObservation cameraB))
+			if (IsEnabled && TryClaimCurrentPair(out DualCameraObservation cameraA, out DualCameraObservation cameraB))
 			{
 				try
 				{
@@ -384,34 +390,51 @@ internal sealed class DualCameraRegistrationCoordinator : IAsyncDisposable
 				{
 					this.StatusChanged?.Invoke("Translation skipped one pair: " + ex2.Message);
 				}
+				finally
+				{
+					Volatile.Write(ref _pairBusy, 0);
+				}
 			}
 		}
 	}
 
-	private bool TryTakeLatestPair(out DualCameraObservation cameraA, out DualCameraObservation cameraB)
+	private bool TryClaimCurrentPair(out DualCameraObservation cameraA, out DualCameraObservation cameraB)
 	{
 		lock (_observationLock)
 		{
 			cameraA = _cameraAObservation;
 			cameraB = _cameraBObservation;
+			if ((object)cameraA == null || (object)cameraB == null || Volatile.Read(in _pairBusy) != 0)
+			{
+				return false;
+			}
+			long ticks = cameraA.CapturedAtUtc.Ticks;
+			long ticks2 = cameraB.CapturedAtUtc.Ticks;
+			if (ticks == Volatile.Read(in _lastCameraATicks) && ticks2 == Volatile.Read(in _lastCameraBTicks))
+			{
+				_cameraAObservation = null;
+				_cameraBObservation = null;
+				return false;
+			}
+			if ((cameraA.CapturedAtUtc - cameraB.CapturedAtUtc).Duration() > MaximumPairSkew)
+			{
+				if (cameraA.CapturedAtUtc < cameraB.CapturedAtUtc)
+				{
+					_cameraAObservation = null;
+				}
+				else
+				{
+					_cameraBObservation = null;
+				}
+				return false;
+			}
+			_cameraAObservation = null;
+			_cameraBObservation = null;
+			Volatile.Write(ref _pairBusy, 1);
+			Volatile.Write(ref _lastCameraATicks, ticks);
+			Volatile.Write(ref _lastCameraBTicks, ticks2);
+			return true;
 		}
-		if ((object)cameraA == null || (object)cameraB == null)
-		{
-			return false;
-		}
-		long ticks = cameraA.CapturedAtUtc.Ticks;
-		long ticks2 = cameraB.CapturedAtUtc.Ticks;
-		if (ticks == Volatile.Read(in _lastCameraATicks) && ticks2 == Volatile.Read(in _lastCameraBTicks))
-		{
-			return false;
-		}
-		if ((cameraA.CapturedAtUtc - cameraB.CapturedAtUtc).Duration() > MaximumPairSkew)
-		{
-			return false;
-		}
-		Volatile.Write(ref _lastCameraATicks, ticks);
-		Volatile.Write(ref _lastCameraBTicks, ticks2);
-		return true;
 	}
 
 	private void ProcessPair(DualCameraObservation cameraA, DualCameraObservation cameraB)

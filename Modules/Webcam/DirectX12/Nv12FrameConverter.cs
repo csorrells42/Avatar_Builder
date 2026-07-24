@@ -32,26 +32,51 @@ internal static class Nv12FrameConverter
 
 	public static byte[]? ConvertToBgra(byte[] nv12, int nv12Stride, int width, int height, int maximumWidth, out int outputWidth, out int outputHeight, out int bgraStride)
 	{
-		bgraStride = width * 4;
-		outputWidth = width;
-		outputHeight = height;
-		if (width <= 0 || height <= 0 || nv12Stride < width)
+		if (!TryGetOutputLayout(nv12, nv12Stride, width, height, maximumWidth, out outputWidth, out outputHeight, out bgraStride, out int requiredLength))
 		{
 			return null;
 		}
-		int num = nv12Stride * height + nv12Stride * ((height + 1) / 2);
-		if (nv12.Length < num)
+		byte[] array = new byte[requiredLength];
+		if (!TryConvertToBgra(nv12, nv12Stride, width, height, outputWidth, outputHeight, bgraStride, array))
 		{
 			return null;
+		}
+		return array;
+	}
+
+	public static bool TryGetOutputLayout(byte[] nv12, int nv12Stride, int width, int height, int maximumWidth, out int outputWidth, out int outputHeight, out int bgraStride, out int requiredLength)
+	{
+		outputWidth = width;
+		outputHeight = height;
+		bgraStride = 0;
+		requiredLength = 0;
+		if (width <= 0 || height <= 0 || nv12Stride < width)
+		{
+			return false;
+		}
+		int sourceLength = nv12Stride * height + nv12Stride * ((height + 1) / 2);
+		if (nv12.Length < sourceLength)
+		{
+			return false;
 		}
 		if (maximumWidth > 0 && width > maximumWidth)
 		{
-			double num2 = (double)maximumWidth / (double)width;
+			double num2 = (double)maximumWidth / width;
 			outputWidth = maximumWidth;
-			outputHeight = Math.Max(1, (int)Math.Round((double)height * num2));
+			outputHeight = Math.Max(1, (int)Math.Round(height * num2));
 		}
 		bgraStride = outputWidth * 4;
-		byte[] array = new byte[bgraStride * outputHeight];
+		requiredLength = checked(bgraStride * outputHeight);
+		return true;
+	}
+
+	public static bool TryConvertToBgra(byte[] nv12, int nv12Stride, int width, int height, int outputWidth, int outputHeight, int bgraStride, Span<byte> destination)
+	{
+		int requiredLength = checked(bgraStride * outputHeight);
+		if (outputWidth <= 0 || outputHeight <= 0 || bgraStride < outputWidth * 4 || destination.Length < requiredLength)
+		{
+			return false;
+		}
 		int num3 = nv12Stride * height;
 		for (int i = 0; i < outputHeight; i++)
 		{
@@ -73,13 +98,13 @@ internal static class Nv12FrameConverter
 				byte b4 = ClampToByte(298 * num11 - 100 * num12 - 208 * num13 + 128 >> 8);
 				byte b5 = ClampToByte(298 * num11 + 516 * num12 + 128 >> 8);
 				int num14 = num7 + j * 4;
-				array[num14] = b5;
-				array[num14 + 1] = b4;
-				array[num14 + 2] = b3;
-				array[num14 + 3] = byte.MaxValue;
+				destination[num14] = b5;
+				destination[num14 + 1] = b4;
+				destination[num14 + 2] = b3;
+				destination[num14 + 3] = byte.MaxValue;
 			}
 		}
-		return array;
+		return true;
 	}
 
 	private static byte ClampToByte(int value)

@@ -6,13 +6,7 @@ namespace AvatarBuilder.Modules.Vision.MediaPipe.Reconstruction;
 
 public sealed class MediaPipeNormalizedFaceModel
 {
-	public const string LegacyNormalizedImageSchemaVersion = "mediapipe-visible-geometry-v1";
-
-	public const string CurrentSchemaVersion = "mediapipe-visible-geometry-v2";
-
 	public static MediaPipeNormalizedFaceModel Empty { get; } = new MediaPipeNormalizedFaceModel();
-
-	public string SchemaVersion { get; init; } = "mediapipe-visible-geometry-v2";
 
 	public string SubjectId { get; init; } = "";
 

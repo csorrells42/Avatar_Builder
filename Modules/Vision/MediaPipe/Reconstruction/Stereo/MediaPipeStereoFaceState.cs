@@ -5,8 +5,6 @@ namespace AvatarBuilder.Modules.Vision.MediaPipe.Reconstruction.Stereo;
 
 public sealed class MediaPipeStereoFaceState
 {
-	public string SchemaVersion { get; init; } = "calibrated-stereo-face-v1";
-
 	public string SubjectId { get; init; } = "";
 
 	public string SubjectDisplayName { get; init; } = "";

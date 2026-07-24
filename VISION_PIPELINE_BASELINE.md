@@ -26,12 +26,11 @@ The 3DDFA full-dense row has only three samples and is a workload estimate, not 
 ## Operating Decision
 
 - Keep MediaPipe as the default continuous live face/feature tracker.
-- Use the MediaPipe caller box for MediaPipe-selected 3DDFA pose/reconstruction work.
-- In 3DDFA-selected mode, reacquire with FaceBoxes periodically and use the latest sparse landmarks as the temporal box between acquisitions.
-- Use 3DDFA tracking mode for pose and A/B/C alignment evidence.
-- Request full dense output only for a logged-in, active, quality-gated persistent observation. Keep the per-profile A/B/C alignment audit diagnostic; 3DDFA owns avatar pose and depth.
+- Use MediaPipe's facial transformation matrix as the only A/B/C pose source.
+- Run 3DDFA dense reconstruction only when the user explicitly requests the dense-warp proof. It must consume the already accepted MediaPipe observation rather than compete with continuous tracking.
+- Keep runtime benchmarking and pose-comparison diagnostics disabled during normal capture.
 - Treat camera preview FPS and vision-analysis throughput as independent measurements.
 
 ## Regression Rule
 
-Future changes should be compared with the same clips and sequential protocol. Investigate a loss of face lock, a median regression greater than 15%, or a p95 regression greater than 25% before accepting the change. Live application timings are also written in ten-second batches to `Benchmarks\vision-pipeline-YYYYMMDD.csv` under the configured data folder.
+Future changes should be compared with the same clips and sequential protocol through an explicit benchmark run. Investigate a loss of face lock, a median regression greater than 15%, or a p95 regression greater than 25% before accepting the change. Normal capture does not record benchmark samples.

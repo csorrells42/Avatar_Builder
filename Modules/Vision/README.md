@@ -39,7 +39,7 @@ Optional OpenCV-backed localization and aperture fallbacks. OpenCvSharp types re
 
 ## Diagnostics
 
-`VisionPipelineDiagnostics.cs` is the stage-timing contract. `VisionBenchmarkRecorder.cs` batches samples away from the UI thread. `MediaPipeConvergenceAuditor` measures canonical landmark stability with bounded diagnostic work that may be skipped when busy.
+`VisionPipelineDiagnostics.cs` is the opt-in stage-timing contract.
 
 ## Pipeline
 
@@ -53,6 +53,6 @@ Optional OpenCV-backed localization and aperture fallbacks. OpenCvSharp types re
 
 ## Reconstruction
 
-`MediaPipe/Reconstruction` owns monocular visible-evidence geometry and calibrated stereo accumulation. Each lane has one worker and one replaceable newest pending input. The current job finishes; stale pending inputs are discarded before they can create latency.
+`MediaPipe/Reconstruction` owns monocular visible-evidence geometry and calibrated stereo accumulation. MediaPipe's facial transformation matrix is the single pose source. Each lane has one worker and no waiting slot. It reserves the worker before copying or converting an input, finishes every accepted observation, ignores arrivals while occupied, and accepts the freshest available input after the worker becomes idle.
 
 Never persist profile measurements without an active login for the selected user.

@@ -1,6 +1,6 @@
 namespace AvatarBuilder.Modules.Vision.MediaPipe.Reconstruction;
 
-public sealed class MediaPipeSilhouetteBandState
+public readonly record struct MediaPipeSilhouetteBandState
 {
 	public int BandIndex { get; init; }
 

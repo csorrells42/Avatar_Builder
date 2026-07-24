@@ -1,4 +1,5 @@
 using System;
+using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
@@ -22,7 +23,7 @@ public sealed class MediaFoundationBitmapCameraPreviewService : ICameraPreviewSe
 
 	private Task? _captureTask;
 
-	private DateTime _lastFrameEmittedAtUtc = DateTime.MinValue;
+	private long _lastAnalysisFrameTimestamp;
 
 	private int _activeWidth = 1280;
 
@@ -34,13 +35,13 @@ public sealed class MediaFoundationBitmapCameraPreviewService : ICameraPreviewSe
 
 	private int _activeStride;
 
-	private int _analysisFrameWorkerQueued;
+	private int _analysisFrameInFlight;
 
 	public bool IsAvailable => OperatingSystem.IsWindows();
 
 	public int MaxOutputWidth { get; set; } = 960;
 
-	public double MaxOutputFramesPerSecond { get; set; } = 15.0;
+	public double MaxOutputFramesPerSecond { get; set; } = 1000.0;
 
 	public event EventHandler<BitmapSource>? FrameAvailable;
 
@@ -148,6 +149,7 @@ public sealed class MediaFoundationBitmapCameraPreviewService : ICameraPreviewSe
 			UpdateActiveFormat(iMFSourceReader, mode);
 			NotifyStatusChanged($"Media Foundation preview format: {_activeWidth}x{_activeHeight}@{_activeFramesPerSecond:0.###} {MediaFoundationInterop.FormatSubtype(_activeSubtype)}.");
 			startup.TrySetResult(null);
+			long analysisIntervalTicks = Math.Max(1L, (long)(Stopwatch.Frequency / Math.Clamp(MaxOutputFramesPerSecond, 1.0, 1000.0)));
 			while (!cancellationToken.IsCancellationRequested)
 			{
 				int actualStreamIndex;
@@ -175,12 +177,11 @@ public sealed class MediaFoundationBitmapCameraPreviewService : ICameraPreviewSe
 				{
 					if (TryReadFrame(sample2, _activeWidth, _activeHeight, _activeSubtype, _activeStride, out CameraFrame frame))
 					{
-						firstFrame.TrySetResult(result: true);
-						NotifyCameraFrameAvailable(frame);
-						if (CanEmitFrame())
+						using (frame)
 						{
-							MarkFrameEmitted();
-							QueueAnalysisFrame(frame);
+							firstFrame.TrySetResult(result: true);
+							NotifyCameraFrameAvailable(frame);
+							StartAnalysisFrameIfIdle(frame, analysisIntervalTicks);
 						}
 					}
 				}
@@ -221,37 +222,33 @@ public sealed class MediaFoundationBitmapCameraPreviewService : ICameraPreviewSe
 		}
 	}
 
-	private bool CanEmitFrame()
+	private void StartAnalysisFrameIfIdle(CameraFrame frame, long analysisIntervalTicks)
 	{
-		DateTime utcNow = DateTime.UtcNow;
-		double num = Math.Clamp(MaxOutputFramesPerSecond, 1.0, 60.0);
-		return (utcNow - _lastFrameEmittedAtUtc).TotalSeconds >= 1.0 / num;
-	}
-
-	private void MarkFrameEmitted()
-	{
-		_lastFrameEmittedAtUtc = DateTime.UtcNow;
-	}
-
-	private void QueueAnalysisFrame(CameraFrame frame)
-	{
-		if (Interlocked.CompareExchange(ref _analysisFrameWorkerQueued, 1, 0) == 0)
+		if (Volatile.Read(ref _analysisFrameInFlight) != 0)
 		{
-			CameraFrame ownedFrame;
-			try
-			{
-				ownedFrame = frame.Duplicate();
-			}
-			catch
-			{
-				Interlocked.Exchange(ref _analysisFrameWorkerQueued, 0);
-				return;
-			}
-			Task.Run(delegate
-			{
-				ProcessAnalysisFrame(ownedFrame);
-			});
+			return;
 		}
+		long timestamp = Stopwatch.GetTimestamp();
+		if (timestamp - Volatile.Read(ref _lastAnalysisFrameTimestamp) < analysisIntervalTicks
+			|| Interlocked.CompareExchange(ref _analysisFrameInFlight, 1, 0) != 0)
+		{
+			return;
+		}
+		Volatile.Write(ref _lastAnalysisFrameTimestamp, timestamp);
+		CameraFrame ownedFrame;
+		try
+		{
+			ownedFrame = frame.Duplicate();
+		}
+		catch
+		{
+			Interlocked.Exchange(ref _analysisFrameInFlight, 0);
+			return;
+		}
+		Task.Run(delegate
+		{
+			ProcessAnalysisFrame(ownedFrame);
+		});
 	}
 
 	private void ProcessAnalysisFrame(CameraFrame frame)
@@ -269,13 +266,13 @@ public sealed class MediaFoundationBitmapCameraPreviewService : ICameraPreviewSe
 		}
 		finally
 		{
-			Interlocked.Exchange(ref _analysisFrameWorkerQueued, 0);
+			Interlocked.Exchange(ref _analysisFrameInFlight, 0);
 		}
 	}
 
 	private void ResetAnalysisFramePump()
 	{
-		_lastFrameEmittedAtUtc = DateTime.MinValue;
+		Volatile.Write(ref _lastAnalysisFrameTimestamp, 0L);
 	}
 
 	private void NotifyCameraFrameAvailable(CameraFrame frame)
@@ -403,9 +400,17 @@ public sealed class MediaFoundationBitmapCameraPreviewService : ICameraPreviewSe
 					{
 						return false;
 					}
-					byte[] array = new byte[num3];
-					Marshal.Copy(buffer2, array, 0, num3);
-					frame = new CameraFrame(Array.Empty<byte>(), width, height, 0, array, num, "nv12");
+					CameraFrame rentedFrame = CameraFrame.RentNv12(width, height, num);
+					try
+					{
+						Marshal.Copy(buffer2, rentedFrame.Nv12Bytes!, 0, num3);
+						frame = rentedFrame;
+					}
+					catch
+					{
+						rentedFrame.Dispose();
+						throw;
+					}
 					return true;
 				}
 				int num4 = ((stride != 0) ? Math.Abs(stride) : (width * 4));
@@ -414,9 +419,17 @@ public sealed class MediaFoundationBitmapCameraPreviewService : ICameraPreviewSe
 				{
 					return false;
 				}
-				byte[] array2 = new byte[num5];
-				Marshal.Copy(buffer2, array2, 0, num5);
-				frame = new CameraFrame(array2, width, height, num4);
+				CameraFrame rentedBgraFrame = CameraFrame.RentBgra(width, height, num4);
+				try
+				{
+					Marshal.Copy(buffer2, rentedBgraFrame.BgraBytes, 0, num5);
+					frame = rentedBgraFrame;
+				}
+				catch
+				{
+					rentedBgraFrame.Dispose();
+					throw;
+				}
 				return true;
 			}
 			finally
@@ -432,32 +445,41 @@ public sealed class MediaFoundationBitmapCameraPreviewService : ICameraPreviewSe
 
 	private bool TryCreateBitmap(CameraFrame frame, out BitmapSource bitmap)
 	{
-		bitmap = BitmapSource.Create(1, 1, 96.0, 96.0, PixelFormats.Bgra32, null, new byte[4] { 0, 0, 0, 255 }, 4);
+		bitmap = null!;
 		if (frame.Width <= 0 || frame.Height <= 0)
 		{
 			return false;
 		}
 		int num = Math.Clamp(MaxOutputWidth, 320, 3840);
-		if (!frame.HasBgra)
+		CameraFrame? convertedFrame = null;
+		try
 		{
-			if (!frame.HasNv12)
+			if (!frame.HasBgra)
 			{
-				return false;
+				if (!frame.HasNv12)
+				{
+					return false;
+				}
+				convertedFrame = CreateBgraFrameFromNv12(frame, num);
+				frame = convertedFrame;
 			}
-			frame = CreateBgraFrameFromNv12(frame, num);
-		}
-		BitmapSource bitmapSource = BitmapSource.Create(frame.Width, frame.Height, 96.0, 96.0, PixelFormats.Bgra32, null, frame.BgraBytes, frame.Stride);
-		bitmapSource.Freeze();
-		if (frame.Width <= num)
-		{
-			bitmap = bitmapSource;
+			BitmapSource bitmapSource = BitmapSource.Create(frame.Width, frame.Height, 96.0, 96.0, PixelFormats.Bgra32, null, frame.BgraBytes, frame.Stride);
+			bitmapSource.Freeze();
+			if (frame.Width <= num)
+			{
+				bitmap = bitmapSource;
+				return true;
+			}
+			double num2 = (double)num / frame.Width;
+			TransformedBitmap transformedBitmap = new TransformedBitmap(bitmapSource, new ScaleTransform(num2, num2));
+			transformedBitmap.Freeze();
+			bitmap = transformedBitmap;
 			return true;
 		}
-		double num2 = (double)num / (double)frame.Width;
-		TransformedBitmap transformedBitmap = new TransformedBitmap(bitmapSource, new ScaleTransform(num2, num2));
-		transformedBitmap.Freeze();
-		bitmap = transformedBitmap;
-		return true;
+		finally
+		{
+			convertedFrame?.Dispose();
+		}
 	}
 
 	private static CameraFrame CreateBgraFrameFromNv12(CameraFrame frame, int maximumWidth)
@@ -479,7 +501,8 @@ public sealed class MediaFoundationBitmapCameraPreviewService : ICameraPreviewSe
 			num2 = Math.Max(1, (int)Math.Round((double)height * num3));
 		}
 		int num4 = num * 4;
-		byte[] array = new byte[num4 * num2];
+		CameraFrame convertedFrame = CameraFrame.RentBgra(num, num2, num4, "nv12-analysis");
+		byte[] array = convertedFrame.BgraBytes;
 		int num5 = nv12Stride * height;
 		for (int i = 0; i < num2; i++)
 		{
@@ -504,7 +527,7 @@ public sealed class MediaFoundationBitmapCameraPreviewService : ICameraPreviewSe
 				array[num15 + 3] = byte.MaxValue;
 			}
 		}
-		return new CameraFrame(array, num, num2, num4, null, 0, "nv12-analysis");
+		return convertedFrame;
 	}
 
 	private static byte ClampByte(double value)
@@ -541,6 +564,5 @@ public sealed class MediaFoundationBitmapCameraPreviewService : ICameraPreviewSe
 		_activeFramesPerSecond = 30.0;
 		_activeSubtype = MediaFoundationGuids.MFVideoFormat_RGB32;
 		_activeStride = 0;
-		_lastFrameEmittedAtUtc = DateTime.MinValue;
 	}
 }

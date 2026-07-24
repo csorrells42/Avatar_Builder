@@ -314,8 +314,61 @@ def handle_request(cv2, np, face_boxes, tddfa, calc_pose, parse_param, dense_tri
     request_id = request.get("requestId", "")
     captured_at_utc = request.get("capturedAtUtc", "")
     mode = request.get("mode", "tracking")
-    if mode not in ("faceBoxOnly", "tracking", "preview", "full"):
+    if mode not in ("faceBoxOnly", "tracking", "preview", "full", "model"):
         mode = "tracking"
+    if mode == "model":
+        dense_started = time.perf_counter()
+        alpha_shape = np.zeros(
+            (tddfa.w_shp_base.shape[1], 1),
+            dtype=np.float32)
+        alpha_expression = np.zeros(
+            (tddfa.w_exp_base.shape[1], 1),
+            dtype=np.float32)
+        canonical_identity = tddfa.bfm_session.run(
+            None,
+            {
+                "R": np.eye(3, dtype=np.float32),
+                "offset": np.zeros((3, 1), dtype=np.float32),
+                "alpha_shp": alpha_shape,
+                "alpha_exp": alpha_expression,
+            },
+        )[0]
+        canonical_sparse = (
+            tddfa.u_base
+            + tddfa.w_shp_base @ alpha_shape
+            + tddfa.w_exp_base @ alpha_expression
+        ).reshape(3, -1, order="F")
+        canonical_identity_coordinates, dense_edge_indices = dense_mesh_to_compact_json(
+            np,
+            canonical_identity,
+            dense_triangles,
+            include_topology=bool(request.get("includeTopology", True)))
+        dense_count = int(canonical_identity.shape[1])
+        dense_ms = elapsed_ms(dense_started)
+        return {
+            "requestId": request_id,
+            "ok": True,
+            "hasFace": True,
+            "status": f"3DDFA/ONNX neutral dense model ({dense_count} vertices)",
+            "backend": "3DDFA_V2 ONNX",
+            "capturedAtUtc": captured_at_utc,
+            "mode": mode,
+            "trustDecision": "Neutral 3DDFA topology is ready for the saved MediaPipe geometry",
+            "reconstructionConfidencePercent": 100.0,
+            "denseVertexCount": dense_count,
+            "denseSampleStride": 1,
+            "denseVertices": [],
+            "canonicalIdentityVertices": [],
+            "denseEdges": [],
+            "denseVertexCoordinates": [],
+            "canonicalIdentityCoordinates": canonical_identity_coordinates,
+            "canonicalSparseLandmarks": vertices_to_json(canonical_sparse, 1),
+            "denseEdgeIndices": dense_edge_indices,
+            "warnings": startup_warnings,
+            "timingsMilliseconds": stage_timings(
+                dense=dense_ms,
+                total=elapsed_ms(total_started)),
+        }
     decode_started = time.perf_counter()
     image = image_from_base64(cv2, np, request.get("imageBase64", ""))
     decode_ms = elapsed_ms(decode_started)

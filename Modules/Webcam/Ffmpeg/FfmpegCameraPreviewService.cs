@@ -32,7 +32,7 @@ public sealed class FfmpegCameraPreviewService : ICameraPreviewService, IDisposa
 
 	private TaskCompletionSource<bool>? _firstFrameSignal;
 
-	private Channel<CameraFrame>? _frameChannel;
+	private Channel<CameraFrame>? _acceptedFrameHandoff;
 
 	private Task? _frameReaderTask;
 
@@ -54,7 +54,7 @@ public sealed class FfmpegCameraPreviewService : ICameraPreviewService, IDisposa
 
 	public int MaxOutputWidth { get; set; } = 960;
 
-	public double MaxOutputFramesPerSecond { get; set; } = 15.0;
+	public double MaxOutputFramesPerSecond { get; set; } = 1000.0;
 
 	public bool BitmapFramesEnabled { get; set; } = true;
 
@@ -154,14 +154,14 @@ public sealed class FfmpegCameraPreviewService : ICameraPreviewService, IDisposa
 			this.StatusChanged?.Invoke(this, "Could not start camera preview");
 			return false;
 		}
-		Channel<CameraFrame> channel = (_frameChannel = Channel.CreateBounded<CameraFrame>(new BoundedChannelOptions(1)
+		Channel<CameraFrame> acceptedFrameHandoff = (_acceptedFrameHandoff = Channel.CreateBounded<CameraFrame>(new BoundedChannelOptions(1)
 		{
 			SingleReader = false,
 			SingleWriter = true,
 			FullMode = BoundedChannelFullMode.Wait
 		}));
-		_frameDeliveryTask = DeliverFramesAsync(channel.Reader, _cancellation.Token);
-		_frameReaderTask = ReadFramesAsync(_process, outputLayout, channel, _cancellation.Token);
+		_frameDeliveryTask = DeliverFramesAsync(acceptedFrameHandoff.Reader, _cancellation.Token);
+		_frameReaderTask = ReadFramesAsync(_process, outputLayout, acceptedFrameHandoff, _cancellation.Token);
 		ReadErrorsAsync(_process, _cancellation.Token);
 		Task exitTask = WatchExitAsync(_process, _cancellation.Token);
 		this.StatusChanged?.Invoke(this, "Starting preview: " + name);
@@ -241,7 +241,7 @@ public sealed class FfmpegCameraPreviewService : ICameraPreviewService, IDisposa
 	{
 		int num = mode?.Width ?? 1280;
 		int num2 = mode?.Height ?? 720;
-		double framesPerSecond = Math.Clamp(Math.Min(mode?.FramesPerSecond ?? 30.0, MaxOutputFramesPerSecond), 1.0, 60.0);
+		double framesPerSecond = Math.Clamp(Math.Min(mode?.FramesPerSecond ?? 30.0, MaxOutputFramesPerSecond), 1.0, 1000.0);
 		int val = Math.Clamp(MaxOutputWidth, 320, 3840);
 		int num3 = Math.Min(num, val);
 		double num4 = (double)num3 / (double)Math.Max(1, num);
@@ -305,7 +305,7 @@ public sealed class FfmpegCameraPreviewService : ICameraPreviewService, IDisposa
 	{
 		CancellationTokenSource cancellationTokenSource = Interlocked.Exchange(ref _cancellation, null);
 		cancellationTokenSource?.Cancel();
-		Interlocked.Exchange(ref _frameChannel, null)?.Writer.TryComplete();
+		Interlocked.Exchange(ref _acceptedFrameHandoff, null)?.Writer.TryComplete();
 		_firstFrameSignal = null;
 		Interlocked.Exchange(ref _framesToQuarantine, 0);
 		Process process = Interlocked.Exchange(ref _process, null);
@@ -418,7 +418,7 @@ public sealed class FfmpegCameraPreviewService : ICameraPreviewService, IDisposa
 		return line;
 	}
 
-	private async Task ReadFramesAsync(Process process, OutputLayout outputLayout, Channel<CameraFrame> frameChannel, CancellationToken cancellationToken)
+	private async Task ReadFramesAsync(Process process, OutputLayout outputLayout, Channel<CameraFrame> acceptedFrameHandoff, CancellationToken cancellationToken)
 	{
 		Stream stream = process.StandardOutput.BaseStream;
 		int frameByteCount = checked(outputLayout.Width * outputLayout.Height * 3) / 2;
@@ -442,7 +442,7 @@ public sealed class FfmpegCameraPreviewService : ICameraPreviewService, IDisposa
 					if (!ConsumeQuarantinedFrame())
 					{
 						_firstFrameSignal?.TrySetResult(result: true);
-						if (TryQueueFrame(frameChannel, frame))
+						if (TryAcceptFrameForDelivery(acceptedFrameHandoff, frame))
 						{
 							frame = null;
 						}
@@ -463,7 +463,7 @@ public sealed class FfmpegCameraPreviewService : ICameraPreviewService, IDisposa
 		}
 		finally
 		{
-			frameChannel.Writer.TryComplete();
+			acceptedFrameHandoff.Writer.TryComplete();
 		}
 	}
 
@@ -516,13 +516,13 @@ public sealed class FfmpegCameraPreviewService : ICameraPreviewService, IDisposa
 		}
 	}
 
-	private bool TryQueueFrame(Channel<CameraFrame> channel, CameraFrame frame)
+	private bool TryAcceptFrameForDelivery(Channel<CameraFrame> acceptedFrameHandoff, CameraFrame frame)
 	{
 		if (Interlocked.CompareExchange(ref _frameDeliveryBusy, 1, 0) != 0)
 		{
 			return false;
 		}
-		if (channel.Writer.TryWrite(frame))
+		if (acceptedFrameHandoff.Writer.TryWrite(frame))
 		{
 			return true;
 		}

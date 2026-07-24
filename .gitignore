@@ -9,6 +9,7 @@ obj/
 .storage-smoke/
 .appdata/
 desktop-runtime/
+desktop-runtime-next/
 verification-runtime/
 *.user
 *.suo

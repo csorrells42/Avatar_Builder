@@ -46,8 +46,8 @@ public sealed class FaceLandmarkMetricCalculator
 		double? num = ContourOpeningEstimator.CalculateOpeningRatio(frame.LeftEyeContour, ShouldUsePairedAverage(frame, frame.LeftEyeContour, isEye: true, highFidelityLandmarkSource));
 		double? num2 = ContourOpeningEstimator.CalculateOpeningRatio(frame.RightEyeContour, ShouldUsePairedAverage(frame, frame.RightEyeContour, isEye: true, highFidelityLandmarkSource));
 		double? num3 = Average(num, num2);
-		double? num4 = BlendshapePercent(frame, "eyeBlinkLeft");
-		double? num5 = BlendshapePercent(frame, "eyeBlinkRight");
+		double? num4 = ScorePercent(frame.MediaPipeEyeBlinkLeftScore) ?? BlendshapePercent(frame, "eyeBlinkLeft");
+		double? num5 = ScorePercent(frame.MediaPipeEyeBlinkRightScore) ?? BlendshapePercent(frame, "eyeBlinkRight");
 		double? num6 = Average(num4, num5);
 		UpdateMediaPipeOpenEyeReference(frame, num3, num6, highFidelityLandmarkSource);
 		double? rawEyeAsymmetryPercent = CalculateAsymmetryPercent(num, num2, num3);
@@ -62,8 +62,8 @@ public sealed class FaceLandmarkMetricCalculator
 		double? mediaPipeEyeOpeningCorrectionRatio = CalculateCorrection(averageEyeOpening, num3);
 		IReadOnlyList<Point> contour = ((frame.InnerLipContour.Count >= 4) ? frame.InnerLipContour : frame.OuterLipContour);
 		double? num9 = ContourOpeningEstimator.CalculateOpeningRatio(contour, ShouldUsePairedAverage(frame, contour, isEye: false, highFidelityLandmarkSource));
-		double? mediaPipeJawOpenPercent = BlendshapePercent(frame, "jawOpen");
-		double? mediaPipeMouthClosePercent = BlendshapePercent(frame, "mouthClose");
+		double? mediaPipeJawOpenPercent = ScorePercent(frame.MediaPipeJawOpenScore) ?? BlendshapePercent(frame, "jawOpen");
+		double? mediaPipeMouthClosePercent = ScorePercent(frame.MediaPipeMouthCloseScore) ?? BlendshapePercent(frame, "mouthClose");
 		UpdateMediaPipeClosedMouthReference(frame, num9, mediaPipeJawOpenPercent, mediaPipeMouthClosePercent, highFidelityLandmarkSource);
 		double? num10 = StabilizeMouthOpeningWithMediaPipe(num9, mediaPipeJawOpenPercent, mediaPipeMouthClosePercent);
 		double? mediaPipeMouthOpeningCorrectionRatio = CalculateCorrection(num10, num9);
@@ -637,6 +637,11 @@ public sealed class FaceLandmarkMetricCalculator
 			return null;
 		}
 		return Math.Clamp(value, 0.0, 1.0) * 100.0;
+	}
+
+	private static double? ScorePercent(double? score)
+	{
+		return score.HasValue ? Math.Clamp(score.Value, 0.0, 1.0) * 100.0 : null;
 	}
 
 	private static bool ShouldUsePairedAverage(FaceLandmarkFrame frame, IReadOnlyList<Point> contour, bool isEye, bool highFidelityLandmarkSource)

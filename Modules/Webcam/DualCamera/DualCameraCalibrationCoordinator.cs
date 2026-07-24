@@ -97,6 +97,8 @@ internal sealed class DualCameraCalibrationCoordinator : IAsyncDisposable
 
 	private int _enabled;
 
+	private int _pairBusy;
+
 	private int _disposed;
 
 	public bool IsEnabled => Volatile.Read(in _enabled) != 0;
@@ -146,12 +148,16 @@ internal sealed class DualCameraCalibrationCoordinator : IAsyncDisposable
 
 	public void Submit(bool cameraA, DualCameraCalibrationFrame frame)
 	{
-		if (!IsEnabled || Volatile.Read(in _disposed) != 0)
+		if (!IsEnabled || Volatile.Read(in _disposed) != 0 || Volatile.Read(in _pairBusy) != 0)
 		{
 			return;
 		}
 		lock (_frameLock)
 		{
+			if (Volatile.Read(in _pairBusy) != 0)
+			{
+				return;
+			}
 			if (cameraA)
 			{
 				_cameraAFrame = frame;
@@ -195,7 +201,7 @@ internal sealed class DualCameraCalibrationCoordinator : IAsyncDisposable
 			{
 				break;
 			}
-			if (IsEnabled && TryTakeLatestPair(out DualCameraCalibrationFrame cameraA, out DualCameraCalibrationFrame cameraB))
+			if (IsEnabled && TryClaimCurrentPair(out DualCameraCalibrationFrame cameraA, out DualCameraCalibrationFrame cameraB))
 			{
 				try
 				{
@@ -205,34 +211,51 @@ internal sealed class DualCameraCalibrationCoordinator : IAsyncDisposable
 				{
 					this.ProgressChanged?.Invoke(new DualCameraCalibrationProgress("Calibration skipped one pair: " + ex2.Message, _samples.Count, 15, CameraABoardFound: false, CameraBBoardFound: false, Completed: false));
 				}
+				finally
+				{
+					Volatile.Write(ref _pairBusy, 0);
+				}
 			}
 		}
 	}
 
-	private bool TryTakeLatestPair(out DualCameraCalibrationFrame cameraA, out DualCameraCalibrationFrame cameraB)
+	private bool TryClaimCurrentPair(out DualCameraCalibrationFrame cameraA, out DualCameraCalibrationFrame cameraB)
 	{
 		lock (_frameLock)
 		{
 			cameraA = _cameraAFrame;
 			cameraB = _cameraBFrame;
+			if ((object)cameraA == null || (object)cameraB == null || Volatile.Read(in _pairBusy) != 0)
+			{
+				return false;
+			}
+			long ticks = cameraA.CapturedAtUtc.Ticks;
+			long ticks2 = cameraB.CapturedAtUtc.Ticks;
+			if (ticks == Volatile.Read(in _lastCameraATicks) && ticks2 == Volatile.Read(in _lastCameraBTicks))
+			{
+				_cameraAFrame = null;
+				_cameraBFrame = null;
+				return false;
+			}
+			if ((cameraA.CapturedAtUtc - cameraB.CapturedAtUtc).Duration() > MaximumPairSkew)
+			{
+				if (cameraA.CapturedAtUtc < cameraB.CapturedAtUtc)
+				{
+					_cameraAFrame = null;
+				}
+				else
+				{
+					_cameraBFrame = null;
+				}
+				return false;
+			}
+			_cameraAFrame = null;
+			_cameraBFrame = null;
+			Volatile.Write(ref _pairBusy, 1);
+			Volatile.Write(ref _lastCameraATicks, ticks);
+			Volatile.Write(ref _lastCameraBTicks, ticks2);
+			return true;
 		}
-		if ((object)cameraA == null || (object)cameraB == null)
-		{
-			return false;
-		}
-		long ticks = cameraA.CapturedAtUtc.Ticks;
-		long ticks2 = cameraB.CapturedAtUtc.Ticks;
-		if (ticks == Volatile.Read(in _lastCameraATicks) && ticks2 == Volatile.Read(in _lastCameraBTicks))
-		{
-			return false;
-		}
-		if ((cameraA.CapturedAtUtc - cameraB.CapturedAtUtc).Duration() > MaximumPairSkew)
-		{
-			return false;
-		}
-		Volatile.Write(ref _lastCameraATicks, ticks);
-		Volatile.Write(ref _lastCameraBTicks, ticks2);
-		return true;
 	}
 
 	private void ProcessPair(DualCameraCalibrationFrame cameraA, DualCameraCalibrationFrame cameraB)

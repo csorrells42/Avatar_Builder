@@ -66,8 +66,8 @@ public sealed class FaceLandmarkTemporalReconstructor
 		double? num3 = BlendshapePercent(frame, "eyeBlinkLeft");
 		double? num4 = BlendshapePercent(frame, "eyeBlinkRight");
 		double? num5 = Average(num3, num4);
-		double? mediaPipeJawOpenPercent = BlendshapePercent(frame, "jawOpen");
-		double? mediaPipeMouthClosePercent = BlendshapePercent(frame, "mouthClose");
+		double? mediaPipeJawOpenPercent = ScorePercent(frame.MediaPipeJawOpenScore) ?? BlendshapePercent(frame, "jawOpen");
+		double? mediaPipeMouthClosePercent = ScorePercent(frame.MediaPipeMouthCloseScore) ?? BlendshapePercent(frame, "mouthClose");
 		double eyeConfidence = frame.EyeConfidence;
 		double mouthConfidence = frame.MouthConfidence;
 		bool reconstructed = false;
@@ -132,6 +132,10 @@ public sealed class FaceLandmarkTemporalReconstructor
 			HeadPitchDegrees = frame.HeadPitchDegrees,
 			HeadRollDegrees = frame.HeadRollDegrees,
 			BlendshapeScores = frame.BlendshapeScores,
+			MediaPipeEyeBlinkLeftScore = frame.MediaPipeEyeBlinkLeftScore,
+			MediaPipeEyeBlinkRightScore = frame.MediaPipeEyeBlinkRightScore,
+			MediaPipeJawOpenScore = frame.MediaPipeJawOpenScore,
+			MediaPipeMouthCloseScore = frame.MediaPipeMouthCloseScore,
 			DenseMeshTopology = frame.DenseMeshTopology,
 			DenseMeshPoints = frame.DenseMeshPoints,
 			FacialTransformationMatrix = frame.FacialTransformationMatrix,
@@ -370,6 +374,11 @@ public sealed class FaceLandmarkTemporalReconstructor
 			return null;
 		}
 		return Math.Clamp(value, 0.0, 1.0) * 100.0;
+	}
+
+	private static double? ScorePercent(double? score)
+	{
+		return score.HasValue ? Math.Clamp(score.Value, 0.0, 1.0) * 100.0 : null;
 	}
 
 	private static double? Average(double? first, double? second)

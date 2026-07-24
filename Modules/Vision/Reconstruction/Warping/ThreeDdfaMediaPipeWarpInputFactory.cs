@@ -76,14 +76,28 @@ public static class ThreeDdfaMediaPipeWarpInputFactory
 			throw new InvalidOperationException("MediaPipe has not accumulated enough directly observed geometry yet.");
 		}
 		Vector3[] array = source.CanonicalSparseLandmarks.OrderBy((ThreeDdfaOnnxSidecarVertex vertex) => vertex.Index).Select(ToVector).ToArray();
-		bool legacyImageCoordinates = string.Equals(target.SchemaVersion, "mediapipe-visible-geometry-v1", StringComparison.Ordinal);
 		Dictionary<int, MediaPipeNormalizedFaceVertex> dictionary = target.Vertices.ToDictionary((MediaPipeNormalizedFaceVertex vertex) => vertex.Index);
 		CanonicalBasis sourceBasis = CanonicalBasis.Create(Average(array, SourceEyeA), Average(array, SourceEyeB), array[8], array[30]);
-		CanonicalBasis canonicalBasis = CanonicalBasis.Create(Average(dictionary, TargetEyeA, legacyImageCoordinates), Average(dictionary, TargetEyeB, legacyImageCoordinates), GetVector(dictionary, 152, legacyImageCoordinates), GetVector(dictionary, 1, legacyImageCoordinates));
+		CanonicalBasis canonicalBasis = CanonicalBasis.Create(Average(dictionary, TargetEyeA), Average(dictionary, TargetEyeB), GetVector(dictionary, 152), GetVector(dictionary, 1));
 		Vector3[] array2 = array.Select(((CanonicalBasis)sourceBasis).Transform).ToArray();
 		DenseFaceWarpVertex[] normalizedSourceVertices = (from vertex in source.CanonicalIdentityVertices
 			orderby vertex.Index
 			select ToDenseVertex(vertex.Index, sourceBasis.Transform(ToVector(vertex)))).ToArray();
+		MediaPipeNormalizedFaceVertex[] measuredSourceVertices = target.Vertices.OrderBy((MediaPipeNormalizedFaceVertex vertex) => vertex.Index).ToArray();
+		DenseFaceWarpVertex[] measuredVertices = measuredSourceVertices.Select((MediaPipeNormalizedFaceVertex vertex, int position) => ToDenseVertex(position, canonicalBasis.Transform(ToVector(vertex)))).ToArray();
+		double[] measuredConfidences = measuredSourceVertices.Select((MediaPipeNormalizedFaceVertex vertex) => Math.Clamp(vertex.ConfidencePercent / 100.0, 0.0, 1.0)).ToArray();
+		Dictionary<int, int> measuredPositions = measuredSourceVertices.Select((MediaPipeNormalizedFaceVertex vertex, int position) => new { vertex.Index, position }).ToDictionary(item => item.Index, item => item.position);
+		MeshTopologyEdge[] measuredTopologyEdges = (from edge in target.TopologyEdges
+			where measuredPositions.ContainsKey(edge.FromIndex) && measuredPositions.ContainsKey(edge.ToIndex)
+			select new MeshTopologyEdge
+			{
+				FromIndex = measuredPositions[edge.FromIndex],
+				ToIndex = measuredPositions[edge.ToIndex],
+				Role = edge.Role,
+				Source = "MediaPipe measured topology",
+				LengthPercent = edge.LengthPercent,
+				ConfidencePercent = edge.ConfidencePercent
+			}).ToArray();
 		List<DenseFaceWarpControlPoint> list = new List<DenseFaceWarpControlPoint>(LandmarkMappings.Length);
 		LandmarkMapping[] landmarkMappings = LandmarkMappings;
 		foreach (LandmarkMapping landmarkMapping in landmarkMappings)
@@ -101,7 +115,7 @@ public static class ThreeDdfaMediaPipeWarpInputFactory
 						Confidence = num2,
 						InfluenceRadius = InfluenceRadius(landmarkMapping.Role),
 						Source = ToDenseVertex(landmarkMapping.SparseIndex, array2[landmarkMapping.SparseIndex]),
-						Target = ToDenseVertex(landmarkMapping.MediaPipeIndex, canonicalBasis.Transform(ToVector(value, legacyImageCoordinates)))
+						Target = ToDenseVertex(landmarkMapping.MediaPipeIndex, canonicalBasis.Transform(ToVector(value)))
 					});
 				}
 			}
@@ -112,6 +126,8 @@ public static class ThreeDdfaMediaPipeWarpInputFactory
 			SubjectDisplayName = subjectDisplayName,
 			CreatedAtUtc = createdAtUtc,
 			SourceVertices = normalizedSourceVertices,
+			MeasuredVertices = measuredVertices,
+			MeasuredConfidences = measuredConfidences,
 			TopologyEdges = (from edge in source.DenseEdges
 				where edge.FromIndex >= 0 && edge.ToIndex >= 0 && edge.FromIndex < normalizedSourceVertices.Length && edge.ToIndex < normalizedSourceVertices.Length
 				select new MeshTopologyEdge
@@ -121,6 +137,7 @@ public static class ThreeDdfaMediaPipeWarpInputFactory
 					Role = "dense-surface",
 					Source = "3DDFA-V2 identity topology"
 				}).ToArray(),
+			MeasuredTopologyEdges = measuredTopologyEdges,
 			ControlPoints = list
 		};
 	}
@@ -190,23 +207,23 @@ public static class ThreeDdfaMediaPipeWarpInputFactory
 		return zero / indices.Length;
 	}
 
-	private static Vector3 Average(IReadOnlyDictionary<int, MediaPipeNormalizedFaceVertex> vertices, int[] indices, bool legacyImageCoordinates)
+	private static Vector3 Average(IReadOnlyDictionary<int, MediaPipeNormalizedFaceVertex> vertices, int[] indices)
 	{
 		Vector3 zero = Vector3.Zero;
 		foreach (int index in indices)
 		{
-			zero += GetVector(vertices, index, legacyImageCoordinates);
+			zero += GetVector(vertices, index);
 		}
 		return zero / indices.Length;
 	}
 
-	private static Vector3 GetVector(IReadOnlyDictionary<int, MediaPipeNormalizedFaceVertex> vertices, int index, bool legacyImageCoordinates)
+	private static Vector3 GetVector(IReadOnlyDictionary<int, MediaPipeNormalizedFaceVertex> vertices, int index)
 	{
 		if (!vertices.TryGetValue(index, out MediaPipeNormalizedFaceVertex value))
 		{
 			throw new InvalidOperationException($"MediaPipe geometry is missing required landmark {index}.");
 		}
-		return ToVector(value, legacyImageCoordinates);
+		return ToVector(value);
 	}
 
 	private static Vector3 ToVector(ThreeDdfaOnnxSidecarVertex vertex)
@@ -214,9 +231,9 @@ public static class ThreeDdfaMediaPipeWarpInputFactory
 		return new Vector3((float)vertex.X, (float)vertex.Y, (float)vertex.Z);
 	}
 
-	private static Vector3 ToVector(MediaPipeNormalizedFaceVertex vertex, bool legacyImageCoordinates)
+	private static Vector3 ToVector(MediaPipeNormalizedFaceVertex vertex)
 	{
-		return new Vector3((float)vertex.X, (float)vertex.Y * (legacyImageCoordinates ? 0.5625f : 1f), (float)vertex.Z);
+		return new Vector3((float)vertex.X, (float)vertex.Y, (float)vertex.Z);
 	}
 
 	private static DenseFaceWarpVertex ToDenseVertex(int index, Vector3 vertex)

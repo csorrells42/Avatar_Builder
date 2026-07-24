@@ -1,6 +1,6 @@
 namespace AvatarBuilder.Modules.Vision.MediaPipe.Reconstruction.Stereo;
 
-public sealed class MediaPipeStereoDenseVertexAccumulatorState
+public readonly record struct MediaPipeStereoDenseVertexAccumulatorState
 {
 	public int SampleIndex { get; init; }
 

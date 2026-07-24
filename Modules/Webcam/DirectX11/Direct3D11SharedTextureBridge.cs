@@ -1,84 +1,141 @@
 using System;
 using System.Runtime.InteropServices;
+using System.Threading;
 using AvatarBuilder.Modules.Webcam.MediaFoundation;
+using SharpGen.Runtime;
+using Vortice.Direct3D;
+using Vortice.Direct3D11;
+using Vortice.Direct3D12;
 using Vortice.DXGI;
+using static Vortice.Direct3D12.D3D12;
 
 namespace AvatarBuilder.Modules.Webcam.DirectX11;
+
+internal sealed class Direct3D11SharedTextureFrameLease : IDisposable
+{
+	private Direct3D11SharedTextureBridge? _owner;
+
+	private readonly int _slotIndex;
+
+	private int _referenceCount = 1;
+
+	public nint TextureHandle { get; }
+
+	public nint ProducerFenceHandle { get; }
+
+	public ulong ProducerFenceValue { get; }
+
+	internal Direct3D11SharedTextureFrameLease(
+		Direct3D11SharedTextureBridge owner,
+		int slotIndex,
+		nint textureHandle,
+		nint producerFenceHandle,
+		ulong producerFenceValue)
+	{
+		_owner = owner;
+		_slotIndex = slotIndex;
+		TextureHandle = textureHandle;
+		ProducerFenceHandle = producerFenceHandle;
+		ProducerFenceValue = producerFenceValue;
+	}
+
+	public Direct3D11SharedTextureFrameLease AddReference()
+	{
+		if (Interlocked.Increment(ref _referenceCount) <= 1)
+		{
+			Interlocked.Decrement(ref _referenceCount);
+			throw new ObjectDisposedException(nameof(Direct3D11SharedTextureFrameLease));
+		}
+		return this;
+	}
+
+	internal nint DuplicateTexture()
+	{
+		Direct3D11SharedTextureBridge? owner = Volatile.Read(ref _owner);
+		if (owner == null)
+		{
+			throw new ObjectDisposedException(
+				nameof(Direct3D11SharedTextureFrameLease));
+		}
+		return owner.DuplicateSlotTexture(_slotIndex);
+	}
+
+	public void Dispose()
+	{
+		if (Interlocked.Decrement(ref _referenceCount) == 0)
+		{
+			Interlocked.Exchange(ref _owner, null)?.ReleaseSlot(_slotIndex);
+		}
+	}
+}
 
 internal sealed class Direct3D11SharedTextureBridge : IDisposable
 {
 	[UnmanagedFunctionPointer(CallingConvention.StdCall)]
-	private delegate int CreateTexture2DDelegate(nint device, ref D3D11Texture2DDescription description, nint initialData, out nint texture);
-
-	[UnmanagedFunctionPointer(CallingConvention.StdCall)]
-	private delegate void CopyResourceDelegate(nint context, nint destinationResource, nint sourceResource);
+	private delegate void CopySubresourceRegionDelegate(
+		nint context,
+		nint destinationResource,
+		uint destinationSubresource,
+		uint destinationX,
+		uint destinationY,
+		uint destinationZ,
+		nint sourceResource,
+		uint sourceSubresource,
+		nint sourceBox);
 
 	[UnmanagedFunctionPointer(CallingConvention.StdCall)]
 	private delegate void FlushDelegate(nint context);
 
-	private struct D3D11Texture2DDescription
-	{
-		public uint Width;
-
-		public uint Height;
-
-		public uint MipLevels;
-
-		public uint ArraySize;
-
-		public int Format;
-
-		public DxgiSampleDescription SampleDescription;
-
-		public int Usage;
-
-		public uint BindFlags;
-
-		public uint CPUAccessFlags;
-
-		public uint MiscFlags;
-	}
-
-	private struct DxgiSampleDescription
-	{
-		public uint Count;
-
-		public uint Quality;
-	}
-
-	private const int CreateTexture2DSlot = 5;
-
-	private const int CopyResourceSlot = 47;
+	private const int CopySubresourceRegionSlot = 46;
 
 	private const int FlushSlot = 111;
 
-	private const int D3D11UsageDefault = 0;
+	private const int SharedSlotCount = 4;
 
-	private const int D3D11BindShaderResource = 8;
+	private sealed class SharedSlot
+	{
+		public ID3D11Texture2D? D3D11Texture;
 
-	private const int D3D11ResourceMiscSharedKeyedMutex = 256;
+		public ID3D12Resource? D3D12Texture;
 
-	private const int D3D11ResourceMiscSharedNtHandle = 2048;
+		public nint Texture =>
+			D3D11Texture?.NativePointer
+			?? IntPtr.Zero;
 
-	private const int DxgiFormatNv12 = 103;
+		public nint SharedHandle;
 
-	private const int DuplicateSameAccess = 2;
+		public int InUse;
+	}
 
-	private readonly nint _device;
+	private readonly object _disposeLock = new();
 
-	private readonly nint _context;
+	private nint _device;
 
-	private readonly CreateTexture2DDelegate _createTexture2D;
+	private nint _context;
 
-	private readonly CopyResourceDelegate _copyResource;
+	private readonly CopySubresourceRegionDelegate _copySubresourceRegion;
 
 	private readonly FlushDelegate _flush;
 
-	private nint _sharedTexture;
+	private ID3D11Device5? _device5;
 
-	private nint _sharedHandle;
+	private ID3D11Device1? _device1;
+
+	private ID3D11DeviceContext4? _context4;
+
+	private ID3D12Device? _d3d12Device;
+
+	private ID3D11Fence? _producerFence;
+
+	private nint _producerFenceSharedHandle;
+
+	private readonly SharedSlot[] _slots = new SharedSlot[SharedSlotCount];
+
+	private ulong _producerFenceValue;
 
 	private bool _disposed;
+
+	private bool _resourcesReleased;
 
 	public Direct3D11SharedTextureBridge(nint device, nint context, int width, int height)
 	{
@@ -98,15 +155,58 @@ internal sealed class Direct3D11SharedTextureBridge : IDisposable
 		_context = context;
 		Marshal.AddRef(_device);
 		Marshal.AddRef(_context);
-		_createTexture2D = GetComMethod<CreateTexture2DDelegate>(_device, 5);
-		_copyResource = GetComMethod<CopyResourceDelegate>(_context, 47);
+		_copySubresourceRegion =
+			GetComMethod<CopySubresourceRegionDelegate>(
+				_context,
+				CopySubresourceRegionSlot);
 		_flush = GetComMethod<FlushDelegate>(_context, 111);
-		CreateSharedTexture(width, height);
+		try
+		{
+			_device5 = QueryInterface<ID3D11Device5>(_device);
+			_device1 = QueryInterface<ID3D11Device1>(_device);
+			_context4 = QueryInterface<ID3D11DeviceContext4>(_context);
+			using (IDXGIDevice dxgiDevice =
+				QueryInterface<IDXGIDevice>(_device))
+			{
+				dxgiDevice.GetAdapter(out IDXGIAdapter adapter);
+				using (adapter)
+				{
+					_d3d12Device =
+						D3D12CreateDevice<ID3D12Device>(
+							adapter,
+							FeatureLevel.Level_12_0);
+				}
+			}
+			_producerFence = _device5.CreateFence(
+				0uL,
+				Vortice.Direct3D11.FenceFlags.Shared);
+			_producerFenceSharedHandle =
+				_producerFence.CreateSharedHandle(null, null);
+			if (_producerFenceSharedHandle == IntPtr.Zero)
+			{
+				throw new InvalidOperationException(
+					"D3D11 bridge fence did not create a shared handle.");
+			}
+			for (int index = 0; index < _slots.Length; index++)
+			{
+				_slots[index] = CreateSharedTexture(width, height);
+			}
+		}
+		catch
+		{
+			_disposed = true;
+			ReleaseResources();
+			throw;
+		}
 	}
 
-	public bool TryCopyToSharedHandle(nint sourceTexture, out nint duplicatedSharedHandle, out string? failureReason)
+	public bool TryCopyToSharedFrame(
+		nint sourceTexture,
+		int sourceSubresource,
+		out Direct3D11SharedTextureFrameLease? frame,
+		out string? failureReason)
 	{
-		duplicatedSharedHandle = IntPtr.Zero;
+		frame = null;
 		failureReason = null;
 		if (_disposed)
 		{
@@ -118,29 +218,47 @@ internal sealed class Direct3D11SharedTextureBridge : IDisposable
 			failureReason = "D3D11 source texture is missing.";
 			return false;
 		}
-		if (_sharedTexture == IntPtr.Zero || _sharedHandle == IntPtr.Zero)
+		ID3D11DeviceContext4? context4 = _context4;
+		ID3D11Fence? producerFence = _producerFence;
+		if (context4 == null
+			|| producerFence == null
+			|| _producerFenceSharedHandle == IntPtr.Zero)
 		{
 			failureReason = "D3D11 shared texture bridge is not initialized.";
 			return false;
 		}
+		int slotIndex = TryAcquireSlot();
+		if (slotIndex < 0)
+		{
+			return false;
+		}
 		try
 		{
-			_copyResource(_context, _sharedTexture, sourceTexture);
+			SharedSlot slot = _slots[slotIndex];
+			_copySubresourceRegion(
+				_context,
+				slot.Texture,
+				0u,
+				0u,
+				0u,
+				0u,
+				sourceTexture,
+				checked((uint)Math.Max(0, sourceSubresource)),
+				IntPtr.Zero);
+			ulong fenceValue = checked(++_producerFenceValue);
+			context4.Signal(producerFence, fenceValue);
 			_flush(_context);
-			if (!TryDuplicateHandle(_sharedHandle, out duplicatedSharedHandle))
-			{
-				failureReason = $"DuplicateHandle failed: {Marshal.GetLastWin32Error()}";
-				return false;
-			}
+			frame = new Direct3D11SharedTextureFrameLease(
+				this,
+				slotIndex,
+				slot.SharedHandle,
+				_producerFenceSharedHandle,
+				fenceValue);
 			return true;
 		}
 		catch (Exception ex)
 		{
-			if (duplicatedSharedHandle != IntPtr.Zero)
-			{
-				CloseHandle(duplicatedSharedHandle);
-				duplicatedSharedHandle = IntPtr.Zero;
-			}
+			ReleaseSlot(slotIndex);
 			failureReason = ex.Message;
 			return false;
 		}
@@ -151,87 +269,213 @@ internal sealed class Direct3D11SharedTextureBridge : IDisposable
 		if (!_disposed)
 		{
 			_disposed = true;
-			if (_sharedHandle != IntPtr.Zero)
-			{
-				CloseHandle(_sharedHandle);
-				_sharedHandle = IntPtr.Zero;
-			}
-			if (_sharedTexture != IntPtr.Zero)
-			{
-				Marshal.Release(_sharedTexture);
-				_sharedTexture = IntPtr.Zero;
-			}
-			Marshal.Release(_context);
-			Marshal.Release(_device);
+			TryReleaseResources();
 		}
 	}
 
-	private void CreateSharedTexture(int width, int height)
+	internal void ReleaseSlot(int slotIndex)
 	{
-		D3D11Texture2DDescription description = new D3D11Texture2DDescription
+		if ((uint)slotIndex >= (uint)_slots.Length)
 		{
-			Width = (uint)width,
-			Height = (uint)height,
-			MipLevels = 1u,
-			ArraySize = 1u,
-			Format = 103,
-			SampleDescription = new DxgiSampleDescription
-			{
-				Count = 1u,
-				Quality = 0u
-			},
-			Usage = 0,
-			BindFlags = 8u,
-			CPUAccessFlags = 0u,
-			MiscFlags = 2304u
-		};
-		MediaFoundationInterop.ThrowIfFailed(_createTexture2D(_device, ref description, IntPtr.Zero, out _sharedTexture));
-		if (_sharedTexture == IntPtr.Zero)
-		{
-			throw new InvalidOperationException("D3D11 CreateTexture2D returned no shared bridge texture.");
+			return;
 		}
-		nint ppv = IntPtr.Zero;
+		Interlocked.Exchange(ref _slots[slotIndex].InUse, 0);
+		if (_disposed)
+		{
+			TryReleaseResources();
+		}
+	}
+
+	internal nint DuplicateSlotTexture(int slotIndex)
+	{
+		if (_disposed
+			|| (uint)slotIndex >= (uint)_slots.Length
+			|| Volatile.Read(ref _slots[slotIndex].InUse) == 0)
+		{
+			throw new ObjectDisposedException(
+				nameof(Direct3D11SharedTextureFrameLease));
+		}
+		nint texture = _slots[slotIndex].Texture;
+		if (texture == IntPtr.Zero)
+		{
+			throw new ObjectDisposedException(
+				nameof(Direct3D11SharedTextureFrameLease));
+		}
+		Marshal.AddRef(texture);
+		return texture;
+	}
+
+	private int TryAcquireSlot()
+	{
+		for (int index = 0; index < _slots.Length; index++)
+		{
+			if (Interlocked.CompareExchange(
+				ref _slots[index].InUse,
+				1,
+				0) == 0)
+			{
+				return index;
+			}
+		}
+		return -1;
+	}
+
+	private SharedSlot CreateSharedTexture(int width, int height)
+	{
+		ID3D12Device d3d12Device = _d3d12Device
+			?? throw new ObjectDisposedException(
+				nameof(Direct3D11SharedTextureBridge));
+		ID3D11Device1 d3d11Device = _device1
+			?? throw new ObjectDisposedException(
+				nameof(Direct3D11SharedTextureBridge));
+		ID3D12Resource? d3d12Texture = null;
+		ID3D11Texture2D? d3d11Texture = null;
+		nint sharedHandle = IntPtr.Zero;
+		string stage = "describe D3D12 NV12 texture";
 		try
 		{
-			Guid iid = typeof(IDXGIResource1).GUID;
-			MediaFoundationInterop.ThrowIfFailed(Marshal.QueryInterface(_sharedTexture, in iid, out ppv));
-			if (ppv == IntPtr.Zero)
+			ResourceDescription description = new(
+				Vortice.Direct3D12.ResourceDimension.Texture2D,
+				0uL,
+				checked((ulong)width),
+				checked((uint)height),
+				1,
+				1,
+				Format.NV12,
+				1u,
+				0u,
+				Vortice.Direct3D12.TextureLayout.Unknown,
+				ResourceFlags.AllowRenderTarget
+					| ResourceFlags.AllowSimultaneousAccess);
+			stage = "create D3D12 shared NV12 texture";
+			d3d12Texture =
+				d3d12Device.CreateCommittedResource<ID3D12Resource>(
+					new HeapProperties(HeapType.Default),
+					HeapFlags.Shared,
+					description,
+					ResourceStates.Common);
+			stage = "create D3D12 shared texture handle";
+			sharedHandle = d3d12Device.CreateSharedHandle(
+				d3d12Texture,
+				null,
+				null);
+			if (sharedHandle == IntPtr.Zero)
 			{
-				throw new InvalidOperationException("D3D11 bridge texture did not expose IDXGIResource1.");
+				throw new InvalidOperationException(
+					"D3D12 bridge texture did not create a shared handle.");
 			}
-			using IDXGIResource1 iDXGIResource = new IDXGIResource1(ppv);
-			ppv = IntPtr.Zero;
-			_sharedHandle = iDXGIResource.CreateSharedHandle(null, SharedResourceFlags.Read, null);
-			if (_sharedHandle == IntPtr.Zero)
+			stage = "open D3D12 shared texture on D3D11";
+			d3d11Texture =
+				d3d11Device.OpenSharedResource1<ID3D11Texture2D>(
+					sharedHandle);
+			if (d3d11Texture.NativePointer == IntPtr.Zero)
 			{
-				throw new InvalidOperationException("D3D11 bridge texture did not create a shared handle.");
+				throw new InvalidOperationException(
+					"D3D11 did not open the D3D12 bridge texture.");
 			}
+			SharedSlot slot = new()
+			{
+				D3D11Texture = d3d11Texture,
+				D3D12Texture = d3d12Texture,
+				SharedHandle = sharedHandle,
+			};
+			d3d11Texture = null;
+			d3d12Texture = null;
+			sharedHandle = IntPtr.Zero;
+			return slot;
 		}
-		finally
+		catch (Exception ex)
 		{
-			if (ppv != IntPtr.Zero)
+			d3d11Texture?.Dispose();
+			d3d12Texture?.Dispose();
+			if (sharedHandle != IntPtr.Zero)
 			{
-				Marshal.Release(ppv);
+				CloseHandle(sharedHandle);
 			}
+			throw new InvalidOperationException(
+				$"Failed to {stage}: {ex.Message}",
+				ex);
 		}
+	}
+
+	private void TryReleaseResources()
+	{
+		lock (_disposeLock)
+		{
+			if (_resourcesReleased
+				|| Array.Exists(
+					_slots,
+					slot => slot != null
+						&& Volatile.Read(ref slot.InUse) != 0))
+			{
+				return;
+			}
+			ReleaseResources();
+		}
+	}
+
+	private void ReleaseResources()
+	{
+		if (_resourcesReleased)
+		{
+			return;
+		}
+		_resourcesReleased = true;
+		foreach (SharedSlot? slot in _slots)
+		{
+			if (slot == null)
+			{
+				continue;
+			}
+			if (slot.SharedHandle != IntPtr.Zero)
+			{
+				CloseHandle(slot.SharedHandle);
+				slot.SharedHandle = IntPtr.Zero;
+			}
+			slot.D3D11Texture?.Dispose();
+			slot.D3D11Texture = null;
+			slot.D3D12Texture?.Dispose();
+			slot.D3D12Texture = null;
+		}
+		if (_producerFenceSharedHandle != IntPtr.Zero)
+		{
+			CloseHandle(_producerFenceSharedHandle);
+			_producerFenceSharedHandle = IntPtr.Zero;
+		}
+		_producerFence?.Dispose();
+		_producerFence = null;
+		_context4?.Dispose();
+		_context4 = null;
+		_device1?.Dispose();
+		_device1 = null;
+		_device5?.Dispose();
+		_device5 = null;
+		_d3d12Device?.Dispose();
+		_d3d12Device = null;
+		if (_context != IntPtr.Zero)
+		{
+			Marshal.Release(_context);
+			_context = IntPtr.Zero;
+		}
+		if (_device != IntPtr.Zero)
+		{
+			Marshal.Release(_device);
+			_device = IntPtr.Zero;
+		}
+	}
+
+	private static T QueryInterface<T>(nint instance) where T : ComObject
+	{
+		Guid iid = typeof(T).GUID;
+		MediaFoundationInterop.ThrowIfFailed(
+			Marshal.QueryInterface(instance, in iid, out nint result));
+		return (T)Activator.CreateInstance(typeof(T), result)!;
 	}
 
 	private static TDelegate GetComMethod<TDelegate>(nint instance, int slot) where TDelegate : Delegate
 	{
 		return Marshal.GetDelegateForFunctionPointer<TDelegate>(Marshal.ReadIntPtr(Marshal.ReadIntPtr(instance), slot * IntPtr.Size));
 	}
-
-	private static bool TryDuplicateHandle(nint sourceHandle, out nint duplicatedHandle)
-	{
-		nint currentProcess = GetCurrentProcess();
-		return DuplicateHandle(currentProcess, sourceHandle, currentProcess, out duplicatedHandle, 0u, inheritHandle: false, 2u);
-	}
-
-	[DllImport("kernel32.dll")]
-	private static extern nint GetCurrentProcess();
-
-	[DllImport("kernel32.dll", SetLastError = true)]
-	private static extern bool DuplicateHandle(nint sourceProcessHandle, nint sourceHandle, nint targetProcessHandle, out nint targetHandle, uint desiredAccess, [MarshalAs(UnmanagedType.Bool)] bool inheritHandle, uint options);
 
 	[DllImport("kernel32.dll", SetLastError = true)]
 	private static extern bool CloseHandle(nint handle);

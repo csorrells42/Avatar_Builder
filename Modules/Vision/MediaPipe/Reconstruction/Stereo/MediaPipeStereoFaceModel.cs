@@ -6,11 +6,7 @@ namespace AvatarBuilder.Modules.Vision.MediaPipe.Reconstruction.Stereo;
 
 public sealed class MediaPipeStereoFaceModel
 {
-	public const string CurrentSchemaVersion = "calibrated-stereo-face-v1";
-
 	public static MediaPipeStereoFaceModel Empty { get; } = new MediaPipeStereoFaceModel();
-
-	public string SchemaVersion { get; init; } = "calibrated-stereo-face-v1";
 
 	public string SubjectId { get; init; } = "";
 

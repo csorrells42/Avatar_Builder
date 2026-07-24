@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.Linq;
 using System.Windows;
 using System.Windows.Media.Imaging;
 using AvatarBuilder.Modules.Vision.Common;
@@ -15,6 +14,8 @@ public sealed class CompositeFaceLandmarkTracker : IStatefulFaceLandmarkTracker,
 
 	private readonly IReadOnlyList<IFaceLandmarkTracker> _trackers;
 
+	private int _maxDetectionDimension = 960;
+
 	private string _lastBackendStatus = "waiting";
 
 	private Rect? _lastFusedFace;
@@ -23,22 +24,29 @@ public sealed class CompositeFaceLandmarkTracker : IStatefulFaceLandmarkTracker,
 
 	public string Name => "Composite landmark tracker";
 
-	public bool IsAvailable => _trackers.Any((IFaceLandmarkTracker tracker) => tracker.IsAvailable);
+	public bool IsAvailable
+	{
+		get
+		{
+			foreach (IFaceLandmarkTracker tracker in _trackers)
+			{
+				if (tracker.IsAvailable)
+				{
+					return true;
+				}
+			}
+			return false;
+		}
+	}
 
 	public string LastBackendStatus => _lastBackendStatus;
 
 	public int MaxDetectionDimension
 	{
-		get
-		{
-			if (_trackers.Count != 0)
-			{
-				return _trackers.Max((IFaceLandmarkTracker tracker) => tracker.MaxDetectionDimension);
-			}
-			return 960;
-		}
+		get => _maxDetectionDimension;
 		set
 		{
+			_maxDetectionDimension = value;
 			foreach (IFaceLandmarkTracker tracker in _trackers)
 			{
 				tracker.MaxDetectionDimension = value;
@@ -46,19 +54,23 @@ public sealed class CompositeFaceLandmarkTracker : IStatefulFaceLandmarkTracker,
 		}
 	}
 
-	public CompositeFaceLandmarkTracker()
-		: this(CreateDefaultTrackers())
+	public CompositeFaceLandmarkTracker(MediaPipeExecutionBackend executionBackend = MediaPipeExecutionBackend.Cpu)
+		: this(CreateDefaultTrackers(executionBackend))
 	{
 	}
 
 	public CompositeFaceLandmarkTracker(IReadOnlyList<IFaceLandmarkTracker> trackers)
 	{
 		_trackers = trackers;
+		for (int i = 0; i < trackers.Count; i++)
+		{
+			_maxDetectionDimension = Math.Max(_maxDetectionDimension, trackers[i].MaxDetectionDimension);
+		}
 	}
 
 	public FaceLandmarkTrackingResult Detect(BitmapSource bitmap, DateTime capturedAtUtc)
 	{
-		List<string> list = new List<string>();
+		List<string>? list = null;
 		FaceLandmarkTrackingResult faceLandmarkTrackingResult = null;
 		IFaceLandmarkCropRefiner faceLandmarkCropRefiner = null;
 		foreach (IFaceLandmarkTracker tracker in _trackers)
@@ -72,37 +84,31 @@ public sealed class CompositeFaceLandmarkTracker : IStatefulFaceLandmarkTracker,
 				FaceLandmarkTrackingResult faceLandmarkTrackingResult2 = tracker.Detect(bitmap, capturedAtUtc);
 				if (!string.IsNullOrWhiteSpace(faceLandmarkTrackingResult2.BackendStatus))
 				{
-					list.Add(tracker.Name + ": " + faceLandmarkTrackingResult2.BackendStatus);
+					(list ??= new List<string>()).Add(tracker.Name + ": " + faceLandmarkTrackingResult2.BackendStatus);
 				}
 				continue;
 			}
 			FaceLandmarkTrackingResult faceLandmarkTrackingResult3 = tracker.Detect(bitmap, capturedAtUtc);
 			if (faceLandmarkTrackingResult3.HasFace)
 			{
-				list.Add(faceLandmarkTrackingResult3.BackendName + ": " + faceLandmarkTrackingResult3.BackendStatus);
 				if (HasMediaPipeDenseLock(faceLandmarkTrackingResult3) && HasUsableFaceCueGeometry(faceLandmarkTrackingResult3))
 				{
-					_lastBackendStatus = string.Join(" | ", list);
+					_lastBackendStatus = faceLandmarkTrackingResult3.BackendStatus;
 					_lastFusedFace = GetFaceBounds(faceLandmarkTrackingResult3) ?? _lastFusedFace;
 					_lastFusedFaceCapturedAtUtc = capturedAtUtc;
-					return new FaceLandmarkTrackingResult
-					{
-						BackendName = faceLandmarkTrackingResult3.BackendName,
-						BackendStatus = _lastBackendStatus,
-						FeatureDetection = faceLandmarkTrackingResult3.FeatureDetection,
-						LandmarkFrame = faceLandmarkTrackingResult3.LandmarkFrame,
-						Diagnostics = faceLandmarkTrackingResult3.Diagnostics
-					};
+					return faceLandmarkTrackingResult3;
 				}
+				(list ??= new List<string>()).Add(faceLandmarkTrackingResult3.BackendName + ": " + faceLandmarkTrackingResult3.BackendStatus);
 				faceLandmarkTrackingResult = ((faceLandmarkTrackingResult == null) ? faceLandmarkTrackingResult3 : FuseResults(faceLandmarkTrackingResult, faceLandmarkTrackingResult3, capturedAtUtc, _lastFusedFace));
 			}
 			else if (!string.IsNullOrWhiteSpace(faceLandmarkTrackingResult3.BackendStatus))
 			{
-				list.Add(faceLandmarkTrackingResult3.BackendName + ": " + faceLandmarkTrackingResult3.BackendStatus);
+				(list ??= new List<string>()).Add(faceLandmarkTrackingResult3.BackendName + ": " + faceLandmarkTrackingResult3.BackendStatus);
 			}
 		}
 		if (faceLandmarkTrackingResult != null)
 		{
+			list ??= new List<string>();
 			faceLandmarkTrackingResult = TryRefineWithFaceCrop(bitmap, capturedAtUtc, faceLandmarkTrackingResult, faceLandmarkCropRefiner, list);
 			_lastBackendStatus = string.Join(" | ", list);
 			_lastFusedFace = GetFaceBounds(faceLandmarkTrackingResult) ?? _lastFusedFace;
@@ -116,6 +122,7 @@ public sealed class CompositeFaceLandmarkTracker : IStatefulFaceLandmarkTracker,
 				Diagnostics = faceLandmarkTrackingResult.Diagnostics
 			};
 		}
+		list ??= new List<string>();
 		FaceLandmarkTrackingResult faceLandmarkTrackingResult4 = TryRecoverWithPreviousFaceCrop(bitmap, capturedAtUtc, faceLandmarkCropRefiner, list);
 		if (faceLandmarkTrackingResult4 != null)
 		{
@@ -152,12 +159,12 @@ public sealed class CompositeFaceLandmarkTracker : IStatefulFaceLandmarkTracker,
 		}
 	}
 
-	private static IReadOnlyList<IFaceLandmarkTracker> CreateDefaultTrackers()
+	private static IReadOnlyList<IFaceLandmarkTracker> CreateDefaultTrackers(MediaPipeExecutionBackend executionBackend)
 	{
 		List<IFaceLandmarkTracker> list = new List<IFaceLandmarkTracker>(3);
 		try
 		{
-			AddOwnedTracker(list, () => new MediaPipeFaceLandmarkerSidecarTracker());
+			AddOwnedTracker(list, () => new MediaPipeFaceLandmarkerSidecarTracker(executionBackend));
 			AddOwnedTracker(list, () => new OpenCvFacemarkLandmarkTracker());
 			AddOwnedTracker(list, () => new OpenCvApertureLandmarkTracker());
 			return list;
@@ -298,6 +305,10 @@ public sealed class CompositeFaceLandmarkTracker : IStatefulFaceLandmarkTracker,
 			HeadPitchDegrees = landmarkFrame.HeadPitchDegrees,
 			HeadRollDegrees = landmarkFrame.HeadRollDegrees,
 			BlendshapeScores = ((landmarkFrame.BlendshapeScores.Count > 0) ? landmarkFrame.BlendshapeScores : landmarkFrame2.BlendshapeScores),
+			MediaPipeEyeBlinkLeftScore = landmarkFrame.MediaPipeEyeBlinkLeftScore ?? landmarkFrame2.MediaPipeEyeBlinkLeftScore,
+			MediaPipeEyeBlinkRightScore = landmarkFrame.MediaPipeEyeBlinkRightScore ?? landmarkFrame2.MediaPipeEyeBlinkRightScore,
+			MediaPipeJawOpenScore = landmarkFrame.MediaPipeJawOpenScore ?? landmarkFrame2.MediaPipeJawOpenScore,
+			MediaPipeMouthCloseScore = landmarkFrame.MediaPipeMouthCloseScore ?? landmarkFrame2.MediaPipeMouthCloseScore,
 			DenseMeshTopology = ((landmarkFrame.DenseMeshPoints.Count > 0) ? landmarkFrame.DenseMeshTopology : landmarkFrame2.DenseMeshTopology),
 			DenseMeshPoints = ((landmarkFrame.DenseMeshPoints.Count > 0) ? landmarkFrame.DenseMeshPoints : landmarkFrame2.DenseMeshPoints),
 			FacialTransformationMatrix = ((landmarkFrame.FacialTransformationMatrix.Count > 0) ? landmarkFrame.FacialTransformationMatrix : landmarkFrame2.FacialTransformationMatrix),
@@ -540,10 +551,19 @@ public sealed class CompositeFaceLandmarkTracker : IStatefulFaceLandmarkTracker,
 		{
 			return null;
 		}
-		double num = points.Min((Point point) => point.X);
-		double num2 = points.Max((Point point) => point.X);
-		double num3 = points.Min((Point point) => point.Y);
-		double num4 = points.Max((Point point) => point.Y);
+		Point point = points[0];
+		double num = point.X;
+		double num2 = point.X;
+		double num3 = point.Y;
+		double num4 = point.Y;
+		for (int i = 1; i < points.Count; i++)
+		{
+			point = points[i];
+			num = Math.Min(num, point.X);
+			num2 = Math.Max(num2, point.X);
+			num3 = Math.Min(num3, point.Y);
+			num4 = Math.Max(num4, point.Y);
+		}
 		if (!(num2 <= num) && !(num4 <= num3))
 		{
 			return new Rect(num, num3, num2 - num, num4 - num3);
@@ -556,9 +576,12 @@ public sealed class CompositeFaceLandmarkTracker : IStatefulFaceLandmarkTracker,
 		_lastBackendStatus = "waiting";
 		_lastFusedFace = null;
 		_lastFusedFaceCapturedAtUtc = DateTime.MinValue;
-		foreach (IStatefulFaceLandmarkTracker item in _trackers.OfType<IStatefulFaceLandmarkTracker>())
+		foreach (IFaceLandmarkTracker tracker in _trackers)
 		{
-			item.Reset();
+			if (tracker is IStatefulFaceLandmarkTracker statefulTracker)
+			{
+				statefulTracker.Reset();
+			}
 		}
 	}
 }

@@ -118,6 +118,15 @@ public sealed class CameraFrame : IDisposable
 		return new CameraFrame(Array.Empty<byte>(), width, height, 0, pooledBufferOwner.Buffer, stride, format, pooledBufferOwner);
 	}
 
+	public static CameraFrame RentBgra(int width, int height, int stride, string format = "bgra32")
+	{
+		ArgumentOutOfRangeException.ThrowIfNegativeOrZero(width, "width");
+		ArgumentOutOfRangeException.ThrowIfNegativeOrZero(height, "height");
+		ArgumentOutOfRangeException.ThrowIfLessThan(stride, checked(width * 4), "stride");
+		PooledBufferOwner pooledBufferOwner = new PooledBufferOwner(checked(stride * height));
+		return new CameraFrame(pooledBufferOwner.Buffer, width, height, stride, null, 0, format, pooledBufferOwner);
+	}
+
 	public CameraFrame Duplicate()
 	{
 		ObjectDisposedException.ThrowIf(Volatile.Read(in _disposed) != 0, this);
